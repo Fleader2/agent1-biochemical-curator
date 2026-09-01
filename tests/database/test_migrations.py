@@ -39,6 +39,13 @@ _GROUP_A_TABLES = {
     "experimental_condition",
 }
 
+_GROUP_B_TABLES = {
+    "gene",
+    "protein",
+    "enzyme_complex",
+    "enzyme_complex_member",
+}
+
 
 def _head_revision(alembic_config: Config) -> str:
     script = ScriptDirectory.from_config(alembic_config)
@@ -108,14 +115,14 @@ def test_0002_reference_data_revises_0001_baseline(alembic_config: Config) -> No
     assert revision.down_revision == "0001_baseline"
 
 
-def test_upgrade_to_head_creates_exactly_group_a_tables(
+def test_upgrade_to_0002_creates_exactly_group_a_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """Migration 0002 creates only the six Group A tables, nothing else."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0002_reference_data")
 
     engine = create_engine(scratch_database)
     try:
@@ -153,7 +160,8 @@ def test_upgrade_to_head_seeds_standard_compartments(
 def test_downgrade_from_head_to_0001_baseline_removes_group_a_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
-    """Downgrading past 0002 leaves no Group A tables, indexes, or enum types."""
+    """A full downgrade from head leaves no domain tables, indexes, or enum
+    types from either Group A or Group B."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -169,11 +177,70 @@ def test_downgrade_from_head_to_0001_baseline_removes_group_a_tables(
             stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
             assert stored == "0001_baseline"
 
-            # Group A introduces no native enum type (it uses none of the
-            # seven enums in app/models/enums.py), so none should remain.
+            # Neither Group A nor Group B introduces a native enum type (no
+            # Group B column uses any of the seven enums in
+            # app/models/enums.py either), so none should remain.
             enum_types = connection.execute(
                 text("SELECT typname FROM pg_type WHERE typtype = 'e'")
             ).scalars().all()
             assert enum_types == []
+    finally:
+        engine.dispose()
+
+
+def test_0003_gene_protein_complex_revises_0002_reference_data(alembic_config: Config) -> None:
+    """Migration 0003 chains directly onto migration 0002."""
+    script = ScriptDirectory.from_config(alembic_config)
+    revision = script.get_revision("0003_gene_protein_complex")
+
+    assert revision is not None
+    assert revision.down_revision == "0002_reference_data"
+
+
+def test_upgrade_to_head_creates_group_a_and_group_b_tables(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Migration 0003 adds exactly the four Group B tables on top of Group A."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == _GROUP_A_TABLES | _GROUP_B_TABLES | {"alembic_version"}
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0003_gene_protein_complex"
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_from_head_to_0002_removes_only_group_b_tables(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Downgrading past 0003 removes only Group B, leaving Group A (including
+    its seeded compartments) untouched."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0002_reference_data")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == _GROUP_A_TABLES | {"alembic_version"}
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0002_reference_data"
+
+            compartment_count = connection.execute(
+                text("SELECT count(*) FROM compartment")
+            ).scalar()
+            assert compartment_count == len(_STANDARD_COMPARTMENT_NAMES)
     finally:
         engine.dispose()
