@@ -1,0 +1,192 @@
+# File: .cursor/rules/02-architecture.mdc
+
+---
+description: Python architecture, project structure, dependency boundaries, connector design, LLM integration, and coding conventions for Agent 1
+globs:
+  - "**/*.py"
+  - "pyproject.toml"
+  - "prompts/**"
+alwaysApply: false
+---
+
+# Architecture Rules
+
+For all Python implementation work, follow:
+
+- `docs/01_overview.md`
+- `docs/03_agent_behavior.md`
+
+These documents are authoritative.
+
+## Technology
+
+Use:
+
+- Python 3.12+
+- FastAPI
+- PostgreSQL
+- SQLAlchemy 2.x
+- Pydantic
+- Alembic
+- HTTPX
+- pytest
+- Ruff
+
+Use modern SQLAlchemy syntax:
+
+```python
+Mapped[]
+mapped_column()
+relationship()
+```
+
+Do not introduce legacy SQLAlchemy APIs.
+
+## Module Boundaries
+
+Keep responsibilities separated among:
+
+- `api`
+- `agents`
+- `connectors`
+- `models`
+- `schemas`
+- `scoring`
+- `normalization`
+- `validation`
+- `exports`
+- `config`
+
+Do not create a monolithic `Agent1` class containing all behavior.
+
+Prefer small, focused services and functions.
+
+## Dependency Direction
+
+Scientific orchestration may depend on connectors, schemas, normalization, scoring, and validation.
+
+Connectors must not contain curation policy.
+
+Database models must not contain LLM logic.
+
+API routes must not contain substantial scientific business logic.
+
+Export code must not perform new scientific inference.
+
+## Connector Isolation
+
+Each external scientific source must have an isolated connector.
+
+Examples:
+
+- PubMed
+- PMC
+- KEGG
+- BRENDA
+- SGD
+- BioCyc
+- MetaCyc
+- UniProt
+- ChEBI
+- Rhea
+
+Source-specific parsing must stay inside the appropriate connector or normalization layer.
+
+Each connector should support behavior equivalent to:
+
+- `search()`
+- `fetch()`
+- `normalize()`
+- caching
+- rate limiting
+- retry/backoff
+
+Connector failures must remain distinguishable from legitimate zero-result searches.
+
+## LLM Abstraction
+
+Use an internal LLM provider interface.
+
+Do not spread provider-specific SDK calls throughout the application.
+
+LLM outputs must use structured schemas validated by Pydantic.
+
+Long prompts must live under:
+
+`prompts/`
+
+Do not embed long prompts directly in Python functions.
+
+Use low-randomness model settings for scientific extraction and classification.
+
+## Deterministic Logic
+
+Use deterministic software rather than LLM reasoning for:
+
+- unit conversion
+- mass balance
+- charge balance
+- identifier validation
+- duplicate detection
+- confidence calculation
+- enum validation
+- referential integrity
+- export validation
+
+Use AI for interpretation.
+
+Use software for verification.
+
+## Coding Style
+
+Use type hints throughout production code.
+
+Prefer:
+
+- small functions
+- explicit transformations
+- dependency injection where useful
+- composition over inheritance
+- immutable or narrowly scoped state
+
+Avoid:
+
+- hidden global mutable state
+- unnecessary metaprogramming
+- large service classes
+- speculative abstractions
+- broad unrelated refactoring
+
+## Configuration
+
+Credentials and environment-dependent settings must come from configuration or environment variables.
+
+Never hard-code:
+
+- API keys
+- database credentials
+- LLM credentials
+- BRENDA credentials
+- NCBI API keys
+
+Maintain `.env.example` with variable names and safe placeholders only.
+
+## Implementation Discipline
+
+When implementing a feature:
+
+1. Read the relevant specification.
+2. Inspect existing code.
+3. Implement the smallest coherent change.
+4. Add tests.
+5. Run relevant tests.
+6. Run Ruff.
+7. Report unresolved specification conflicts.
+
+Do not implement unrelated future phases unless required as a prerequisite.
+
+## Final Architecture Rule
+
+Prefer explicit, testable scientific workflows over clever abstractions.
+
+Architecture must make provenance and uncertainty easier to preserve, not easier to hide.
