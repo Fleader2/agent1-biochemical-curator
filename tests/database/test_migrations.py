@@ -84,6 +84,12 @@ _GROUP_F_ENUM_TYPES = {
     "regulatory_effect",
 }
 
+_GROUP_G_TABLES = {
+    "external_record",
+    "source_cross_reference",
+    "review_event",
+}
+
 
 def _head_revision(alembic_config: Config) -> str:
     script = ScriptDirectory.from_config(alembic_config)
@@ -199,7 +205,7 @@ def test_downgrade_from_head_to_0001_baseline_removes_group_a_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """A full downgrade from head leaves no domain tables, indexes, or enum
-    types from Group A, B, C, D, E, or F."""
+    types from Group A, B, C, D, E, F, or G."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -548,7 +554,7 @@ def test_0007_regulation_assumptions_gaps_revises_0006_kinetic_measurement(
     assert revision.down_revision == "0006_kinetic_measurement"
 
 
-def test_upgrade_to_head_creates_group_f_tables_and_enum_type(
+def test_upgrade_to_0007_creates_group_f_tables_and_enum_type(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """Migration 0007 adds exactly the three Group F tables and exactly the
@@ -558,7 +564,7 @@ def test_upgrade_to_head_creates_group_f_tables_and_enum_type(
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0007_regulation_assumptions_gaps")
 
     engine = create_engine(scratch_database)
     try:
@@ -599,12 +605,13 @@ def test_upgrade_to_head_creates_group_f_tables_and_enum_type(
         engine.dispose()
 
 
-def test_downgrade_from_head_to_0006_removes_only_group_f_tables_and_enum_type(
+def test_downgrade_from_head_to_0006_removes_group_f_and_g_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
-    """Downgrading past 0007 removes only Group F's three tables and the one
-    enum type it introduced (regulatory_effect). Groups A-E remain intact,
-    and all six enum types owned by 0004 and 0005 survive unchanged."""
+    """Downgrading from head (0008) past 0007 removes Group F's three tables
+    plus its one enum (regulatory_effect), and Group G's three tables (which
+    introduce no enum of their own). Groups A-E remain intact, and all six
+    enum types owned by 0004 and 0005 survive unchanged."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -633,6 +640,108 @@ def test_downgrade_from_head_to_0006_removes_only_group_f_tables_and_enum_type(
                 ).scalars().all()
             )
             assert enum_types == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES
+
+            compartment_count = connection.execute(
+                text("SELECT count(*) FROM compartment")
+            ).scalar()
+            assert compartment_count == len(_STANDARD_COMPARTMENT_NAMES)
+    finally:
+        engine.dispose()
+
+
+def test_0008_external_records_reviews_revises_0007_regulation_assumptions_gaps(
+    alembic_config: Config,
+) -> None:
+    """Migration 0008 chains directly onto migration 0007."""
+    script = ScriptDirectory.from_config(alembic_config)
+    revision = script.get_revision("0008_external_records_reviews")
+
+    assert revision is not None
+    assert revision.down_revision == "0007_regulation_assumptions_gaps"
+
+
+def test_upgrade_to_head_creates_group_g_tables_with_no_new_enum(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Migration 0008 adds exactly the three Group G tables on top of
+    Groups A-F and introduces no new enum type — it reuses source_type and
+    curation_state rather than recreating either, and no unrelated enum
+    type appears."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES
+                | _GROUP_B_TABLES
+                | _GROUP_C_TABLES
+                | _GROUP_D_TABLES
+                | _GROUP_E_TABLES
+                | _GROUP_F_TABLES
+                | _GROUP_G_TABLES
+                | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0008_external_records_reviews"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert (
+                enum_types
+                == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES | _GROUP_F_ENUM_TYPES
+            )
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_from_head_to_0007_removes_only_group_g_tables(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Downgrading past 0008 removes only Group G's three tables. There is
+    no enum type for its downgrade to drop, so all seven enum types owned
+    by 0004, 0005, and 0007 remain exactly as they were, and Groups A-F
+    remain intact."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0007_regulation_assumptions_gaps")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES
+                | _GROUP_B_TABLES
+                | _GROUP_C_TABLES
+                | _GROUP_D_TABLES
+                | _GROUP_E_TABLES
+                | _GROUP_F_TABLES
+                | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0007_regulation_assumptions_gaps"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert (
+                enum_types
+                == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES | _GROUP_F_ENUM_TYPES
+            )
 
             compartment_count = connection.execute(
                 text("SELECT count(*) FROM compartment")
