@@ -16,6 +16,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.claim import Claim
     from app.models.compartment import Compartment
     from app.models.enzyme_complex import EnzymeComplex
     from app.models.gene import Gene
@@ -67,3 +68,4 @@ class Organism(Base):
     proteins: Mapped[list[Protein]] = relationship(back_populates="organism")
     enzyme_complexes: Mapped[list[EnzymeComplex]] = relationship(back_populates="organism")
     reactions: Mapped[list[Reaction]] = relationship(back_populates="organism")
+    claims: Mapped[list[Claim]] = relationship(back_populates="organism")

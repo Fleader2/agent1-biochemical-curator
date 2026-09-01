@@ -57,6 +57,19 @@ _GROUP_C_ENUM_TYPES = {
     "reaction_participant_role",
 }
 
+_GROUP_D_TABLES = {
+    "claim",
+    "evidence",
+    "evidence_condition",
+}
+
+_GROUP_D_ENUM_TYPES = {
+    "claim_status",
+    "confidence_class",
+    "evidence_type",
+    "source_type",
+}
+
 
 def _head_revision(alembic_config: Config) -> str:
     script = ScriptDirectory.from_config(alembic_config)
@@ -172,7 +185,7 @@ def test_downgrade_from_head_to_0001_baseline_removes_group_a_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """A full downgrade from head leaves no domain tables, indexes, or enum
-    types from Group A, B, or C."""
+    types from Group A, B, C, or D."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -189,9 +202,9 @@ def test_downgrade_from_head_to_0001_baseline_removes_group_a_tables(
             assert stored == "0001_baseline"
 
             # Neither Group A nor Group B introduces a native enum type.
-            # Group C's two enum types (curation_state,
-            # reaction_participant_role) are dropped by 0004's own
-            # downgrade, so none should remain after unwinding to base.
+            # Group C's two enum types and Group D's four are each dropped
+            # by their own migration's downgrade, so none should remain
+            # after unwinding all the way to base.
             enum_types = connection.execute(
                 text("SELECT typname FROM pg_type WHERE typtype = 'e'")
             ).scalars().all()
@@ -272,7 +285,7 @@ def test_0004_reaction_revises_0003_gene_protein_complex(alembic_config: Config)
     assert revision.down_revision == "0003_gene_protein_complex"
 
 
-def test_upgrade_to_head_creates_group_c_tables_and_enum_types(
+def test_upgrade_to_0004_creates_group_c_tables_and_enum_types(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """Migration 0004 adds exactly the three Group C tables and exactly the
@@ -280,7 +293,7 @@ def test_upgrade_to_head_creates_group_c_tables_and_enum_types(
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0004_reaction")
 
     engine = create_engine(scratch_database)
     try:
@@ -304,11 +317,11 @@ def test_upgrade_to_head_creates_group_c_tables_and_enum_types(
         engine.dispose()
 
 
-def test_downgrade_from_head_to_0003_removes_only_group_c_tables_and_enum_types(
+def test_downgrade_from_head_to_0003_removes_group_c_and_d_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
-    """Downgrading past 0004 removes only Group C's tables and the two enum
-    types it introduced, leaving Groups A and B completely intact."""
+    """Downgrading from head (0005) past 0004 removes Group C and Group D
+    and all six of their enum types, leaving Groups A and B intact."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -328,6 +341,89 @@ def test_downgrade_from_head_to_0003_removes_only_group_c_tables_and_enum_types(
                 text("SELECT typname FROM pg_type WHERE typtype = 'e'")
             ).scalars().all()
             assert enum_types == []
+
+            compartment_count = connection.execute(
+                text("SELECT count(*) FROM compartment")
+            ).scalar()
+            assert compartment_count == len(_STANDARD_COMPARTMENT_NAMES)
+    finally:
+        engine.dispose()
+
+
+def test_0005_claim_evidence_revises_0004_reaction(alembic_config: Config) -> None:
+    """Migration 0005 chains directly onto migration 0004."""
+    script = ScriptDirectory.from_config(alembic_config)
+    revision = script.get_revision("0005_claim_evidence")
+
+    assert revision is not None
+    assert revision.down_revision == "0004_reaction"
+
+
+def test_upgrade_to_head_creates_group_d_tables_and_enum_types(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Migration 0005 adds exactly the three Group D tables and exactly the
+    four enum types Group D actually uses, on top of Groups A, B, and C. The
+    two enum types 0004 already created remain present and unchanged."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES
+                | _GROUP_B_TABLES
+                | _GROUP_C_TABLES
+                | _GROUP_D_TABLES
+                | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0005_claim_evidence"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert enum_types == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_from_head_to_0004_removes_only_group_d_tables_and_enum_types(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Downgrading past 0005 removes only Group D's tables and the four enum
+    types it introduced. Groups A, B, and C remain intact, and 0004's two
+    enum types (curation_state, reaction_participant_role) survive."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0004_reaction")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES | _GROUP_B_TABLES | _GROUP_C_TABLES | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0004_reaction"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert enum_types == _GROUP_C_ENUM_TYPES
 
             compartment_count = connection.execute(
                 text("SELECT count(*) FROM compartment")
