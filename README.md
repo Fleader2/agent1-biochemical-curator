@@ -286,6 +286,12 @@ pytest -m live
 
 # Current Development Roadmap
 
+`IMPLEMENTATION_PLAN.md` defines the detailed engineering build order (project
+skeleton, database schema, individual connectors, API, testing, deployment,
+and so on). The roadmap below instead describes the higher-level scientific
+capability progression; each stage here may span one or more phases of the
+detailed engineering plan.
+
 ## Phase 1
 
 Project infrastructure
@@ -298,6 +304,10 @@ Project infrastructure
 
 ## Phase 2
 
+Database schema
+
+## Phase 3
+
 Scientific connectors
 
 - PubMed
@@ -306,35 +316,35 @@ Scientific connectors
 - SGD
 - BioCyc
 
-## Phase 3
+## Phase 4
 
 Entity normalization
 
-## Phase 4
+## Phase 5
 
 Evidence extraction
 
-## Phase 5
+## Phase 6
 
 Claim generation
 
-## Phase 6
+## Phase 7
 
 Confidence scoring
 
-## Phase 7
+## Phase 8
 
 Scientific validation
 
-## Phase 8
+## Phase 9
 
 Knowledge-gap generation
 
-## Phase 9
+## Phase 10
 
 Export generation
 
-## Phase 10
+## Phase 11
 
 Integration with Agent 2
 
