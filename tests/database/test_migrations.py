@@ -74,6 +74,16 @@ _GROUP_E_TABLES = {
     "kinetic_measurement",
 }
 
+_GROUP_F_TABLES = {
+    "regulatory_interaction",
+    "modeling_assumption",
+    "knowledge_gap",
+}
+
+_GROUP_F_ENUM_TYPES = {
+    "regulatory_effect",
+}
+
 
 def _head_revision(alembic_config: Config) -> str:
     script = ScriptDirectory.from_config(alembic_config)
@@ -189,7 +199,7 @@ def test_downgrade_from_head_to_0001_baseline_removes_group_a_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """A full downgrade from head leaves no domain tables, indexes, or enum
-    types from Group A, B, C, D, or E."""
+    types from Group A, B, C, D, E, or F."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -447,7 +457,7 @@ def test_0006_kinetic_measurement_revises_0005_claim_evidence(alembic_config: Co
     assert revision.down_revision == "0005_claim_evidence"
 
 
-def test_upgrade_to_head_creates_only_kinetic_measurement_table(
+def test_upgrade_to_0006_creates_only_kinetic_measurement_table(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """Migration 0006 adds exactly the kinetic_measurement table on top of
@@ -456,7 +466,7 @@ def test_upgrade_to_head_creates_only_kinetic_measurement_table(
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0006_kinetic_measurement")
 
     engine = create_engine(scratch_database)
     try:
@@ -484,12 +494,13 @@ def test_upgrade_to_head_creates_only_kinetic_measurement_table(
         engine.dispose()
 
 
-def test_downgrade_from_head_to_0005_removes_only_kinetic_measurement_table(
+def test_downgrade_from_head_to_0005_removes_kinetic_measurement_and_group_f(
     scratch_database: str, alembic_config: Config
 ) -> None:
-    """Downgrading past 0006 removes only kinetic_measurement. There is no
-    enum type for its downgrade to drop, so all six enum types owned by 0004
-    and 0005 remain exactly as they were, and Groups A-D remain intact."""
+    """Downgrading from head (0007) past 0006 removes kinetic_measurement
+    (no enum of its own) and Group F's three tables plus its one enum
+    (regulatory_effect). All six enum types owned by 0004 and 0005 remain
+    exactly as they were, and Groups A-D remain intact."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -510,6 +521,111 @@ def test_downgrade_from_head_to_0005_removes_only_kinetic_measurement_table(
 
             stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
             assert stored == "0005_claim_evidence"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert enum_types == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES
+
+            compartment_count = connection.execute(
+                text("SELECT count(*) FROM compartment")
+            ).scalar()
+            assert compartment_count == len(_STANDARD_COMPARTMENT_NAMES)
+    finally:
+        engine.dispose()
+
+
+def test_0007_regulation_assumptions_gaps_revises_0006_kinetic_measurement(
+    alembic_config: Config,
+) -> None:
+    """Migration 0007 chains directly onto migration 0006."""
+    script = ScriptDirectory.from_config(alembic_config)
+    revision = script.get_revision("0007_regulation_assumptions_gaps")
+
+    assert revision is not None
+    assert revision.down_revision == "0006_kinetic_measurement"
+
+
+def test_upgrade_to_head_creates_group_f_tables_and_enum_type(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Migration 0007 adds exactly the three Group F tables and exactly the
+    one new enum type (regulatory_effect) it genuinely needs, on top of
+    Groups A-E. All six earlier enum types remain present and unchanged, and
+    no unrelated enum type appears."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES
+                | _GROUP_B_TABLES
+                | _GROUP_C_TABLES
+                | _GROUP_D_TABLES
+                | _GROUP_E_TABLES
+                | _GROUP_F_TABLES
+                | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0007_regulation_assumptions_gaps"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert enum_types == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES | _GROUP_F_ENUM_TYPES
+
+            regulatory_effect_values = connection.execute(
+                text(
+                    "SELECT enumlabel FROM pg_enum "
+                    "JOIN pg_type ON pg_enum.enumtypid = pg_type.oid "
+                    "WHERE pg_type.typname = 'regulatory_effect' "
+                    "ORDER BY enumsortorder"
+                )
+            ).scalars().all()
+            from app.models.enums import RegulatoryEffect
+
+            assert regulatory_effect_values == [member.value for member in RegulatoryEffect]
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_from_head_to_0006_removes_only_group_f_tables_and_enum_type(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Downgrading past 0007 removes only Group F's three tables and the one
+    enum type it introduced (regulatory_effect). Groups A-E remain intact,
+    and all six enum types owned by 0004 and 0005 survive unchanged."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0006_kinetic_measurement")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES
+                | _GROUP_B_TABLES
+                | _GROUP_C_TABLES
+                | _GROUP_D_TABLES
+                | _GROUP_E_TABLES
+                | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0006_kinetic_measurement"
 
             enum_types = set(
                 connection.execute(

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from app.models.kinetic_measurement import KineticMeasurement
     from app.models.organism import Organism
     from app.models.publication import Publication
+    from app.models.regulatory_interaction import RegulatoryInteraction
 
 # Type creation is owned exclusively by migration 0005_claim_evidence
 # (create_type=False): these ORM-level Enum instances only describe the
@@ -104,6 +105,9 @@ class Claim(Base):
 
     organism: Mapped[Organism | None] = relationship(back_populates="claims")
     evidence_records: Mapped[list[Evidence]] = relationship(back_populates="claim")
+    regulatory_interactions: Mapped[list[RegulatoryInteraction]] = relationship(
+        back_populates="claim"
+    )
 
 
 class Evidence(Base):

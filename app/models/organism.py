@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from app.models.kinetic_measurement import KineticMeasurement
     from app.models.protein import Protein
     from app.models.reaction import Reaction
+    from app.models.regulatory_interaction import RegulatoryInteraction
 
 
 class Organism(Base):
@@ -71,5 +72,8 @@ class Organism(Base):
     reactions: Mapped[list[Reaction]] = relationship(back_populates="organism")
     claims: Mapped[list[Claim]] = relationship(back_populates="organism")
     kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
+        back_populates="organism"
+    )
+    regulatory_interactions: Mapped[list[RegulatoryInteraction]] = relationship(
         back_populates="organism"
     )

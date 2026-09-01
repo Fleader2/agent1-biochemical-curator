@@ -1,12 +1,13 @@
 """SQLAlchemy ORM models.
 
 Group A reference-data tables, Group B gene/protein/enzyme-complex tables,
-Group C reaction tables, Group D claim/evidence tables, and Group E's
-kinetic_measurement table (``docs/02_database_schema.md``) are defined here.
-Submodules are imported so that ``Base.metadata`` is fully populated as soon
-as ``app.models`` is imported, which is what ``migrations/env.py`` relies on
-for Alembic to discover table metadata. Remaining tables are added in later
-phases.
+Group C reaction tables, Group D claim/evidence tables, Group E's
+kinetic_measurement table, and Group F's regulatory_interaction/
+modeling_assumption/knowledge_gap tables (``docs/02_database_schema.md``) are
+defined here. Submodules are imported so that ``Base.metadata`` is fully
+populated as soon as ``app.models`` is imported, which is what
+``migrations/env.py`` relies on for Alembic to discover table metadata.
+Remaining tables are added in later phases.
 """
 
 from app.db.base import Base
@@ -17,10 +18,13 @@ from app.models.enzyme_complex import EnzymeComplex, EnzymeComplexMember
 from app.models.experimental_condition import ExperimentalCondition
 from app.models.gene import Gene
 from app.models.kinetic_measurement import KineticMeasurement
+from app.models.knowledge_gap import KnowledgeGap
+from app.models.modeling_assumption import ModelingAssumption
 from app.models.organism import Organism
 from app.models.protein import Protein
 from app.models.publication import Publication
 from app.models.reaction import Reaction, ReactionEnzyme, ReactionParticipant
+from app.models.regulatory_interaction import RegulatoryInteraction
 
 __all__ = [
     "Base",
@@ -35,10 +39,13 @@ __all__ = [
     "ExperimentalCondition",
     "Gene",
     "KineticMeasurement",
+    "KnowledgeGap",
+    "ModelingAssumption",
     "Organism",
     "Protein",
     "Publication",
     "Reaction",
     "ReactionEnzyme",
     "ReactionParticipant",
+    "RegulatoryInteraction",
 ]
