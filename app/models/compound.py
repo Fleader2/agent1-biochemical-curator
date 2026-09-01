@@ -17,6 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.kinetic_measurement import KineticMeasurement
     from app.models.reaction import ReactionParticipant
 
 
@@ -66,6 +67,9 @@ class Compound(Base):
     )
     reaction_participants: Mapped[list[ReactionParticipant]] = relationship(
         back_populates="compound"
+    )
+    kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
+        back_populates="substrate"
     )
 
 

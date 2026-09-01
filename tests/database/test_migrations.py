@@ -70,6 +70,10 @@ _GROUP_D_ENUM_TYPES = {
     "source_type",
 }
 
+_GROUP_E_TABLES = {
+    "kinetic_measurement",
+}
+
 
 def _head_revision(alembic_config: Config) -> str:
     script = ScriptDirectory.from_config(alembic_config)
@@ -185,7 +189,7 @@ def test_downgrade_from_head_to_0001_baseline_removes_group_a_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """A full downgrade from head leaves no domain tables, indexes, or enum
-    types from Group A, B, C, or D."""
+    types from Group A, B, C, D, or E."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -359,7 +363,7 @@ def test_0005_claim_evidence_revises_0004_reaction(alembic_config: Config) -> No
     assert revision.down_revision == "0004_reaction"
 
 
-def test_upgrade_to_head_creates_group_d_tables_and_enum_types(
+def test_upgrade_to_0005_creates_group_d_tables_and_enum_types(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """Migration 0005 adds exactly the three Group D tables and exactly the
@@ -368,7 +372,7 @@ def test_upgrade_to_head_creates_group_d_tables_and_enum_types(
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0005_claim_evidence")
 
     engine = create_engine(scratch_database)
     try:
@@ -395,12 +399,13 @@ def test_upgrade_to_head_creates_group_d_tables_and_enum_types(
         engine.dispose()
 
 
-def test_downgrade_from_head_to_0004_removes_only_group_d_tables_and_enum_types(
+def test_downgrade_from_head_to_0004_removes_group_d_and_e_tables(
     scratch_database: str, alembic_config: Config
 ) -> None:
-    """Downgrading past 0005 removes only Group D's tables and the four enum
-    types it introduced. Groups A, B, and C remain intact, and 0004's two
-    enum types (curation_state, reaction_participant_role) survive."""
+    """Downgrading from head (0006) past 0005 removes Group D's tables (and
+    its four enum types) and Group E's table (which introduced no enum of
+    its own). Groups A, B, and C remain intact, and 0004's two enum types
+    (curation_state, reaction_participant_role) survive."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
@@ -424,6 +429,94 @@ def test_downgrade_from_head_to_0004_removes_only_group_d_tables_and_enum_types(
                 ).scalars().all()
             )
             assert enum_types == _GROUP_C_ENUM_TYPES
+
+            compartment_count = connection.execute(
+                text("SELECT count(*) FROM compartment")
+            ).scalar()
+            assert compartment_count == len(_STANDARD_COMPARTMENT_NAMES)
+    finally:
+        engine.dispose()
+
+
+def test_0006_kinetic_measurement_revises_0005_claim_evidence(alembic_config: Config) -> None:
+    """Migration 0006 chains directly onto migration 0005."""
+    script = ScriptDirectory.from_config(alembic_config)
+    revision = script.get_revision("0006_kinetic_measurement")
+
+    assert revision is not None
+    assert revision.down_revision == "0005_claim_evidence"
+
+
+def test_upgrade_to_head_creates_only_kinetic_measurement_table(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Migration 0006 adds exactly the kinetic_measurement table on top of
+    Groups A-D, and introduces no new enum type — it reuses confidence_class
+    from 0005 rather than recreating it, and no unrelated enum type appears."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES
+                | _GROUP_B_TABLES
+                | _GROUP_C_TABLES
+                | _GROUP_D_TABLES
+                | _GROUP_E_TABLES
+                | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0006_kinetic_measurement"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert enum_types == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_from_head_to_0005_removes_only_kinetic_measurement_table(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Downgrading past 0006 removes only kinetic_measurement. There is no
+    enum type for its downgrade to drop, so all six enum types owned by 0004
+    and 0005 remain exactly as they were, and Groups A-D remain intact."""
+    from alembic import command
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0005_claim_evidence")
+
+    engine = create_engine(scratch_database)
+    try:
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names())
+            assert tables == (
+                _GROUP_A_TABLES
+                | _GROUP_B_TABLES
+                | _GROUP_C_TABLES
+                | _GROUP_D_TABLES
+                | {"alembic_version"}
+            )
+
+            stored = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert stored == "0005_claim_evidence"
+
+            enum_types = set(
+                connection.execute(
+                    text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+                ).scalars().all()
+            )
+            assert enum_types == _GROUP_C_ENUM_TYPES | _GROUP_D_ENUM_TYPES
 
             compartment_count = connection.execute(
                 text("SELECT count(*) FROM compartment")

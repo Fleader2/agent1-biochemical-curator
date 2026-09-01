@@ -31,6 +31,7 @@ from app.models.enums import ClaimStatus, ConfidenceClass, EvidenceType, SourceT
 
 if TYPE_CHECKING:
     from app.models.experimental_condition import ExperimentalCondition
+    from app.models.kinetic_measurement import KineticMeasurement
     from app.models.organism import Organism
     from app.models.publication import Publication
 
@@ -162,6 +163,9 @@ class Evidence(Base):
     claim: Mapped[Claim] = relationship(back_populates="evidence_records")
     publication: Mapped[Publication | None] = relationship(back_populates="evidence_records")
     conditions: Mapped[list[EvidenceCondition]] = relationship(back_populates="evidence")
+    kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
+        back_populates="evidence"
+    )
 
 
 class EvidenceCondition(Base):

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from app.models.compartment import Compartment
     from app.models.enzyme_complex import EnzymeComplex
     from app.models.gene import Gene
+    from app.models.kinetic_measurement import KineticMeasurement
     from app.models.protein import Protein
     from app.models.reaction import Reaction
 
@@ -69,3 +70,6 @@ class Organism(Base):
     enzyme_complexes: Mapped[list[EnzymeComplex]] = relationship(back_populates="organism")
     reactions: Mapped[list[Reaction]] = relationship(back_populates="organism")
     claims: Mapped[list[Claim]] = relationship(back_populates="organism")
+    kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
+        back_populates="organism"
+    )

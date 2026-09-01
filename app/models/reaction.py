@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from app.models.compartment import Compartment
     from app.models.compound import Compound
     from app.models.enzyme_complex import EnzymeComplex
+    from app.models.kinetic_measurement import KineticMeasurement
     from app.models.organism import Organism
     from app.models.protein import Protein
 
@@ -84,6 +85,9 @@ class Reaction(Base):
     organism: Mapped[Organism | None] = orm_relationship(back_populates="reactions")
     participants: Mapped[list[ReactionParticipant]] = orm_relationship(back_populates="reaction")
     enzymes: Mapped[list[ReactionEnzyme]] = orm_relationship(back_populates="reaction")
+    kinetic_measurements: Mapped[list[KineticMeasurement]] = orm_relationship(
+        back_populates="reaction"
+    )
 
 
 class ReactionParticipant(Base):

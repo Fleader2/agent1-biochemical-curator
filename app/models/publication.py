@@ -18,6 +18,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.claim import Evidence
+    from app.models.kinetic_measurement import KineticMeasurement
 
 
 class Publication(Base):
@@ -67,3 +68,6 @@ class Publication(Base):
     )
 
     evidence_records: Mapped[list[Evidence]] = relationship(back_populates="publication")
+    kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
+        back_populates="publication"
+    )
