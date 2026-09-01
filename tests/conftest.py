@@ -135,7 +135,27 @@ def migrated_engine(settings: Settings, alembic_config: Config) -> Iterator[Engi
 
 @pytest.fixture
 def db_session(migrated_engine: Engine) -> Iterator[Session]:
-    """Session wrapped in a transaction that is rolled back after each test."""
+    """Session wrapped in a transaction that is rolled back after each test.
+
+    A flush that raises (for example a scientific-integrity constraint
+    violation under test) requires the test to call ``Session.rollback()``
+    before continuing to use the session — standard SQLAlchemy behaviour,
+    unrelated to this fixture. That call fully ends the session's current
+    transaction, including the join to this fixture's own ``transaction``, at
+    which point the session transparently begins a fresh transaction on the
+    same connection for any further work. Because ``transaction`` is then
+    already inactive, teardown only rolls it back when it is still the active
+    transaction; ``connection.close()`` unconditionally rolls back whatever
+    transaction (original or freshly begun) is still open before releasing
+    the connection, so isolation and cleanup hold either way.
+
+    A test that instead needs to protect data flushed *before* an expected
+    failure from being discarded by that failure should open its own nested
+    SAVEPOINT around the risky operation, e.g.::
+
+        with pytest.raises(IntegrityError), db_session.begin_nested():
+            ...
+    """
     connection = migrated_engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection, autoflush=False, expire_on_commit=False)
@@ -144,7 +164,8 @@ def db_session(migrated_engine: Engine) -> Iterator[Session]:
         yield session
     finally:
         session.close()
-        transaction.rollback()
+        if transaction.is_active:
+            transaction.rollback()
         connection.close()
 
 
