@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, ForeignKey, Numeric, String, Text, UniqueConstraint, false, func
@@ -14,6 +15,9 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.reaction import ReactionParticipant
 
 
 class Compound(Base):
@@ -59,6 +63,9 @@ class Compound(Base):
 
     synonyms: Mapped[list[CompoundSynonym]] = relationship(
         back_populates="compound", cascade="all, delete-orphan", passive_deletes=True
+    )
+    reaction_participants: Mapped[list[ReactionParticipant]] = relationship(
+        back_populates="compound"
     )
 
 

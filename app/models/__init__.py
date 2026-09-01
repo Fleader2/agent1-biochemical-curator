@@ -1,10 +1,11 @@
 """SQLAlchemy ORM models.
 
-Group A reference-data tables and Group B gene/protein/enzyme-complex tables
-(``docs/02_database_schema.md``) are defined here. Submodules are imported so
-that ``Base.metadata`` is fully populated as soon as ``app.models`` is
-imported, which is what ``migrations/env.py`` relies on for Alembic to
-discover table metadata. Remaining tables are added in later phases.
+Group A reference-data tables, Group B gene/protein/enzyme-complex tables, and
+Group C reaction tables (``docs/02_database_schema.md``) are defined here.
+Submodules are imported so that ``Base.metadata`` is fully populated as soon
+as ``app.models`` is imported, which is what ``migrations/env.py`` relies on
+for Alembic to discover table metadata. Remaining tables are added in later
+phases.
 """
 
 from app.db.base import Base
@@ -16,6 +17,7 @@ from app.models.gene import Gene
 from app.models.organism import Organism
 from app.models.protein import Protein
 from app.models.publication import Publication
+from app.models.reaction import Reaction, ReactionEnzyme, ReactionParticipant
 
 __all__ = [
     "Base",
@@ -29,4 +31,7 @@ __all__ = [
     "Organism",
     "Protein",
     "Publication",
+    "Reaction",
+    "ReactionEnzyme",
+    "ReactionParticipant",
 ]

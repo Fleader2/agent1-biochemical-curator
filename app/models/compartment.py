@@ -17,6 +17,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.organism import Organism
+    from app.models.reaction import ReactionParticipant
 
 
 class Compartment(Base):
@@ -47,3 +48,6 @@ class Compartment(Base):
     )
 
     organism: Mapped[Organism | None] = relationship(back_populates="compartments")
+    reaction_participants: Mapped[list[ReactionParticipant]] = relationship(
+        back_populates="compartment"
+    )
