@@ -1,0 +1,192 @@
+
+# File: .cursor/rules/05-export.mdc
+
+---
+description: Agent 1 export contract, JSON schema, production filtering, provenance, uncertainty preservation, and Agent 2 safety requirements
+globs:
+  - "app/exports/**"
+  - "app/schemas/**/*export*"
+  - "schemas/**"
+  - "tests/**/*export*"
+alwaysApply: false
+---
+
+# Export Rules
+
+Follow:
+
+`docs/06_export_format.md`
+
+This document is authoritative.
+
+## Canonical Format
+
+The canonical Agent 1 handoff format is JSON.
+
+Use schema versioning.
+
+Generate and maintain the machine-readable JSON Schema defined by the specification.
+
+Agent 2 must be able to validate the export before processing it.
+
+## Production Export Policy
+
+Production exports default to:
+
+`HUMAN_ACCEPTED`
+
+biology only.
+
+Do not export the following as accepted biological knowledge:
+
+- `PROPOSED`
+- `MACHINE_REVIEWED`
+- `NEEDS_REVIEW`
+- `REJECTED`
+- LLM hypotheses
+- unsupported modeling assumptions
+
+Research and audit modes may expose additional records, but their uncertainty and curation state must remain explicit.
+
+## Preserve Relationships
+
+Use stable identifiers.
+
+All exported references must resolve.
+
+Do not match entities solely by names.
+
+Production exports must not contain dangling references.
+
+## Preserve Unknowns
+
+Unknown values must remain:
+
+`null`
+
+Do not replace missing values with convenient defaults.
+
+In particular, do not invent:
+
+- kinetic parameters
+- reaction reversibility
+- compartments
+- enzyme assignments
+- stoichiometry
+
+## Kinetic Measurements
+
+Export every kinetic measurement independently.
+
+Preserve:
+
+- original value
+- original unit
+- normalized value
+- normalized unit
+- organism
+- strain
+- temperature
+- pH
+- construct
+- purification state
+- assay
+- publication
+- evidence
+- measurement confidence
+- model applicability
+
+Never automatically export an average of multiple literature measurements.
+
+## Confidence
+
+Preserve claim-level confidence.
+
+Do not replace distinct confidence dimensions with one reaction-wide score.
+
+A convenience summary may be derived, but it must not replace underlying claims.
+
+Confidence represents curation strength, not probability.
+
+## Assumptions
+
+Modeling assumptions must remain distinct from evidence-backed biology.
+
+Unapproved assumptions must never silently become active in a production export.
+
+If downstream modeling requires missing information, preserve the knowledge gap or explicit assumption requirement.
+
+## Conflicts
+
+Preserve unresolved conflicts.
+
+Do not simplify conflicting evidence into artificial consensus to make modeling easier.
+
+If context resolves an apparent conflict, preserve that explanation.
+
+## Provenance
+
+Preserve links among:
+
+- reactions
+- claims
+- evidence
+- publications
+- kinetic measurements
+- assumptions
+- knowledge gaps
+
+Agent 2 must ultimately be able to trace generated model elements back to Agent 1 records.
+
+## Validation Before Export
+
+Production export must fail if it contains:
+
+- dangling references
+- duplicate stable IDs
+- invalid enum values
+- `REJECTED` biology as valid knowledge
+- LLM hypotheses as accepted facts
+- supported claims without evidence
+- active unapproved assumptions
+- kinetic measurements lacking required provenance
+- invalid schema structure
+
+Fail rather than emit an unsafe partial production export.
+
+## Determinism
+
+Use stable ordering where practical.
+
+Preserve numeric precision.
+
+Keep numeric value and unit in separate fields.
+
+Do not serialize scientific measurements as combined display strings.
+
+## Schema Compatibility
+
+Breaking changes to:
+
+- field meaning
+- required fields
+- identifier semantics
+- relationship semantics
+- enum semantics
+
+require a new export schema version.
+
+Do not silently change the contract consumed by Agent 2.
+
+## Final Export Rule
+
+The export must preserve the difference between:
+
+- what is known
+- what was measured
+- what is inferred
+- what conflicts
+- what is assumed
+- what is missing
+
+Never simplify uncertainty merely to make Antimony generation easier.
