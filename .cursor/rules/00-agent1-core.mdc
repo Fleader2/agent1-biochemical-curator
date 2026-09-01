@@ -1,0 +1,256 @@
+---
+description: Core project instructions and authoritative specifications for Agent 1, the biochemical evidence curator
+alwaysApply: true
+---
+
+# Agent 1 Core Project Rules
+
+This repository implements Agent 1, a biochemical evidence-curation system that produces scientifically traceable inputs for downstream mechanistic metabolic modeling.
+
+## Authoritative Specifications
+
+Before implementing or modifying functionality, consult the relevant specification documents:
+
+- `docs/01_overview.md`
+- `docs/02_database_schema.md`
+- `docs/03_agent_behavior.md`
+- `docs/04_api_spec.md`
+- `docs/05_testing.md`
+- `docs/06_export_format.md`
+
+These documents are authoritative.
+
+If implementation convenience conflicts with the specifications, follow the specifications.
+
+If specification documents appear to conflict, do not invent a resolution. Preserve the more scientifically conservative behavior and report the conflict.
+
+## Project Scope
+
+Agent 1 performs:
+
+- scientific source discovery
+- database retrieval
+- literature retrieval
+- entity normalization
+- evidence extraction
+- reaction curation
+- kinetics curation
+- regulation curation
+- confidence scoring
+- scientific criticism
+- deterministic validation
+- conflict detection
+- knowledge-gap identification
+- structured export
+
+Agent 1 does NOT perform:
+
+- Antimony model generation
+- SBML model generation
+- ODE simulation
+- parameter fitting
+- flux balance analysis
+- automatic kinetic parameter estimation
+- pathway redesign
+
+Do not add these responsibilities unless the specifications are explicitly changed.
+
+## Initial Biological Scope
+
+Version 0.1 focuses on:
+
+Organism:
+
+`Saccharomyces cerevisiae`
+
+Biological scope:
+
+`free fatty acid metabolism`
+
+The architecture must nevertheless remain organism-agnostic and pathway-agnostic.
+
+Do not hard-code yeast-specific behavior into generic infrastructure unless necessary.
+
+Organism-specific behavior should be isolated in dedicated modules.
+
+## Primary Development Principle
+
+This is scientific software.
+
+Correctness, provenance, reproducibility, uncertainty preservation, and auditability are more important than minimizing code or maximizing apparent feature completeness.
+
+Prefer:
+
+`UNKNOWN`
+
+over an unsupported conclusion.
+
+Prefer:
+
+`null`
+
+over an invented default.
+
+Prefer:
+
+`CONFLICTED`
+
+over artificial consensus.
+
+Prefer:
+
+`NEEDS_REVIEW`
+
+over unsupported automatic acceptance.
+
+## Technology Requirements
+
+Use:
+
+- Python 3.12 or later
+- FastAPI
+- PostgreSQL
+- SQLAlchemy 2.x
+- Pydantic
+- Alembic
+- HTTPX
+- pytest
+- Ruff
+
+Use modern SQLAlchemy syntax:
+
+```python
+Mapped[]
+mapped_column()
+relationship()
+```
+
+Do not introduce legacy SQLAlchemy APIs.
+
+## Coding Principles
+
+Use type hints throughout production code.
+
+Prefer small, focused modules and functions.
+
+Avoid large monolithic service classes.
+
+Avoid hidden global mutable state.
+
+Avoid unnecessary metaprogramming.
+
+Prefer explicit transformations over clever abstractions.
+
+Prefer composition over deep inheritance.
+
+Use dependency injection where it materially improves testability.
+
+## Repository Organization
+
+Keep responsibilities separated among modules such as:
+
+- `api`
+- `agents`
+- `connectors`
+- `models`
+- `schemas`
+- `scoring`
+- `normalization`
+- `validation`
+- `exports`
+- `config`
+
+Long LLM prompts belong under:
+
+`prompts/`
+
+Do not embed long scientific prompts directly inside Python functions.
+
+## Implementation Workflow
+
+When asked to implement a feature:
+
+1. Read the relevant specification documents.
+2. Inspect the existing implementation.
+3. Identify the smallest coherent change.
+4. Implement only that change and required prerequisites.
+5. Add or update tests.
+6. Run relevant tests.
+7. Run Ruff.
+8. Report what changed.
+9. Report unresolved specification conflicts or scientific uncertainties.
+
+Do not claim completion while required tests are failing.
+
+## Phase Discipline
+
+When instructed to implement one phase, implement only that phase unless a prerequisite is required.
+
+Do not jump ahead to unrelated future functionality.
+
+Examples:
+
+When implementing the database layer, do not implement Antimony generation.
+
+When implementing a PubMed connector, do not redesign the confidence-scoring system.
+
+Keep phases isolated and reviewable.
+
+## Change Discipline
+
+Before changing existing behavior:
+
+1. Identify the governing specification.
+2. Confirm that the change is compatible with it.
+3. Update tests.
+4. Update migrations when necessary.
+5. Preserve provenance and scientific uncertainty.
+
+Avoid broad refactors while implementing unrelated features.
+
+Prefer small, reviewable changes.
+
+## Error Handling
+
+Fail conservatively.
+
+When encountering:
+
+- malformed source data
+- ambiguous identifiers
+- unsupported units
+- external API failures
+- incomplete provenance
+- LLM parsing failures
+- conflicting entity identities
+
+do not guess.
+
+Return or record an explicit unresolved state, validation error, or review requirement.
+
+## Placeholder Rules
+
+Do not add realistic-looking placeholder biology to production code.
+
+Never add defaults such as:
+
+```python
+DEFAULT_KM = 1.0
+DEFAULT_KCAT = 1.0
+```
+
+to compensate for missing scientific measurements.
+
+Synthetic test data must be clearly test-only.
+
+## Final Rule
+
+When uncertain how to implement scientific behavior, choose the implementation that preserves the most information while making the fewest unsupported biological assumptions.
+
+Always favor:
+
+- traceability over convenience
+- evidence over plausibility
+- uncertainty over invention
+- explicit assumptions over hidden defaults
+- human approval over automated overconfidence
