@@ -1,0 +1,196 @@
+
+# File: .cursor/rules/03-database-api.mdc
+
+---
+description: Database schema, migrations, scientific persistence, REST API behavior, review transitions, and external-source API boundaries
+globs:
+  - "app/models/**"
+  - "app/schemas/**"
+  - "app/api/**"
+  - "app/services/**"
+  - "migrations/**"
+  - "alembic.ini"
+alwaysApply: false
+---
+
+# Database and API Rules
+
+For database work, follow:
+
+- `docs/02_database_schema.md`
+
+For API work, follow:
+
+- `docs/04_api_spec.md`
+
+These documents are authoritative.
+
+## Database
+
+PostgreSQL is the canonical database.
+
+Use UUIDs for internal primary keys.
+
+External scientific identifiers must not be primary keys.
+
+Preserve separate entities for:
+
+- claims
+- evidence
+- publications
+- kinetic measurements
+- regulatory interactions
+- modeling assumptions
+- knowledge gaps
+- external records
+- review events
+
+Do not merge these concepts for convenience.
+
+## Scientific Persistence
+
+Scientific provenance must be durable.
+
+Do not silently delete or overwrite:
+
+- claims
+- evidence
+- publications
+- kinetic measurements
+- review history
+- source retrieval history
+
+Prefer conservative deletion behavior such as `ON DELETE RESTRICT` for scientific records.
+
+Use append-only retrieval history where practical.
+
+Unknown scientific values must remain `NULL`.
+
+## Kinetic Measurements
+
+Never deduplicate or merge kinetic measurements solely because:
+
+- parameter type matches
+- numeric value is similar
+- enzyme name matches
+
+Measurements from different publications, strains, conditions, constructs, or assays must remain distinct.
+
+Original value and unit must remain stored even after normalization.
+
+## Reactions
+
+Canonical stoichiometry must use structured reaction participants.
+
+Do not use a free-text reaction equation as the authoritative representation.
+
+Reversibility must support:
+
+- `true`
+- `false`
+- `null`
+
+Do not force unresolved reversibility into a Boolean assumption.
+
+## Alembic
+
+Every schema change requires an Alembic migration.
+
+Do not change SQLAlchemy models without updating migrations.
+
+An empty PostgreSQL database must remain migratable to schema head.
+
+Migrations should be reversible where practical.
+
+## API
+
+Use API prefix:
+
+`/api/v1`
+
+Use Pydantic request and response schemas.
+
+Use standard HTTP semantics.
+
+Do not place substantial scientific business logic directly in route handlers.
+
+API routes should delegate to services.
+
+## Scientific State Transitions
+
+Preserve:
+
+- `PROPOSED`
+- `MACHINE_REVIEWED`
+- `NEEDS_REVIEW`
+- `HUMAN_ACCEPTED`
+- `REJECTED`
+
+Automated code must never set:
+
+`HUMAN_ACCEPTED`
+
+Only an authorized human action may do so.
+
+Do not trust a client-supplied `reviewer_type` as authorization in production-oriented code.
+
+## Claims and Evidence
+
+A claim marked `SUPPORTED` must have supporting evidence.
+
+Creating a claim through the API does not make it supported.
+
+Search results do not automatically become claims.
+
+Claims do not automatically become accepted biology.
+
+## External Search APIs
+
+External scientific-source failures must be distinguishable from legitimate empty results.
+
+Never translate:
+
+`API failure`
+
+into:
+
+`no evidence exists`
+
+Preserve retrieval metadata and source identifiers.
+
+## Transactions
+
+Use database transactions for operations involving:
+
+- review-state transitions
+- confidence recalculation
+- entity normalization/deduplication
+- evidence attachment
+- exports where consistency matters
+
+Use appropriate locking for concurrent review transitions.
+
+## API Security
+
+Never expose:
+
+- credentials
+- secrets
+- database passwords
+- API keys
+- raw authentication tokens
+
+Do not include secrets in errors or system-info endpoints.
+
+## Final Database/API Rule
+
+The API and database form a scientific control boundary.
+
+They must preserve the distinction between:
+
+- retrieved data
+- proposed claims
+- evidence-supported claims
+- machine-reviewed records
+- human-accepted knowledge
+- modeling assumptions
