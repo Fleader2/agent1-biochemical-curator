@@ -1,0 +1,167 @@
+# File: .cursor/rules/04-testing.mdc
+
+---
+description: Testing, scientific integrity regression tests, PostgreSQL integration testing, API tests, connector mocks, coverage, and CI rules
+globs:
+  - "tests/**"
+  - "**/test_*.py"
+  - "pyproject.toml"
+  - ".github/workflows/**"
+alwaysApply: false
+---
+
+# Testing Rules
+
+Follow:
+
+`docs/05_testing.md`
+
+This document is authoritative.
+
+## Test Philosophy
+
+Tests must verify both:
+
+- software correctness
+- scientific integrity
+
+A system that executes successfully but silently distorts biology is failing.
+
+## Framework
+
+Use `pytest`.
+
+Use PostgreSQL for integration testing where practical.
+
+Do not rely exclusively on SQLite.
+
+External scientific APIs must be mocked in normal tests.
+
+Live network tests must be marked:
+
+```python
+@pytest.mark.live
+```
+
+and excluded from normal test execution.
+
+## Required Test Categories
+
+Maintain tests for:
+
+- unit logic
+- database constraints
+- API behavior
+- connectors
+- workflows
+- scientific integrity
+- migrations
+- exports
+
+## Scientific Integrity
+
+Scientific-integrity failures are build-blocking.
+
+Tests must prevent the system from silently:
+
+- inventing PMIDs or DOIs
+- inventing kinetic parameters
+- inventing reactions
+- treating LLM output as evidence
+- converting speculation into fact
+- merging incompatible kinetic measurements
+- merging strain-specific measurements
+- losing experimental context
+- deleting contradictory evidence
+- treating failed search as negative evidence
+- allowing machine-generated `HUMAN_ACCEPTED`
+- exporting rejected biology as valid data
+
+## Kinetic Tests
+
+Always test that:
+
+- original value is preserved
+- original unit is preserved
+- normalized values are stored separately
+- different conditions remain separate
+- different strains remain separate
+- different papers remain separate
+
+Do not allow automatic averaging unless explicitly implemented as a separate derived analysis.
+
+## LLM Tests
+
+Mock LLM outputs in normal CI.
+
+Deliberately test hallucinated or unsupported output.
+
+Unsupported LLM output must not become supported scientific knowledge.
+
+Validate structured LLM output using Pydantic.
+
+Malformed structured output must fail conservatively.
+
+## Connector Tests
+
+Test:
+
+- parsing
+- rate limiting
+- retries
+- caching
+- empty results
+- API failures
+- source provenance
+
+Do not make normal CI depend on public API uptime.
+
+## Regression Policy
+
+Every discovered scientific-integrity bug requires:
+
+1. a reproducible failing test,
+2. a code fix,
+3. permanent retention of the regression test.
+
+## Coverage
+
+Target at least 90% line coverage for core application code.
+
+Target 95% where practical for:
+
+- confidence scoring
+- unit conversion
+- scientific validation
+- review transitions
+- export filtering
+
+Meaningful tests matter more than raw coverage percentage.
+
+## CI
+
+CI should run at minimum:
+
+- Ruff
+- migrations from an empty PostgreSQL database
+- unit tests
+- database tests
+- API tests
+- workflow tests
+- scientific-integrity tests
+
+Do not disable scientific-integrity tests to make CI pass.
+
+## Completion
+
+A feature is not complete until:
+
+- relevant tests exist
+- negative cases are covered
+- tests pass
+- Ruff passes
+- migrations are tested if applicable
+
+## Final Testing Rule
+
+Prefer a test suite that proves the system refuses unsupported biology over one that merely proves the happy path works.
