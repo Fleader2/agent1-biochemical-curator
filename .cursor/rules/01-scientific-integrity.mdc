@@ -1,0 +1,322 @@
+---
+description: Mandatory scientific integrity, evidence, provenance, uncertainty, kinetics, and human-review rules for Agent 1
+alwaysApply: true
+---
+
+# Scientific Integrity Rules
+
+These rules are mandatory for all Agent 1 development.
+
+## Never Invent Scientific Information
+
+Never invent:
+
+- PMIDs
+- PMCIDs
+- DOIs
+- publications
+- database identifiers
+- genes
+- proteins
+- enzymes
+- enzyme complexes
+- metabolites
+- chemical formulas
+- reaction stoichiometry
+- cellular compartments
+- kinetic parameters
+- regulatory relationships
+- experimental conditions
+- organism assignments
+- strain assignments
+
+If information cannot be verified, preserve it as unknown or unresolved.
+
+## LLM Output Is Not Evidence
+
+The LLM is never a scientific evidence source.
+
+LLM output may propose:
+
+- search queries
+- candidate claims
+- classifications
+- extracted information
+- hypotheses
+- critic findings
+- normalization suggestions
+
+LLM output alone must never establish a supported biological claim.
+
+Every supported scientific claim must be linked to external evidence.
+
+## Evidence Categories
+
+Always distinguish among:
+
+- direct biochemical evidence
+- direct in-vivo evidence
+- genetic evidence
+- curated database annotation
+- computational prediction
+- homology inference
+- review interpretation
+- author hypothesis
+- modeling assumption
+- LLM hypothesis
+
+Do not collapse these categories.
+
+Do not treat a review article as equivalent to a primary experiment.
+
+Do not treat a database annotation as direct experimental evidence.
+
+## Unknown Versus Negative Evidence
+
+Absence of evidence is not evidence of absence.
+
+A failed search means:
+
+`UNKNOWN`
+
+or:
+
+`SEARCH_INCOMPLETE`
+
+It does not establish a negative biological claim.
+
+External API failure must never be converted into a statement that no evidence exists.
+
+## Preserve Provenance
+
+Every supported scientific claim must be traceable to one or more evidence records.
+
+Preserve:
+
+- publication identifiers
+- database identifiers
+- retrieval timestamps
+- source type
+- organism
+- strain
+- experimental system
+- assay type
+- relevant conditions
+
+Never silently remove provenance.
+
+## Preserve Experimental Context
+
+Measurements performed under different contexts must remain distinguishable.
+
+Relevant context includes:
+
+- organism
+- strain
+- temperature
+- pH
+- medium
+- carbon source
+- nitrogen source
+- oxygen status
+- growth phase
+- assay system
+- enzyme construct
+- purification state
+
+Do not silently combine contextually different measurements.
+
+## Preserve Conflicts
+
+Conflicting claims must coexist.
+
+Do not delete or overwrite one claim because another source disagrees.
+
+Before declaring a conflict, compare context.
+
+An apparent contradiction may result from differences in:
+
+- strain
+- growth condition
+- temperature
+- pH
+- assay
+- enzyme preparation
+- cellular state
+
+If the conflict remains unresolved, preserve it explicitly.
+
+## Kinetic Measurements
+
+Every kinetic measurement must remain an independent record.
+
+Never automatically average across:
+
+- publications
+- organisms
+- strains
+- temperatures
+- pH values
+- enzyme constructs
+- purification states
+- assay systems
+
+Always preserve:
+
+- original value
+- original unit
+- normalized value
+- normalized unit
+- organism
+- strain
+- temperature
+- pH
+- assay
+- enzyme construct
+- purification state
+- publication
+- evidence record
+
+Normalization must never overwrite original measurements.
+
+## Unit Conversion
+
+Use deterministic software for unit conversion.
+
+Do not convert specific activity to `kcat` unless sufficient information exists to calculate molecular turnover correctly.
+
+If conversion is ambiguous, preserve the original measurement and flag the unresolved conversion.
+
+## Measurement Confidence and Model Applicability
+
+These are distinct quantities.
+
+Measurement confidence asks:
+
+"How trustworthy is this experimental measurement?"
+
+Model applicability asks:
+
+"How suitable is this measurement for the intended model?"
+
+Do not merge these concepts into one score.
+
+A measurement can have high experimental confidence and low model applicability.
+
+## Reaction Stoichiometry
+
+Represent stoichiometry structurally.
+
+Do not rely on free-text reaction strings as the canonical representation.
+
+Use deterministic validation for:
+
+- elemental balance
+- charge balance
+- duplicate participants
+- invalid coefficients
+
+If required chemical information is missing, validation should return an indeterminate result rather than fabricate missing chemistry.
+
+## Reversibility
+
+Do not infer reaction reversibility solely from arrow notation.
+
+Allowed states are:
+
+- `true`
+- `false`
+- `null`
+
+`null` means unresolved.
+
+Never convert unresolved reversibility automatically to irreversible.
+
+## Cellular Localization
+
+Do not infer:
+
+- protein localization from pathway location
+- reaction localization from protein localization without evidence
+- metabolite accessibility across membranes without evidence
+
+Keep protein, reaction, and metabolite localization claims distinct.
+
+## Modeling Assumptions
+
+Modeling assumptions are not experimental facts.
+
+Store assumptions separately from evidence-backed claims.
+
+An assumption may be proposed by software.
+
+It must not become experimental evidence.
+
+If required for production modeling, an assumption must be explicitly approved according to the specification.
+
+## LLM Hypotheses
+
+LLM-generated hypotheses must:
+
+- be explicitly labeled
+- have zero evidence score
+- never become `SUPPORTED` without external evidence
+- never appear as accepted biological knowledge in production exports
+
+## Human Review Boundary
+
+Use these review states:
+
+- `PROPOSED`
+- `MACHINE_REVIEWED`
+- `NEEDS_REVIEW`
+- `HUMAN_ACCEPTED`
+- `REJECTED`
+
+Automated processes may set:
+
+- `PROPOSED`
+- `MACHINE_REVIEWED`
+- `NEEDS_REVIEW`
+
+Automated processes must never set:
+
+`HUMAN_ACCEPTED`
+
+Only an authorized human action may create that state.
+
+Never create a shortcut around this boundary.
+
+## Deterministic Verification
+
+Use deterministic code whenever practical for:
+
+- confidence calculation
+- mass balance
+- charge balance
+- unit conversion
+- identifier validation
+- duplicate detection
+- enum validation
+- referential integrity
+- export validation
+
+Use AI for interpretation.
+
+Use software for verification.
+
+## Scientific Integrity Failure Policy
+
+A system behavior that silently distorts biology is a high-severity defect.
+
+Examples include:
+
+- fabricated citation
+- fabricated kinetic value
+- lost strain metadata
+- averaged incompatible measurements
+- deleted contradictory evidence
+- machine-generated human acceptance
+- exported unsupported biology
+
+Such defects require a regression test before being considered fixed.
