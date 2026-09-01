@@ -223,10 +223,10 @@ Windows
 .venv\Scripts\activate
 ```
 
-Install project dependencies.
+Install project dependencies. Dependencies are declared in `pyproject.toml`.
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 Copy the example environment file.
@@ -237,7 +237,7 @@ cp .env.example .env
 
 Configure:
 
-- PostgreSQL
+- PostgreSQL (`DATABASE_URL`, and `TEST_DATABASE_URL` for the test suite)
 - LLM provider
 - PubMed credentials
 - BRENDA credentials
