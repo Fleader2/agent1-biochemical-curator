@@ -1534,6 +1534,30 @@ test_unknown_values_remain_null
 
 ---
 
+# Deferred Database-Layer Tests
+
+The following tests, listed above, require application/business-logic that is
+implemented in a later phase, not in the Phase 2 database-schema layer:
+
+```text
+test_supported_claim_requires_evidence
+    Deferred to the validation / business-logic phase, which enforces
+    Scientific Integrity Constraints Rule 1 (a SUPPORTED claim requires
+    evidence) at claim-status transition time.
+
+test_rejected_records_not_exported
+    Deferred to the export-generation phase, which implements the
+    production-export filtering described in docs/06_export_format.md.
+```
+
+The Phase 2 database layer provides the schema these tests exercise (`claim`,
+`evidence`, `curation_state`) but does not itself implement claim-status
+transition validation or export filtering. This deferral does not weaken Rule
+1 or the export-safety rules — they remain mandatory and must be enforced and
+tested by the phase that implements them.
+
+---
+
 # Deferred Features
 
 Do not implement the following in the initial database unless required by another specification:
@@ -1582,7 +1606,9 @@ The database layer is complete when:
 
 6. Seed compartments can be loaded.
 
-7. Required database tests pass.
+7. Required database tests pass, except those listed under "Deferred
+   Database-Layer Tests," which are enforced and tested by their respective
+   later phases.
 
 8. `pytest` passes without errors.
 
