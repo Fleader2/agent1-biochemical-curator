@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Enum, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -69,14 +69,22 @@ class RegulatoryInteraction(Base):
     )
 
     curation_state: Mapped[CurationState] = mapped_column(
-        _CURATION_STATE, nullable=False, default=CurationState.PROPOSED
+        _CURATION_STATE,
+        nullable=False,
+        default=CurationState.PROPOSED,
+        server_default=CurationState.PROPOSED.value,
     )
 
     notes: Mapped[str | None] = mapped_column(Text)
 
-    created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     organism: Mapped[Organism | None] = relationship(back_populates="regulatory_interactions")

@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     CheckConstraint,
     Date,
+    DateTime,
     Enum,
     ForeignKey,
     Numeric,
@@ -90,7 +91,10 @@ class Claim(Base):
     claim_category: Mapped[str | None] = mapped_column(String)
 
     status: Mapped[ClaimStatus] = mapped_column(
-        _CLAIM_STATUS, nullable=False, default=ClaimStatus.UNKNOWN
+        _CLAIM_STATUS,
+        nullable=False,
+        default=ClaimStatus.UNKNOWN,
+        server_default=ClaimStatus.UNKNOWN.value,
     )
 
     confidence_score: Mapped[Decimal | None] = mapped_column(Numeric)
@@ -98,9 +102,14 @@ class Claim(Base):
 
     created_by: Mapped[str | None] = mapped_column(String)
 
-    created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     organism: Mapped[Organism | None] = relationship(back_populates="claims")
@@ -162,7 +171,9 @@ class Evidence(Base):
 
     date_accessed: Mapped[date | None] = mapped_column(Date)
 
-    created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
     claim: Mapped[Claim] = relationship(back_populates="evidence_records")
     publication: Mapped[Publication | None] = relationship(back_populates="evidence_records")

@@ -54,4 +54,6 @@ class ExternalRecord(Base):
     raw_response_json: Mapped[list[Any] | dict[str, Any] | None] = mapped_column(JSONB)
     raw_response_text: Mapped[str | None] = mapped_column(Text)
 
-    created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
