@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation Status="MEDLINE" Owner="NLM">
+      <PMID Version="1">90000001</PMID>
+      <Article PubModel="Print">
+        <Journal>
+          <ISSN IssnType="Print">0000-0000</ISSN>
+          <JournalIssue CitedMedium="Print">
+            <Volume>12</Volume>
+            <Issue>3</Issue>
+            <PubDate>
+              <Year>2024</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Journal of Synthetic Test Data</Title>
+          <ISOAbbreviation>J Synth Test Data</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Regulation of <i>ACC1</i> activity by <sup>32</sup>P-labeled phosphorylation in a synthetic test fixture</ArticleTitle>
+        <Abstract>
+          <AbstractText Label="BACKGROUND" NlmCategory="BACKGROUND">This is synthetic background text with <i>nested emphasis</i> preserved.</AbstractText>
+          <AbstractText Label="RESULTS" NlmCategory="RESULTS">This is synthetic results text for parser testing.</AbstractText>
+        </Abstract>
+        <AuthorList CompleteYN="Y">
+          <Author ValidYN="Y">
+            <LastName>Smith</LastName>
+            <ForeName>Jane</ForeName>
+            <Initials>J</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <CollectiveName>Synthetic Test Consortium</CollectiveName>
+          </Author>
+        </AuthorList>
+        <PublicationTypeList>
+          <PublicationType UI="D016428">Journal Article</PublicationType>
+        </PublicationTypeList>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">90000001</ArticleId>
+        <ArticleId IdType="doi">10.9999/test.90000001</ArticleId>
+        <ArticleId IdType="pmc">PMC9000001</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
