@@ -1548,11 +1548,19 @@ test_supported_claim_requires_evidence
 test_rejected_records_not_exported
     Deferred to the export-generation phase, which implements the
     production-export filtering described in docs/06_export_format.md.
+
+test_review_event_created_on_state_change
+    Deferred to the application/business-logic phase that performs
+    curation-state transitions. Automatically creating a review_event
+    when an entity's curation state changes is application/business-layer
+    behavior, not something enforced by the database schema itself, so
+    this test is intentionally deferred to that later phase.
 ```
 
 The Phase 2 database layer provides the schema these tests exercise (`claim`,
-`evidence`, `curation_state`) but does not itself implement claim-status
-transition validation or export filtering. This deferral does not weaken Rule
+`evidence`, `curation_state`, `review_event`) but does not itself implement
+claim-status transition validation, export filtering, or automatic
+review_event creation on state change. This deferral does not weaken Rule
 1 or the export-safety rules — they remain mandatory and must be enforced and
 tested by the phase that implements them.
 
