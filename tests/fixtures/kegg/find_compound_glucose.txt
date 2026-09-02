@@ -1,0 +1,2 @@
+cpd:C00031	D-Glucose; Grape sugar; Dextrose
+cpd:C00221	beta-D-Glucose

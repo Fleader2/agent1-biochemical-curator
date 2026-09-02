@@ -1,0 +1,14 @@
+ENTRY       C00031                      Compound
+NAME        D-Glucose;
+            Grape sugar;
+            Dextrose
+FORMULA     C6H12O6
+EXACT_MASS  180.0634
+MOL_WEIGHT  180.1559
+PATHWAY     map00010  Glycolysis / Gluconeogenesis
+            map00030  Pentose phosphate pathway
+            map01100  Metabolic pathways
+DBLINKS     CAS: 50-99-7
+            PubChem: 3333
+            ChEBI: 4167
+///
