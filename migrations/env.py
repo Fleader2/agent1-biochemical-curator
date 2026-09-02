@@ -22,7 +22,12 @@ from app.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which would silently disable
+    # every application logger already registered under a name not listed in
+    # alembic.ini's [loggers] section (only root, sqlalchemy, and alembic are
+    # listed there). That has nothing to do with configuring Alembic's own
+    # logging, so it is turned off rather than accepted as a side effect.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

@@ -6,6 +6,8 @@ Proves that a completely empty PostgreSQL database can be migrated to head, whic
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -118,6 +120,31 @@ def test_upgrade_empty_database_to_head(scratch_database: str, alembic_config: C
             assert stored == _head_revision(alembic_config)
     finally:
         engine.dispose()
+
+
+def test_alembic_upgrade_does_not_disable_preexisting_application_logger(
+    scratch_database: str, alembic_config: Config
+) -> None:
+    """Running Alembic must not silently disable an already-registered application logger.
+
+    ``alembic.ini`` only lists ``root``, ``sqlalchemy``, and ``alembic`` under
+    ``[loggers]``. ``migrations/env.py`` calls ``logging.config.fileConfig``,
+    which defaults to ``disable_existing_loggers=True`` -- that would silently
+    disable any other logger already registered at the moment it runs, such as
+    an application logger created by an ordinary module import (for example
+    ``app.connectors.http``'s module-level logger) before any migration ever
+    executes. Regression test for that behavior being turned off.
+    """
+    from alembic import command
+
+    logger_name = "agent1.regression_test.preexisting_before_alembic"
+    preexisting_logger = logging.getLogger(logger_name)
+    assert preexisting_logger.disabled is False  # sanity: starts enabled
+
+    alembic_config.set_main_option("sqlalchemy.url", scratch_database)
+    command.upgrade(alembic_config, "head")
+
+    assert preexisting_logger.disabled is False
 
 
 def test_downgrade_to_base_after_upgrade(scratch_database: str, alembic_config: Config) -> None:
