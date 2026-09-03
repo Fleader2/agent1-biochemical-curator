@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><ns1:getRecommendedNameResponse xmlns:ns1="https://www.brenda-enzymes.org/soap"><return xsi:type="xsd:string" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">alcohol dehydrogenase</return></ns1:getRecommendedNameResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>

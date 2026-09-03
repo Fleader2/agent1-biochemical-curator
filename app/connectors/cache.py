@@ -15,21 +15,36 @@ scope. A durable (database-backed) cache is future work.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.connectors.base import RawResponse
 
 
-def build_cache_key(method: str, url: str, params: Mapping[str, Any] | None) -> str:
-    """Build a deterministic cache key that distinguishes request parameters.
+def build_cache_key(
+    method: str,
+    url: str,
+    params: Mapping[str, Any] | None,
+    body: bytes | str | None = None,
+) -> str:
+    """Build a deterministic cache key that distinguishes request parameters and body.
 
-    Two requests to the same URL with different parameters (or a different
-    HTTP method) must never collide; two requests with the same parameters in
-    a different order must collide, since they are the same request.
+    Two requests to the same URL with different parameters, a different
+    body, or a different HTTP method must never collide; two requests with
+    the same parameters in a different order must collide, since they are
+    the same request. ``body`` (a POST payload -- see
+    ``ConnectorHttpClient.post()``, added for connectors such as BRENDA's
+    SOAP interface whose request content lives in the body rather than
+    query parameters) is hashed rather than embedded verbatim, since it may
+    be arbitrarily large.
     """
     normalized_params = tuple(sorted((params or {}).items(), key=lambda item: item[0]))
-    return f"{method.upper()} {url} {normalized_params!r}"
+    body_hash = ""
+    if body:
+        body_bytes = body.encode("utf-8") if isinstance(body, str) else body
+        body_hash = hashlib.sha256(body_bytes).hexdigest()
+    return f"{method.upper()} {url} {normalized_params!r} {body_hash}"
 
 
 class ResponseCache(Protocol):

@@ -227,6 +227,176 @@ def test_response_served_from_cache_makes_no_second_request() -> None:
     assert len(handler.calls) == 1
 
 
+# --- is_permanent_failure (added for BRENDA's auth-fault-on-500 case) --------
+
+
+def test_is_permanent_failure_none_by_default_retries_5xx_normally() -> None:
+    """Absent the classifier, behavior is unchanged: a 500 is retried as before."""
+    handler = _CountingHandler([httpx.Response(500), httpx.Response(200, text="ok")])
+    http_client = ConnectorHttpClient(_client_for(handler), max_retries=3, sleep=_FakeSleep())
+
+    response = http_client.get("https://example.invalid/resource")
+
+    assert response.status_code == 200
+    assert len(handler.calls) == 2
+
+
+def test_is_permanent_failure_classifier_prevents_retry_and_causes_one_request() -> None:
+    """A classifier that flags a status/body as permanent skips retry on the first attempt."""
+    handler = _CountingHandler([httpx.Response(500, text="permanent fault")])
+    http_client = ConnectorHttpClient(
+        _client_for(handler),
+        max_retries=3,
+        sleep=_FakeSleep(),
+        is_permanent_failure=lambda status, body: status == 500 and "permanent" in body,
+    )
+
+    with pytest.raises(ConnectorHTTPError) as excinfo:
+        http_client.get("https://example.invalid/resource")
+
+    assert len(handler.calls) == 1
+    assert excinfo.value.status_code == 500
+    assert excinfo.value.body == "permanent fault"
+
+
+def test_is_permanent_failure_classifier_receives_status_and_body() -> None:
+    handler = _CountingHandler([httpx.Response(503, text="specific body")])
+    seen: list[tuple[int, str]] = []
+
+    def classifier(status: int, body: str) -> bool:
+        seen.append((status, body))
+        return False
+
+    http_client = ConnectorHttpClient(
+        _client_for(handler), max_retries=0, sleep=_FakeSleep(), is_permanent_failure=classifier
+    )
+
+    with pytest.raises(ConnectorHTTPError):
+        http_client.get("https://example.invalid/resource")
+
+    assert seen == [(503, "specific body")]
+
+
+def test_is_permanent_failure_classifier_does_not_over_match_generic_5xx() -> None:
+    """A classifier only matching specific content still lets an ordinary 5xx retry normally."""
+    handler = _CountingHandler(
+        [httpx.Response(500, text="generic error"), httpx.Response(200, text="ok")]
+    )
+    http_client = ConnectorHttpClient(
+        _client_for(handler),
+        max_retries=3,
+        sleep=_FakeSleep(),
+        is_permanent_failure=lambda status, body: status == 500 and "permanent" in body,
+    )
+
+    response = http_client.get("https://example.invalid/resource")
+
+    assert response.status_code == 200
+    assert len(handler.calls) == 2
+
+
+def test_is_permanent_failure_classifier_applies_to_429_too_if_it_says_so() -> None:
+    """The classifier is source-agnostic: it is consulted for any retryable status, not only 5xx."""
+    handler = _CountingHandler([httpx.Response(429, text="flagged")])
+    http_client = ConnectorHttpClient(
+        _client_for(handler),
+        max_retries=3,
+        sleep=_FakeSleep(),
+        is_permanent_failure=lambda status, body: body == "flagged",
+    )
+
+    with pytest.raises(ConnectorRateLimitError):
+        http_client.get("https://example.invalid/resource")
+
+    assert len(handler.calls) == 1
+
+
+# --- post() (added for BRENDA's SOAP interface) ------------------------------
+
+
+def test_post_sends_body_and_headers() -> None:
+    """POST carries the given content and headers through to the actual request."""
+    handler = _CountingHandler([httpx.Response(200, text="ok")])
+    http_client = ConnectorHttpClient(_client_for(handler))
+
+    response = http_client.post(
+        "https://example.invalid/resource",
+        content=b"<envelope>body</envelope>",
+        headers={"Content-Type": "text/xml; charset=utf-8"},
+    )
+
+    assert response.status_code == 200
+    assert len(handler.calls) == 1
+    sent = handler.calls[0]
+    assert sent.method == "POST"
+    assert sent.content == b"<envelope>body</envelope>"
+    assert sent.headers["content-type"] == "text/xml; charset=utf-8"
+
+
+def test_post_is_retried_on_5xx() -> None:
+    """POST goes through the same retry/backoff path as GET, not a separate one."""
+    handler = _CountingHandler([httpx.Response(500), httpx.Response(200, text="ok")])
+    http_client = ConnectorHttpClient(_client_for(handler), max_retries=3, sleep=_FakeSleep())
+
+    response = http_client.post("https://example.invalid/resource", content=b"body")
+
+    assert response.status_code == 200
+    assert len(handler.calls) == 2
+
+
+def test_post_response_cached_by_body() -> None:
+    """Two POSTs with identical bodies hit the network once; different bodies don't collide."""
+    handler = _CountingHandler(
+        [httpx.Response(200, text="first"), httpx.Response(200, text="second")]
+    )
+    http_client = ConnectorHttpClient(_client_for(handler), cache=InMemoryResponseCache())
+
+    first_a = http_client.post("https://example.invalid/resource", content=b"body-a")
+    first_b = http_client.post("https://example.invalid/resource", content=b"body-a")
+    second = http_client.post("https://example.invalid/resource", content=b"body-b")
+
+    assert first_a == first_b
+    assert first_a.text == "first"
+    assert second.text == "second"
+    assert len(handler.calls) == 2
+
+
+def test_connector_http_error_carries_response_body() -> None:
+    """A non-retried HTTP error exposes the response body for connector-level inspection.
+
+    Needed because some sources (BRENDA's SOAP interface) signal specific
+    failure kinds (e.g. authentication) only in the response body, with the
+    same generic HTTP status as other failures.
+    """
+    handler = _CountingHandler([httpx.Response(400, text="<fault>bad request</fault>")])
+    http_client = ConnectorHttpClient(_client_for(handler))
+
+    with pytest.raises(ConnectorHTTPError) as excinfo:
+        http_client.get("https://example.invalid/resource")
+
+    assert excinfo.value.body == "<fault>bad request</fault>"
+
+
+def test_connector_http_error_carries_body_after_exhausted_retries() -> None:
+    handler = _CountingHandler([httpx.Response(500, text="<fault>server error</fault>")])
+    http_client = ConnectorHttpClient(_client_for(handler), max_retries=0, sleep=_FakeSleep())
+
+    with pytest.raises(ConnectorHTTPError) as excinfo:
+        http_client.post("https://example.invalid/resource", content=b"body")
+
+    assert excinfo.value.body == "<fault>server error</fault>"
+
+
+def test_connector_rate_limit_error_carries_response_body() -> None:
+    handler = _CountingHandler([httpx.Response(429, text="rate limited")])
+    http_client = ConnectorHttpClient(_client_for(handler), max_retries=0, sleep=_FakeSleep())
+
+    with pytest.raises(ConnectorRateLimitError) as excinfo:
+        http_client.get("https://example.invalid/resource")
+
+    assert excinfo.value.body == "rate limited"
+
+
 # --- IntervalRateLimiter -----------------------------------------------------
 
 

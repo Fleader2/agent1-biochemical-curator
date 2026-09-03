@@ -25,18 +25,41 @@ class ConnectorNetworkError(ConnectorError):
 
 
 class ConnectorHTTPError(ConnectorError):
-    """The upstream source returned an HTTP error status."""
+    """The upstream source returned an HTTP error status.
 
-    def __init__(self, status_code: int, message: str | None = None) -> None:
+    ``body`` (the raw response text, when available) lets a connector
+    inspect what an opaque HTTP status actually meant -- some sources (e.g.
+    BRENDA's SOAP interface: an authentication failure and a generic server
+    error are both plain HTTP 500 at the transport level, distinguishable
+    only by a fault embedded in the body) require this to raise a more
+    specific error themselves after catching this one.
+    """
+
+    def __init__(
+        self, status_code: int, message: str | None = None, *, body: str | None = None
+    ) -> None:
         self.status_code = status_code
+        self.body = body
         super().__init__(message or f"HTTP {status_code}")
 
 
 class ConnectorRateLimitError(ConnectorHTTPError):
     """The upstream source responded with HTTP 429 after retries were exhausted."""
 
-    def __init__(self, message: str | None = None) -> None:
-        super().__init__(429, message or "rate limited (HTTP 429)")
+    def __init__(self, message: str | None = None, *, body: str | None = None) -> None:
+        super().__init__(429, message or "rate limited (HTTP 429)", body=body)
+
+
+class ConnectorAuthenticationError(ConnectorError):
+    """The upstream source rejected the configured credentials.
+
+    Kept distinct from ``ConnectorHTTPError`` because some sources signal an
+    authentication failure through response content rather than a dedicated
+    HTTP status the shared HTTP layer could recognize on its own -- the
+    connector-level code that can parse that content is what raises this,
+    typically by re-classifying a caught ``ConnectorHTTPError`` after
+    inspecting its ``body``.
+    """
 
 
 class ConnectorParseError(ConnectorError):
@@ -44,6 +67,7 @@ class ConnectorParseError(ConnectorError):
 
 
 __all__ = [
+    "ConnectorAuthenticationError",
     "ConnectorError",
     "ConnectorHTTPError",
     "ConnectorNetworkError",

@@ -2,7 +2,7 @@
 
 This is the only place retry, backoff, rate-limiting, timeout, and caching
 behavior live -- individual source connectors call ``ConnectorHttpClient.get()``
-and contain no retry/backoff logic of their own
+/``post()`` and contain no retry/backoff logic of their own
 (``.cursor/rules/02-architecture.mdc``: "Each connector should support
 behavior equivalent to ... caching, rate limiting, retry/backoff").
 
@@ -19,6 +19,22 @@ Retry policy (``docs/03_agent_behavior.md`` "Search Rate Limiting",
 
 No random jitter is added: the current specification does not call for it,
 and deterministic backoff delays keep tests exact rather than probabilistic.
+
+``post()`` was added in the BRENDA increment: BRENDA's SOAP interface
+requires an HTTP POST carrying an XML envelope body, which ``get()`` cannot
+express. It shares every retry/backoff/timeout/rate-limit/cache code path
+with ``get()`` (both call ``_request()``/``_send_with_retry()``) -- nothing
+about those concerns is duplicated between the two.
+
+``is_permanent_failure`` was also added in the BRENDA increment: some
+sources signal a genuinely permanent failure (BRENDA: an authentication
+fault) using a normally-retryable HTTP status (429/5xx) whose body content
+is what actually distinguishes it from a transient failure at that same
+status. This module has no idea what BRENDA, SOAP, or a fault even are --
+it only knows how to ask an injected, source-supplied predicate "is this
+particular (status, body) pair permanent?" before deciding to retry it. When
+absent (the default for every other connector), retry behavior is exactly
+as before this parameter existed.
 
 This module has no knowledge of any particular source's URL scheme or
 response format, and no database dependency -- persisting a response as an
@@ -83,6 +99,7 @@ class ConnectorHttpClient:
         rate_limiter: RateLimiter | None = None,
         cache: ResponseCache | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        is_permanent_failure: Callable[[int, str], bool] | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
@@ -93,6 +110,7 @@ class ConnectorHttpClient:
         self._rate_limiter = rate_limiter or NullRateLimiter()
         self._cache = cache
         self._sleep = sleep
+        self._is_permanent_failure = is_permanent_failure
 
     def get(
         self,
@@ -108,28 +126,71 @@ class ConnectorHttpClient:
         replaces whatever was cached, so a later ordinary call benefits from
         it too.
         """
-        cache_key = build_cache_key("GET", url, params)
+        return self._request("GET", url, params=params, refresh=refresh)
+
+    def post(
+        self,
+        url: str,
+        *,
+        content: bytes | str,
+        headers: Mapping[str, str] | None = None,
+        refresh: bool = False,
+    ) -> RawResponse:
+        """Perform a POST request, subject to caching, rate limiting, and retry.
+
+        For connectors whose actual wire protocol carries its request as a
+        body rather than query parameters (e.g. a SOAP envelope). Semantics
+        otherwise identical to ``get()``.
+        """
+        return self._request("POST", url, content=content, headers=headers, refresh=refresh)
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        content: bytes | str | None = None,
+        headers: Mapping[str, str] | None = None,
+        refresh: bool = False,
+    ) -> RawResponse:
+        cache_key = build_cache_key(method, url, params, content)
 
         if self._cache is not None and not refresh:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
 
-        response = self._send_with_retry(url, params=params)
+        response = self._send_with_retry(
+            method, url, params=params, content=content, headers=headers
+        )
 
         if self._cache is not None:
             self._cache.set(cache_key, response)
 
         return response
 
-    def _send_with_retry(self, url: str, *, params: Mapping[str, Any] | None) -> RawResponse:
+    def _send_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None,
+        content: bytes | str | None,
+        headers: Mapping[str, str] | None,
+    ) -> RawResponse:
         attempt = 0
         while True:
             self._rate_limiter.acquire()
 
             try:
                 httpx_response = self._client.request(
-                    "GET", url, params=params, timeout=self._timeout
+                    method,
+                    url,
+                    params=params,
+                    content=content,
+                    headers=headers,
+                    timeout=self._timeout,
                 )
             except httpx.TimeoutException as exc:
                 self._retry_or_raise_network(url, attempt, exc, reason="timed out")
@@ -143,14 +204,14 @@ class ConnectorHttpClient:
             status_code = httpx_response.status_code
 
             if _is_retryable_status(status_code):
-                self._retry_or_raise_http(url, attempt, status_code)
+                self._retry_or_raise_http(url, attempt, status_code, httpx_response.text)
                 attempt += 1
                 continue
 
             if status_code >= 400:
                 message = f"HTTP {status_code} for {url} (not retried)"
                 logger.error(message, extra={"url": url, "status_code": status_code})
-                raise ConnectorHTTPError(status_code, message)
+                raise ConnectorHTTPError(status_code, message, body=httpx_response.text)
 
             return RawResponse(
                 status_code=status_code,
@@ -170,13 +231,16 @@ class ConnectorHttpClient:
             raise ConnectorNetworkError(message) from exc
         self._sleep(self._backoff_base * (2**attempt))
 
-    def _retry_or_raise_http(self, url: str, attempt: int, status_code: int) -> None:
-        if attempt >= self._max_retries:
+    def _retry_or_raise_http(self, url: str, attempt: int, status_code: int, body: str) -> None:
+        permanent = self._is_permanent_failure is not None and self._is_permanent_failure(
+            status_code, body
+        )
+        if permanent or attempt >= self._max_retries:
             message = f"HTTP {status_code} for {url} after {attempt + 1} attempt(s)"
             logger.error(message, extra={"url": url, "status_code": status_code})
             if status_code == 429:
-                raise ConnectorRateLimitError(message)
-            raise ConnectorHTTPError(status_code, message)
+                raise ConnectorRateLimitError(message, body=body)
+            raise ConnectorHTTPError(status_code, message, body=body)
         self._sleep(self._backoff_base * (2**attempt))
 
 
