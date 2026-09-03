@@ -29,6 +29,7 @@ _CONFIG_ENV_VARS = (
     "BRENDA_USERNAME",
     "BRENDA_PASSWORD",
     "KEGG_BASE_URL",
+    "SGD_BASE_URL",
 )
 
 
@@ -69,6 +70,7 @@ def test_optional_credentials_default_to_none() -> None:
     assert settings.llm_provider is None
     assert settings.llm_model is None
     assert settings.kegg_base_url is None
+    assert settings.sgd_base_url is None
 
 
 def test_llm_temperature_defaults_to_zero() -> None:

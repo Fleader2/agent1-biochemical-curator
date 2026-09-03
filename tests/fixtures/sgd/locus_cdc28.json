@@ -1,0 +1,20 @@
+{
+  "sgdid": "S000000364",
+  "format_name": "YBR160W",
+  "display_name": "CDC28",
+  "gene_name": "CDC28",
+  "locus_type": "ORF",
+  "qualifier": "Verified",
+  "description": "Synthetic test description, paraphrased from the real SGD entry: cyclin-dependent kinase (CDK) catalytic subunit; master regulator of mitotic and meiotic cell cycles.",
+  "uniprot_id": "P00546",
+  "aliases": [
+    {"id": 1, "display_name": "CDK1", "category": "Alias", "link": null},
+    {"id": 2, "display_name": "HSL5", "category": "Alias", "link": null},
+    {"id": 3, "display_name": "P00546", "category": "UniProtKB ID", "link": "http://www.uniprot.org/uniprot/P00546"},
+    {"id": 4, "display_name": "2.7.11.22", "category": "EC number", "link": "http://www.expasy.org/enzyme/2.7.11.22"}
+  ],
+  "urls": [
+    {"category": "LOCUS_LSP_RESOURCES", "display_name": "Entrez Gene", "link": "http://www.ncbi.nlm.nih.gov/gene/852457"},
+    {"category": "LOCUS_LSP_RESOURCES", "display_name": "E.C.2.7.11.22", "link": "http://www.expasy.org/enzyme/2.7.11.22"}
+  ]
+}

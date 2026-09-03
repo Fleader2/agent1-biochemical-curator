@@ -1,0 +1,24 @@
+{
+  "total": {"value": 2, "relation": "eq"},
+  "results": [
+    {
+      "name": "CDC28 / YBR160W",
+      "href": "/locus/S000000364",
+      "description": "Synthetic test description: cyclin-dependent kinase (CDK) catalytic subunit.",
+      "category": "locus",
+      "bioentity_id": 1268219,
+      "status": "Active",
+      "aliases": ["CDK1", "HSL5"]
+    },
+    {
+      "name": "CKS1 / YBR135W",
+      "href": "/locus/S000000339",
+      "description": "Synthetic test description: cyclin-dependent kinase regulatory subunit.",
+      "category": "locus",
+      "bioentity_id": 1267647,
+      "status": "Active",
+      "aliases": []
+    }
+  ],
+  "aggregations": []
+}

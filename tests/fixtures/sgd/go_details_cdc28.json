@@ -1,0 +1,66 @@
+[
+  {
+    "id": 10154555,
+    "annotation_type": "computational",
+    "date_created": "2020-01-01",
+    "locus": {"display_name": "CDC28"},
+    "go": {
+      "go_id": "GO:0000307",
+      "display_name": "cyclin-dependent protein kinase holoenzyme complex",
+      "go_aspect": "cellular component"
+    },
+    "reference": {},
+    "source": {},
+    "experiment": {"display_name": "IBA"},
+    "qualifier": null,
+    "properties": []
+  },
+  {
+    "id": 10154556,
+    "annotation_type": "manually curated",
+    "date_created": "2020-01-01",
+    "locus": {"display_name": "CDC28"},
+    "go": {
+      "go_id": "GO:0005737",
+      "display_name": "cytoplasm",
+      "go_aspect": "cellular component"
+    },
+    "reference": {},
+    "source": {},
+    "experiment": {"display_name": "IDA"},
+    "qualifier": null,
+    "properties": []
+  },
+  {
+    "id": 10154546,
+    "annotation_type": "computational",
+    "date_created": "2020-01-01",
+    "locus": {"display_name": "CDC28"},
+    "go": {
+      "go_id": "GO:0004693",
+      "display_name": "cyclin-dependent protein serine/threonine kinase activity",
+      "go_aspect": "molecular function"
+    },
+    "reference": {},
+    "source": {},
+    "experiment": {"display_name": "IBA"},
+    "qualifier": null,
+    "properties": []
+  },
+  {
+    "id": 10529032,
+    "annotation_type": "computational",
+    "date_created": "2020-01-01",
+    "locus": {"display_name": "CDC28"},
+    "go": {
+      "go_id": "GO:0000086",
+      "display_name": "G2/M transition of mitotic cell cycle",
+      "go_aspect": "biological process"
+    },
+    "reference": {},
+    "source": {},
+    "experiment": {"display_name": "IBA"},
+    "qualifier": "involved in",
+    "properties": []
+  }
+]

@@ -63,6 +63,10 @@ class Settings(BaseSettings):
 
     kegg_base_url: str | None = None
 
+    sgd_base_url: str | None = None
+    """Saccharomyces Genome Database REST API base URL. No credential is required
+    by SGD's public API; no default is supplied here, matching ``kegg_base_url``."""
+
     @property
     def sqlalchemy_url(self) -> str:
         """Database URL with an explicit driver.
