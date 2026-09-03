@@ -316,6 +316,15 @@ Scientific connectors
 - SGD
 - BioCyc
 
+Implemented: KEGG, PubMed, SGD, BRENDA.
+
+BioCyc is deferred, not abandoned. Current BioCyc access requires a paid
+subscription for both YeastCyc (*Saccharomyces cerevisiae*) and MetaCyc,
+which this project does not currently have. Implementing and validating a
+BioCyc connector responsibly requires licensed access to verify its actual
+request/response behavior; this is a licensing/access constraint, not a
+technical limitation. Revisit BioCyc once appropriate access is obtained.
+
 ## Phase 4
 
 Entity normalization
