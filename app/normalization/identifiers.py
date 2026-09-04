@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from enum import StrEnum
+from typing import Protocol
 from uuid import UUID
 
 
@@ -63,4 +64,41 @@ def require_non_empty(value: str, *, field_name: str = "value") -> str:
     return stripped
 
 
-__all__ = ["CandidateSetState", "classify_candidates", "require_non_empty"]
+class _HasId(Protocol):
+    """Structural type: any candidate snapshot with a UUID ``id`` attribute."""
+
+    id: UUID
+
+
+def unique_by_id[T: _HasId](candidates: Sequence[T]) -> tuple[T, ...]:
+    """Deduplicate a candidate sequence by ``.id``, preserving first-seen order.
+
+    Promoted here (Phase 4, Increment 4) after the identical dedup-by-id
+    logic was hand-written a third time across entity normalizers
+    (``app.normalization.organism``, ``app.normalization.publication``, and
+    now ``app.normalization.gene``) -- narrow, generic, and exactly the kind
+    of behavior worth sharing, unlike a general matcher/fuzzy-matching
+    framework, which this module still never provides. A lookup
+    implementation that could return the same row twice (e.g. from a join)
+    must not manufacture ``CandidateSetState.AMBIGUOUS`` on that account
+    alone; ``classify_candidates()`` is deliberately cardinality-only and
+    must not itself add deduplication, so callers dedupe first, here.
+
+    ``app.normalization.organism``'s and ``app.normalization.publication``'s
+    own private ``_unique_candidates`` helpers are left as-is rather than
+    retrofitted to call this -- both are already committed and approved, and
+    consolidating them is a cosmetic change with no behavior difference, not
+    something this increment's scope requires.
+    """
+    seen: dict[UUID, T] = {}
+    for candidate in candidates:
+        seen.setdefault(candidate.id, candidate)
+    return tuple(seen.values())
+
+
+__all__ = [
+    "CandidateSetState",
+    "classify_candidates",
+    "require_non_empty",
+    "unique_by_id",
+]
