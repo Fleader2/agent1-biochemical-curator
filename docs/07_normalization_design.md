@@ -137,6 +137,70 @@ above), and whether such a constraint should differ by identifier or by
 source. Do not change the schema now — this is a decision for a later
 increment.
 
+## F. Compartment reference-row weak lookup
+
+`app.normalization.compartment`'s organism-scoped weak lookups (`by_name`/
+`by_abbreviation`) require an *exact* match on the requested `organism_id`,
+including matching `None` to `None` only — they do **not** fall back to
+also surfacing standard/reference rows (`organism_id IS NULL`) as
+collision candidates when a specific organism is requested.
+
+Example: requested organism = *S. cerevisiae*, incoming `name = "cytosol"`,
+and an existing reference compartment `name = "cytosol"`,
+`organism_id = NULL`. The current implementation does not surface that
+reference row through the weak lookup path at all.
+
+**Before persistence and Reaction normalization are finalized**, decide
+whether standard/reference rows should:
+
+- participate in organism-scoped weak collision guarding,
+- serve only as ontology-anchored reference entities (reachable solely via
+  `by_ontology_id`, never via `name`/`abbreviation`),
+- act as templates from which organism-specific compartments are later
+  instantiated, or
+- have another explicitly defined relationship.
+
+Do not resolve this question here.
+
+## G. Compartment ontology/name disagreement
+
+Once `ontology_id` produces a clean `MATCHED` result in
+`app.normalization.compartment`, a differing incoming `name`/`abbreviation`
+does not currently change the status. `name`/`abbreviation` are weak
+signals and are not used to overturn a Level 1 ontology identity match —
+the same treatment Compound's own Level 2 fields receive (see Question C).
+
+**Before this is relied upon for scientific review**, decide whether such a
+disagreement should remain:
+
+- `MATCHED` with the discrepancy surfaced,
+- `CONFLICTED`,
+- `NEEDS_REVIEW`, or
+- another explicit condition.
+
+Do not resolve this yet — this is recorded as an explicit open question,
+not a settled behavior.
+
+## H. Compartment indexing and uniqueness
+
+`Compartment` currently has **no indexes or uniqueness constraints at all**
+beyond its UUID primary key — not on `ontology_id`, not on `name`, not on
+`abbreviation`, and no composite constraint on `organism_id` plus any of
+them (verified in `app/models/compartment.py` and migration
+`0002_reference_data.py`). This is the least-constrained schema of any
+entity normalized so far.
+
+**Before high-volume Compartment persistence/import**, decide whether to
+add indexes and/or uniqueness rules for:
+
+- `ontology_id` (global, mirroring `protein.uniprot_id`'s own still-open
+  Question A),
+- `organism_id` + `name`,
+- `organism_id` + `abbreviation`.
+
+Do not change the database schema now — this is a decision for a later
+increment.
+
 ---
 
 # Finalized Normalization Policy: Protein (Increment 5)
@@ -276,3 +340,134 @@ test_no_canonical_name_never_becomes_new_even_with_strong_id
 ```
 
 All twelve already exist and pass in `tests/normalization/test_compound.py`.
+
+---
+
+# Finalized Normalization Policy: Compartment (Increment 7)
+
+Full rationale lives in `app/normalization/compartment.py`'s module
+docstring; this is a summary for cross-reference.
+
+## Schema semantics
+
+- `Compartment.organism_id` is nullable.
+- `organism_id = NULL` is explicitly defined by the existing model
+  docstring (`app/models/compartment.py`) and migration
+  `0002_reference_data` as a **standard/reference compartment
+  definition**, not as an unknown organism.
+- The migration seeds 13 standard/reference compartments (`cytosol`,
+  `mitochondrial matrix`, `mitochondrial intermembrane space`,
+  `mitochondrial inner membrane`, `mitochondrial outer membrane`,
+  `peroxisome`, `endoplasmic reticulum`, `Golgi`, `lipid droplet`,
+  `nucleus`, `vacuole`, `plasma membrane`, `extracellular`) with
+  `organism_id = NULL`.
+- `Compartment` currently has **no indexes or uniqueness constraints** on
+  `name`, `abbreviation`, `ontology_id`, or any `organism_id` combination
+  — see Open Question H above.
+
+These facts are recorded as verified, not reinterpreted.
+
+## Identity hierarchy
+
+- **Level 1** (the only signal that can independently produce `MATCHED`):
+  `ontology_id`.
+- **Level 2 / weak candidate generation** (may produce candidate
+  collisions, never `MATCHED`): exact `name`, exact `abbreviation`.
+
+## Ontology-ID policy
+
+- Lookup is **global** (no organism parameter).
+- Identifier comparison is literal: no case-folding, no prefix stripping,
+  no namespace conversion, no ontology-equivalence inference.
+- Multiple rows carrying one `ontology_id` are not assumed impossible — the
+  schema does not prevent it (see Open Question H), so candidate-list
+  discipline applies unconditionally.
+
+Organism-aware reconciliation:
+
+- one candidate in the requested organism → `MATCHED`
+- one standard/reference candidate (`organism_id = NULL`) → `MATCHED`
+- one candidate in a different, non-`NULL` organism → `CONFLICTED`
+- multiple candidates all contained within `{requested organism, NULL}` →
+  `AMBIGUOUS`
+- multiple candidates including any foreign non-`NULL` organism →
+  `CONFLICTED`
+
+For a normalization request whose `organism_id` itself is `NULL`,
+standard/reference rows (`organism_id = NULL`) are the matching scope.
+
+## Name policy
+
+- Exact, organism-scoped lookup only.
+- No fuzzy matching, no synonym expansion, no case-folding, no substring
+  matching.
+- Even one exact name candidate → `AMBIGUOUS`, never `MATCHED`.
+
+Examples verified to remain distinct: `cytosol` / `cytoplasm`,
+`mitochondrion` / `mitochondrial matrix`, `mitochondrial matrix` /
+`mitochondrial intermembrane space`, `mitochondrial inner membrane` /
+`mitochondrial outer membrane`, `ER` / `Golgi`, `peroxisome` /
+`mitochondrion`.
+
+## Abbreviation policy
+
+- Exact, organism-scoped lookup only.
+- Candidate generation only — one or more candidates → `AMBIGUOUS`.
+- Never independently produces `MATCHED`.
+- No abbreviation expansion (e.g. `ER` is not automatically converted to
+  `endoplasmic reticulum`).
+
+## NEW policy
+
+`NEW` requires:
+
+- `ontology_id` supplied,
+- no strong match, ambiguity, or conflict,
+- no weak name/abbreviation collision in the requested scope,
+- `name` present.
+
+Weak-signal-only identities (no `ontology_id`) cannot produce `NEW`. No
+name is synthesized from `ontology_id` or `abbreviation`. A request with
+`organism_id = NULL` is a valid, explicit standard/reference scope and may
+produce `NEW` if all normal `NEW` conditions are satisfied.
+
+## Ontology/name disagreement
+
+Once `ontology_id` produces a clean `MATCHED` result, differing incoming
+`name` or `abbreviation` does not currently change the status. Name and
+abbreviation are weak signals and are not used to overturn a Level 1
+ontology identity match. **This is recorded as an explicit unresolved
+policy question (see Open Question G above), not a permanently settled
+behavior.**
+
+## Connector behavior
+
+No connector adapter was implemented. Existing SGD cellular-component/GO
+annotations (`app.connectors.sgd.SgdGoAnnotation`) represent localization
+*evidence* about genes/proteins, not standalone Compartment identity
+records — `docs/03_agent_behavior.md`'s "Compartment Curation Behavior"
+section is explicitly about localization claims, a distinct curation
+concern. Localization evidence is not converted directly into
+`CompartmentIdentity` in this normalization layer.
+
+## Proposed regression tests
+
+Minimal Compartment-normalization test names proposed for
+`docs/05_testing.md` (not yet added there):
+
+```text
+test_ontology_id_single_candidate_in_requested_organism_matched
+test_ontology_id_matches_standard_reference_compartment
+test_ontology_id_candidate_in_different_organism_is_conflicted_never_new
+test_ontology_id_candidates_spanning_requested_and_global_is_ambiguous_not_conflicted
+test_exact_same_organism_name_single_candidate_is_ambiguous_never_matched
+test_cytosol_does_not_match_cytoplasm
+test_mitochondrion_does_not_match_mitochondrial_matrix
+test_abbreviation_collision_prevents_new
+test_ontology_match_stands_despite_differing_name
+test_semantically_related_compartments_are_never_automatically_merged
+test_global_scope_request_can_become_new
+test_foreign_strong_id_collision_never_becomes_new
+```
+
+All twelve already exist and pass in `tests/normalization/test_compartment.py`.
