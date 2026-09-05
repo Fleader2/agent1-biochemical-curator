@@ -11,12 +11,17 @@ from app.claim_generation.errors import ClaimGenerationError
 from app.claim_generation.generator import generate_candidate_claims
 from app.claim_generation.mapping import NormalizationLookups
 from app.claim_generation.types import EntityKind, EntityTypingHint
+from app.connectors.sgd import SgdLocusRecord, SgdNormalizedRecord, SgdSearchHit
+from app.connectors.uniprot import UniProtEntryRecord, UniProtProteinRecord, UniProtSearchHit
+from app.entity_resolution.resolver import ConnectorBundle
+from app.entity_resolution.types import MentionResolutionStatus
 from app.extraction.types import Directness
 from app.models.enums import EvidenceType
 from app.normalization.gene import GeneCandidate
 from app.normalization.organism import OrganismCandidate
+from app.normalization.protein import ProteinCandidate
 from app.normalization.types import NormalizationStatus
-from tests.claim_generation.fakes import FakeGeneLookup, FakeOrganismLookup
+from tests.claim_generation.fakes import FakeGeneLookup, FakeOrganismLookup, FakeProteinLookup
 from tests.claim_generation.fixtures import (
     ACTIVATION_EXTRACTION,
     AMBIGUOUS_ENTITY_EXTRACTION,
@@ -31,8 +36,53 @@ from tests.claim_generation.fixtures import (
     NUMERIC_VALUE_EXTRACTION,
     REVIEW_EXTRACTION,
 )
+from tests.entity_resolution.fakes import FakeSgdConnector, FakeUniProtConnector
 
 ORGANISM_ID = uuid4()
+
+
+def _sgd_locus(
+    sgd_id="S000000001", standard_name="FadR", systematic_name="YHR123W"
+) -> SgdLocusRecord:
+    return SgdLocusRecord(
+        sgd_id=sgd_id,
+        systematic_name=systematic_name,
+        standard_name=standard_name,
+        locus_type="ORF",
+        description=None,
+        aliases=(),
+        uniprot_id=None,
+        external_links=(),
+        raw={},
+    )
+
+
+def _sgd_normalized(locus: SgdLocusRecord) -> SgdNormalizedRecord:
+    return SgdNormalizedRecord(
+        sgd_id=locus.sgd_id,
+        systematic_name=locus.systematic_name,
+        standard_name=locus.standard_name,
+        description=locus.description,
+        aliases=(),
+        uniprot_id=locus.uniprot_id,
+        external_links=(),
+        raw=locus,
+    )
+
+
+def _organism_lookup(scientific_name: str = "Escherichia coli"):
+    return FakeOrganismLookup(
+        organisms=[
+            OrganismCandidate(
+                id=ORGANISM_ID,
+                scientific_name=scientific_name,
+                strain=None,
+                ncbi_taxonomy_id=None,
+                kegg_code=None,
+                biocyc_id=None,
+            )
+        ]
+    )
 
 
 # --- basic input validation --------------------------------------------------
@@ -294,3 +344,276 @@ def test_generate_candidate_claims_never_touches_a_database():
     source = inspect.getsource(generator_module)
     assert "Session" not in source
     assert "session" not in source
+
+
+# --- Entity Resolution integration (Increment 16) --------------------------------
+
+
+def test_without_connectors_behavior_is_unchanged():
+    """Backward compatibility: omitting connectors reproduces the exact
+
+    pre-Increment-16 result (bare symbol match stays AMBIGUOUS, never
+    MATCHED, and mention_resolution_result is never populated).
+    """
+    gene_a, gene_b = uuid4(), uuid4()
+    lookup = FakeGeneLookup(
+        genes=[
+            GeneCandidate(
+                id=gene_a,
+                organism_id=ORGANISM_ID,
+                sgd_id=None,
+                ncbi_gene_id=None,
+                kegg_gene_id=None,
+                systematic_name=None,
+                symbol="FadR",
+                aliases=(),
+                description=None,
+            ),
+            GeneCandidate(
+                id=gene_b,
+                organism_id=ORGANISM_ID,
+                sgd_id=None,
+                ncbi_gene_id=None,
+                kegg_gene_id=None,
+                systematic_name=None,
+                symbol="FadR",
+                aliases=(),
+                description=None,
+            ),
+        ]
+    )
+    lookups = NormalizationLookups(gene=lookup, organism=_organism_lookup())
+    [claim] = generate_candidate_claims(
+        [ACTIVATION_EXTRACTION],
+        lookups=lookups,
+        typing_hints=[EntityTypingHint(subject_kind=EntityKind.GENE)],
+    )
+    assert claim.subject.mention_resolution_result is None
+    assert claim.subject.normalization_result.status is NormalizationStatus.AMBIGUOUS
+
+
+def test_gene_subject_prefers_entity_resolution_when_connectors_supplied():
+    locus = _sgd_locus()
+    normalized = _sgd_normalized(locus)
+    connector = FakeSgdConnector(
+        hits_by_query={
+            "FadR": [
+                SgdSearchHit(
+                    sgd_id="S000000001",
+                    systematic_name="YHR123W",
+                    standard_name="FadR",
+                    description=None,
+                    aliases=(),
+                )
+            ]
+        },
+        locus_by_sgd_id={"S000000001": locus},
+        normalized_by_sgd_id={"S000000001": normalized},
+    )
+    gene_id = uuid4()
+    gene_lookup = FakeGeneLookup(
+        genes=[
+            GeneCandidate(
+                id=gene_id,
+                organism_id=ORGANISM_ID,
+                sgd_id="S000000001",
+                ncbi_gene_id=None,
+                kegg_gene_id=None,
+                systematic_name="YHR123W",
+                symbol="FadR",
+                aliases=(),
+                description=None,
+            )
+        ]
+    )
+    lookups = NormalizationLookups(gene=gene_lookup, organism=_organism_lookup())
+    [claim] = generate_candidate_claims(
+        [ACTIVATION_EXTRACTION],
+        lookups=lookups,
+        typing_hints=[EntityTypingHint(subject_kind=EntityKind.GENE)],
+        connectors=ConnectorBundle(sgd=connector),
+    )
+    assert claim.subject.mention_resolution_result is not None
+    assert claim.subject.mention_resolution_result.status is MentionResolutionStatus.RESOLVED
+    assert claim.subject.normalized_id == gene_id
+
+
+def test_protein_subject_uses_uniprot_enrichment_end_to_end():
+    """Key acceptance case: typed PROTEIN + resolved organism + UniProt
+
+    connector produces a RESOLVED CandidateEntityReference with the full
+    MentionResolutionResult preserved, and no Gene inference occurs.
+    """
+    entry = UniProtEntryRecord(
+        primary_accession="P99999",
+        entry_name="TEST1_ECOLI",
+        entry_type="UniProtKB reviewed (Swiss-Prot)",
+        secondary_accessions=(),
+        recommended_name="Test-only regulatory protein",
+        submitted_names=(),
+        gene_names=("fadR",),
+        organism_name="Escherichia coli",
+        organism_taxonomy_id=511145,
+        ec_numbers=(),
+        sequence_length=239,
+        cross_references=(),
+        raw={},
+    )
+    normalized = UniProtProteinRecord(
+        primary_accession=entry.primary_accession,
+        entry_name=entry.entry_name,
+        reviewed=True,
+        protein_name=entry.recommended_name,
+        gene_names=entry.gene_names,
+        organism_name=entry.organism_name,
+        organism_taxonomy_id=entry.organism_taxonomy_id,
+        ec_numbers=entry.ec_numbers,
+        sequence_length=entry.sequence_length,
+        secondary_accessions=entry.secondary_accessions,
+        cross_references=entry.cross_references,
+        raw=entry,
+    )
+    connector = FakeUniProtConnector(
+        hits_by_query={
+            'FadR AND organism_name:"Escherichia coli"': [
+                UniProtSearchHit(
+                    primary_accession="P99999", entry_name="TEST1_ECOLI", reviewed=True
+                )
+            ]
+        },
+        entry_by_accession={"P99999": entry},
+        normalized_by_accession={"P99999": normalized},
+    )
+    protein_id = uuid4()
+    protein_lookup = FakeProteinLookup(
+        proteins=[
+            ProteinCandidate(
+                id=protein_id,
+                organism_id=ORGANISM_ID,
+                uniprot_id="P99999",
+                name="Test-only regulatory protein",
+                gene_id=None,
+                ec_number=None,
+            )
+        ]
+    )
+    lookups = NormalizationLookups(protein=protein_lookup, organism=_organism_lookup())
+    [claim] = generate_candidate_claims(
+        [ACTIVATION_EXTRACTION],
+        lookups=lookups,
+        typing_hints=[EntityTypingHint(subject_kind=EntityKind.PROTEIN)],
+        connectors=ConnectorBundle(uniprot=connector),
+    )
+    assert claim.subject.mention_resolution_result.status is MentionResolutionStatus.RESOLVED
+    assert claim.subject.normalized_id == protein_id
+    [candidate] = claim.subject.mention_resolution_result.candidates
+    assert candidate.normalization_input.gene_id is None  # no Gene inference
+
+
+def test_protein_subject_missing_organism_stays_unresolved_not_direct():
+    """ACTIVATION_EXTRACTION's organism_text resolves fine, but if organism
+
+    normalization itself is unavailable (no OrganismLookup supplied), the
+    UniProt path must report UNRESOLVED rather than silently falling back.
+    """
+    connector = FakeUniProtConnector()
+    protein_lookup = FakeProteinLookup(proteins=[])
+    lookups = NormalizationLookups(protein=protein_lookup)  # no organism lookup
+    [claim] = generate_candidate_claims(
+        [ACTIVATION_EXTRACTION],
+        lookups=lookups,
+        typing_hints=[EntityTypingHint(subject_kind=EntityKind.PROTEIN)],
+        connectors=ConnectorBundle(uniprot=connector),
+    )
+    assert claim.subject.mention_resolution_result.status is MentionResolutionStatus.UNRESOLVED
+    assert claim.subject.normalized_id is None
+
+
+def test_source_failure_preserved_in_claim_not_masked():
+    class _FailingSgd:
+        def search(self, query):
+            from app.connectors.exceptions import ConnectorNetworkError
+
+            raise ConnectorNetworkError("simulated timeout")
+
+        def fetch(self, external_id):  # pragma: no cover - not reached
+            return None
+
+        def normalize(self, raw):  # pragma: no cover - not reached
+            raise AssertionError
+
+    lookups = NormalizationLookups(gene=FakeGeneLookup(genes=[]), organism=_organism_lookup())
+    [claim] = generate_candidate_claims(
+        [ACTIVATION_EXTRACTION],
+        lookups=lookups,
+        typing_hints=[EntityTypingHint(subject_kind=EntityKind.GENE)],
+        connectors=ConnectorBundle(sgd=_FailingSgd()),
+    )
+    assert claim.subject.mention_resolution_result.status is MentionResolutionStatus.SOURCE_FAILURE
+    assert claim.subject.normalized_id is None
+
+
+def test_organism_reference_never_uses_entity_resolution():
+    """Even with a full connectors bundle, organism resolution is always
+
+    the pre-existing direct-normalization path (no dedicated organism
+    enrichment connector exists -- docs/12_entity_resolution_architecture.md
+    §11).
+    """
+    lookups = NormalizationLookups(organism=_organism_lookup())
+    [claim] = generate_candidate_claims(
+        [ACTIVATION_EXTRACTION],
+        lookups=lookups,
+        connectors=ConnectorBundle(sgd=FakeSgdConnector(), uniprot=FakeUniProtConnector()),
+    )
+    assert claim.organism.mention_resolution_result is None
+    assert claim.organism.normalized_id == ORGANISM_ID
+
+
+def test_unsupported_kind_connector_bundle_falls_back_to_direct_normalization():
+    """A connectors bundle missing the specific connector a kind needs
+
+    falls back to direct bare-text normalization for that kind, exactly
+    as if no connectors had been supplied at all.
+    """
+    gene_id = uuid4()
+    lookup = FakeGeneLookup(
+        genes=[
+            GeneCandidate(
+                id=gene_id,
+                organism_id=ORGANISM_ID,
+                sgd_id=None,
+                ncbi_gene_id=None,
+                kegg_gene_id=None,
+                systematic_name=None,
+                symbol="FadR",
+                aliases=(),
+                description=None,
+            )
+        ]
+    )
+    lookups = NormalizationLookups(gene=lookup, organism=_organism_lookup())
+    [claim] = generate_candidate_claims(
+        [ACTIVATION_EXTRACTION],
+        lookups=lookups,
+        typing_hints=[EntityTypingHint(subject_kind=EntityKind.GENE)],
+        connectors=ConnectorBundle(uniprot=FakeUniProtConnector()),  # no sgd connector
+    )
+    assert claim.subject.mention_resolution_result is None
+    assert claim.subject.normalization_result.status is NormalizationStatus.AMBIGUOUS
+
+
+def test_no_persistence_confidence_or_gene_protein_inference_with_connectors():
+    """Structural safety check on the Increment 16 integration surface."""
+    import inspect
+
+    import app.claim_generation.generator as generator_module
+    import app.claim_generation.mapping as mapping_module
+
+    for module in (generator_module, mapping_module):
+        source = inspect.getsource(module)
+        assert "confidence_score" not in source
+        assert "confidence_class" not in source
+        assert "Session" not in source
+        assert "ExternalRecord" not in source
+        assert "SourceCrossReference" not in source

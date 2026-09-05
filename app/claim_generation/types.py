@@ -103,17 +103,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from app.claim_generation.validation import (
     clean_optional,
     require_non_empty,
     validate_entity_reference_consistency,
+    validate_mention_resolution_consistency,
     validate_value_fields,
 )
 from app.extraction.types import Directness, EvidenceExtraction, SourceSpan
 from app.models.enums import EvidenceType, SourceType
 from app.normalization.types import NormalizationResult
+
+if TYPE_CHECKING:
+    # Deferred to avoid a circular import: app.entity_resolution.types itself
+    # imports EntityKind from this module. See CandidateEntityReference's own
+    # docstring for the runtime (local-import) side of this.
+    from app.entity_resolution.types import MentionResolutionResult
 
 
 class EntityKind(StrEnum):
@@ -173,12 +181,37 @@ class CandidateEntityReference:
     concrete id. This is distinct from ``normalization_result`` being
     present with status ``UNRESOLVED``, which means normalization *was*
     attempted and concluded there was not enough evidence.
+
+    **Increment 16 addition:** ``mention_resolution_result``, an optional
+    ``app.entity_resolution.types.MentionResolutionResult`` -- present only
+    when this reference was produced via the Entity Resolution enrichment
+    path (``app.claim_generation.mapping.resolve_entity_reference`` called
+    with a ``connectors`` bundle) rather than direct bare-text
+    normalization. When present, it -- not ``normalization_result`` alone
+    -- is the authority on ``normalized_id``: ``RESOLVED`` requires
+    ``normalized_id == mention_resolution_result.resolved_entity_id``;
+    every other status requires ``normalized_id is None``. ``None`` means
+    this reference came from the legacy/direct-normalization path (the
+    only path that existed before Increment 16); every pre-Increment-16
+    caller leaves this ``None`` and sees identical behavior to before.
+
+    When Entity Resolution found more than one candidate,
+    ``normalization_result`` is deliberately left ``None`` even for
+    ``RESOLVED`` -- there is no honest way to pick one of several
+    corroborating source candidates as "the" ``NormalizationResult`` for
+    this reference without discarding the others' provenance.
+    ``normalization_result`` is populated from the entity resolution path
+    only when ``mention_resolution_result.candidates`` has exactly one
+    element, in which case that single candidate's own
+    ``normalization_result`` is exactly as informative as if
+    Claim Generation had normalized it directly.
     """
 
     original_text: str
     entity_kind: EntityKind
     normalization_result: NormalizationResult | None = None
     normalized_id: UUID | None = None
+    mention_resolution_result: MentionResolutionResult | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -196,9 +229,41 @@ class CandidateEntityReference:
                 "CandidateEntityReference.normalization_result must be a "
                 f"NormalizationResult or None, got {self.normalization_result!r}"
             )
-        validate_entity_reference_consistency(
-            normalization_result=self.normalization_result, normalized_id=self.normalized_id
-        )
+
+        if self.mention_resolution_result is not None:
+            # Local import: app.entity_resolution.types imports EntityKind
+            # from this module, so a module-level import here would be
+            # circular. By the time any code constructs a
+            # CandidateEntityReference with a real mention_resolution_result,
+            # app.entity_resolution.types has already fully loaded.
+            from app.entity_resolution.types import (
+                MentionResolutionResult as _MentionResolutionResult,
+            )
+
+            if not isinstance(self.mention_resolution_result, _MentionResolutionResult):
+                raise TypeError(
+                    "CandidateEntityReference.mention_resolution_result must be a "
+                    f"MentionResolutionResult or None, got {self.mention_resolution_result!r}"
+                )
+            if self.mention_resolution_result.mention.entity_kind is not self.entity_kind:
+                raise ValueError(
+                    "CandidateEntityReference.mention_resolution_result.mention.entity_kind "
+                    "must equal this reference's own entity_kind"
+                )
+            if self.mention_resolution_result.mention.original_text != self.original_text:
+                raise ValueError(
+                    "CandidateEntityReference.mention_resolution_result.mention.original_text "
+                    "must equal this reference's own original_text"
+                )
+            validate_mention_resolution_consistency(
+                mention_resolution_result=self.mention_resolution_result,
+                normalized_id=self.normalized_id,
+                normalization_result=self.normalization_result,
+            )
+        else:
+            validate_entity_reference_consistency(
+                normalization_result=self.normalization_result, normalized_id=self.normalized_id
+            )
 
 
 @dataclass(frozen=True, slots=True)

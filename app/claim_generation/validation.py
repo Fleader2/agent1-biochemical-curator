@@ -68,6 +68,61 @@ def validate_entity_reference_consistency(
         )
 
 
+def validate_mention_resolution_consistency(
+    *,
+    mention_resolution_result: object,
+    normalized_id: UUID | None,
+    normalization_result: NormalizationResult | None,
+) -> None:
+    """Require ``normalized_id`` to be governed entirely by Entity Resolution's own verdict.
+
+    Used only when a ``CandidateEntityReference`` carries a
+    ``mention_resolution_result`` (Increment 16's Entity Resolution
+    integration path) -- in that case *that* result, not
+    ``normalization_result`` alone, is the authority on ``normalized_id``:
+    ``RESOLVED`` requires it to equal ``resolved_entity_id``; every other
+    status requires it to be ``None`` (mirrors
+    ``validate_entity_reference_consistency``'s role for the direct-
+    normalization path, which is never used together with a
+    ``mention_resolution_result`` on the same reference).
+
+    ``mention_resolution_result`` is intentionally untyped here (``object``)
+    so this module never needs to import
+    ``app.entity_resolution.types.MentionResolutionResult`` -- that module
+    itself imports ``app.claim_generation.types`` (for ``EntityKind``),
+    which imports this module; a module-level import here would be a
+    circular import. Status comparison uses a plain string because
+    ``MentionResolutionStatus`` is a ``StrEnum`` (its members already equal
+    their string value); the caller (``CandidateEntityReference.__post_init__``)
+    is responsible for the actual ``isinstance`` check, via a local import,
+    before calling this function.
+    """
+    if mention_resolution_result.status == "RESOLVED":
+        if normalized_id != mention_resolution_result.resolved_entity_id:
+            raise ClaimValidationError(
+                "normalized_id must equal mention_resolution_result.resolved_entity_id "
+                "when mention_resolution_result.status is RESOLVED"
+            )
+    elif normalized_id is not None:
+        raise ClaimValidationError(
+            "normalized_id must be None when mention_resolution_result.status is "
+            f"{mention_resolution_result.status!r}, not RESOLVED"
+        )
+
+    if normalization_result is not None:
+        if normalization_result.status is NormalizationStatus.MATCHED:
+            if normalized_id != normalization_result.matched_entity_id:
+                raise ClaimValidationError(
+                    "normalized_id must equal normalization_result.matched_entity_id "
+                    "when normalization_result.status is MATCHED"
+                )
+        elif normalized_id is not None:
+            raise ClaimValidationError(
+                "normalized_id must be None when normalization_result.status is "
+                f"{normalization_result.status!r}, not MATCHED"
+            )
+
+
 def validate_value_fields(
     *, value_text: str | None, value_numeric: Decimal | None, value_unit: str | None
 ) -> None:
@@ -85,9 +140,7 @@ def validate_value_fields(
       it came from somewhere other than the source passage.
     """
     if value_unit is not None and value_text is None and value_numeric is None:
-        raise ClaimValidationError(
-            "value_unit was supplied without value_text or value_numeric"
-        )
+        raise ClaimValidationError("value_unit was supplied without value_text or value_numeric")
     if value_numeric is not None and value_text is None:
         raise ClaimValidationError("value_numeric was supplied without value_text")
 
@@ -96,5 +149,6 @@ __all__ = [
     "clean_optional",
     "require_non_empty",
     "validate_entity_reference_consistency",
+    "validate_mention_resolution_consistency",
     "validate_value_fields",
 ]

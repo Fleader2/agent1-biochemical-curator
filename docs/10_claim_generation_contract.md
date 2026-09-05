@@ -198,13 +198,10 @@ identifiers (an SGD id, a UniProt accession, a KEGG compound id) before
 final Claim persistence, which would let normalization reach `MATCHED`
 through its own existing strong-identifier path — see Open Question B.
 
-> **Increment 15 note:** that enrichment layer now exists for Protein
-> mentions — `app.entity_resolution` can resolve `EntityKind.PROTEIN`
-> mentions against UniProtKB (see
-> `docs/11_uniprot_connector_contract.md`). This is a capability available
-> to a caller that wires Entity Resolution in *before* Claim Generation
-> runs; Claim Generation's own code, contract, and behavior described in
-> this document are unchanged by that addition.
+> **Increment 15/16 note:** this enrichment layer now exists, and is now
+> wired directly into `generate_candidate_claims` itself (an optional
+> `connectors` parameter) rather than requiring a separate caller-side
+> step — see §27.
 
 ---
 
@@ -483,7 +480,8 @@ Text-only mentions rarely resolve to `MATCHED` under conservative
 normalization (§7). Design a future, controlled identifier-enrichment or
 retrieval step that may supply strong identifiers (external database
 accessions) without weakening any existing normalization rule.
-**Not implemented here.**
+**Implemented in Increment 16 — see §27.** (Not implemented as of
+Increment 13/this section's original writing.)
 
 ### C. Claim category vocabulary
 
@@ -509,7 +507,81 @@ itself, which is authoritative.
 
 ---
 
-## 27. Final architectural rule
+## 27. Entity Resolution integration (Increment 16)
+
+`generate_candidate_claims` gained one new optional keyword argument:
+
+```python
+generate_candidate_claims(
+    extractions,
+    *,
+    lookups=None,
+    typing_hints=None,
+    connectors: ConnectorBundle | None = None,  # new
+) -> list[CandidateClaim]
+```
+
+`ConnectorBundle` is `app.entity_resolution.resolver.ConnectorBundle`,
+reused directly — no second connector-bundle type was invented. Omitting
+`connectors` (the default) reproduces this document's §1-26 behavior
+exactly: every entity mention is normalized from its bare text directly,
+with no Entity Resolution call at all.
+
+When `connectors` is supplied, subject/object mentions typed `GENE`,
+`PROTEIN`, `COMPOUND`, `REACTION`, or `PUBLICATION` — the kinds
+`docs/12_entity_resolution_architecture.md` §10 lists as having a real
+connector — prefer calling `app.entity_resolution.resolver
+.resolve_entity_mention` over direct bare-text normalization. `ORGANISM`
+and `COMPARTMENT` mentions are **never** routed through Entity Resolution
+(no connector exists for either kind — architecture doc §11); they always
+use the direct-normalization path described in §6-7 of this document,
+regardless of what `connectors` contains.
+
+### CandidateEntityReference addition
+
+One new optional field: `mention_resolution_result:
+MentionResolutionResult | None = None`. `None` on every reference produced
+by the direct-normalization path (including every reference produced when
+`connectors` is omitted) — existing callers see no change. When Entity
+Resolution was used, it carries the complete `MentionResolutionResult`
+(every candidate, not a subset), and governs `normalized_id`: `RESOLVED`
+requires `normalized_id == mention_resolution_result.resolved_entity_id`;
+every other status requires `normalized_id is None`.
+
+### Resolution-outcome mapping
+
+| `MentionResolutionStatus` | `normalized_id` | `normalization_result` |
+|---|---|---|
+| `RESOLVED` | `resolved_entity_id` | populated only if exactly one candidate; else `None` |
+| `AMBIGUOUS` / `CONFLICTED` / `NEW_CANDIDATE` | `None` | populated only if exactly one candidate; else `None` |
+| `NO_CANDIDATE` / `SOURCE_FAILURE` / `UNRESOLVED` | `None` | `None` (zero candidates) |
+| `UNSUPPORTED_ENTITY_KIND` | — | falls back to §6-7's direct-normalization path instead |
+
+`normalization_result` is deliberately left `None` whenever more than one
+candidate was found, even for `RESOLVED` — there is no honest way to pick
+one of several corroborating source candidates as "the" result without
+discarding the others' provenance; `mention_resolution_result.candidates`
+remains the complete record in that case.
+
+`SOURCE_FAILURE` and `UNRESOLVED` are never replaced by a direct-
+normalization fallback — doing so would hide a genuine connector failure,
+or a missing organism-context precondition, behind what looks like an
+ordinary bare-text-unresolved mention. The *only* status that falls back
+to direct normalization is `UNSUPPORTED_ENTITY_KIND` (the supplied
+`connectors` bundle lacks the specific connector this kind needs).
+
+### What did not change
+
+No change was made to: `CandidateClaim`'s own fields or validation;
+predicate/value/evidence-type/directness/grounding handling (§8-17);
+organism-first ordering (organism is still resolved before subject/object,
+and is still never routed through Entity Resolution); `app.normalization.*`
+itself; or any existing `app.claim_generation` test's behavior when
+`connectors` is not supplied.
+
+---
+
+## 28. Final architectural rule
 
 > Claim Generation converts a grounded observation into a candidate
 > scientific assertion.

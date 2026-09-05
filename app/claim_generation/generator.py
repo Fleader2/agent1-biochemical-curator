@@ -5,7 +5,28 @@ list of validated, immutable ``CandidateClaim`` objects -- one per
 extraction. No I/O, no LLM call, no database access: any I/O a
 ``NormalizationLookups`` field performs is entirely the caller's concern,
 exactly as it already is for every other consumer of
-``app.normalization.*``.
+``app.normalization.*`` -- and the same is true of a supplied ``connectors``
+bundle's own I/O (Increment 16).
+
+**Increment 16: optional Entity Resolution integration.**
+``generate_candidate_claims`` gained one new optional keyword argument,
+``connectors: ConnectorBundle | None = None``. When omitted (the default),
+behavior is byte-for-byte identical to every prior increment: every entity
+mention is normalized directly from its bare text via
+``app.claim_generation.mapping.resolve_entity_reference`` (no
+``connectors`` passed to it either), exactly as before. When supplied, it
+is threaded down to every ``resolve_entity_reference`` call for the
+subject and object references (the two references whose ``EntityKind`` can
+be ``GENE``/``PROTEIN``/``COMPOUND``/``REACTION``/``PUBLICATION`` --
+the kinds Entity Resolution currently supports), which then prefer calling
+``app.entity_resolution.resolver.resolve_entity_mention`` over bare-text
+normalization -- see ``app.claim_generation.mapping``'s own module
+docstring for exactly which outcomes fall back to direct normalization and
+which never do. Organism and compartment references are still resolved
+exactly as before in every case (``ORGANISM``/``COMPARTMENT`` are not
+Entity-Resolution-supported kinds -- see
+``docs/12_entity_resolution_architecture.md`` §11), and organism-first
+ordering (organism resolved before subject/object) is unchanged.
 
 **Why one claim per extraction, not extraction-time-style 0/1/many
 splitting.** ``app.extraction.extract_evidence`` already decomposes a
@@ -31,6 +52,7 @@ from decimal import Decimal, InvalidOperation
 from app.claim_generation.errors import ClaimGenerationError
 from app.claim_generation.mapping import NormalizationLookups, resolve_entity_reference
 from app.claim_generation.types import CandidateClaim, EntityKind, EntityTypingHint
+from app.entity_resolution.resolver import ConnectorBundle
 from app.extraction.types import EvidenceExtraction
 
 
@@ -54,8 +76,18 @@ def _parse_numeric_value(measurement_value: str | None) -> tuple[Decimal | None,
 
 
 def _generate_one(
-    extraction: EvidenceExtraction, hint: EntityTypingHint, lookups: NormalizationLookups
+    extraction: EvidenceExtraction,
+    hint: EntityTypingHint,
+    lookups: NormalizationLookups,
+    connectors: ConnectorBundle | None,
 ) -> CandidateClaim:
+    # Organism-first: resolved before subject/object so a truly MATCHED
+    # organism id can be threaded into their organism-scoped normalization
+    # (Gene/Protein/Reaction). ORGANISM is not an Entity-Resolution-
+    # supported kind (see app.claim_generation.mapping's module docstring),
+    # so this call always takes the direct-normalization path regardless
+    # of whether connectors is supplied -- unchanged from every prior
+    # increment.
     organism_reference = resolve_entity_reference(
         text=extraction.organism_text,
         kind=EntityKind.ORGANISM,
@@ -63,6 +95,7 @@ def _generate_one(
         source_identifier=extraction.source_identifier,
         organism_id=None,
         lookups=lookups,
+        connectors=connectors,
     )
     resolved_organism_id = (
         organism_reference.normalized_id if organism_reference is not None else None
@@ -75,6 +108,9 @@ def _generate_one(
         source_identifier=extraction.source_identifier,
         organism_id=resolved_organism_id,
         lookups=lookups,
+        connectors=connectors,
+        organism_context_text=extraction.organism_text,
+        evidence_extraction=extraction,
     )
     assert subject_reference is not None  # subject_text is required on EvidenceExtraction
 
@@ -85,8 +121,13 @@ def _generate_one(
         source_identifier=extraction.source_identifier,
         organism_id=resolved_organism_id,
         lookups=lookups,
+        connectors=connectors,
+        organism_context_text=extraction.organism_text,
+        evidence_extraction=extraction,
     )
 
+    # COMPARTMENT is likewise not an Entity-Resolution-supported kind --
+    # always direct normalization, same as ORGANISM above.
     compartment_reference = resolve_entity_reference(
         text=extraction.compartment_text,
         kind=EntityKind.COMPARTMENT,
@@ -94,6 +135,7 @@ def _generate_one(
         source_identifier=extraction.source_identifier,
         organism_id=resolved_organism_id,
         lookups=lookups,
+        connectors=connectors,
     )
 
     value_numeric, value_text = _parse_numeric_value(extraction.measurement_value)
@@ -124,6 +166,7 @@ def generate_candidate_claims(
     *,
     lookups: NormalizationLookups | None = None,
     typing_hints: Sequence[EntityTypingHint | None] | None = None,
+    connectors: ConnectorBundle | None = None,
 ) -> list[CandidateClaim]:
     """Generate one ``CandidateClaim`` per supplied ``EvidenceExtraction``.
 
@@ -134,6 +177,11 @@ def generate_candidate_claims(
     ``None`` entry (or omitting ``typing_hints`` entirely) means "no
     typing information for this extraction," equivalent to
     ``EntityTypingHint()`` (both subject and object kind ``UNKNOWN``).
+    ``connectors`` defaults to ``None`` (no Entity Resolution enrichment --
+    see module docstring); passing one does not by itself require live
+    network access -- any ``ConnectorBundle`` field may be a test fake or
+    a real connector wired to a real HTTP client, entirely the caller's
+    choice, exactly like ``lookups``.
 
     Output order mirrors input order exactly, one claim per extraction --
     this function never reorders, merges, or drops an extraction. Raises
@@ -164,7 +212,7 @@ def generate_candidate_claims(
         hint = EntityTypingHint()
         if typing_hints is not None and typing_hints[index] is not None:
             hint = typing_hints[index]
-        claims.append(_generate_one(extraction, hint, resolved_lookups))
+        claims.append(_generate_one(extraction, hint, resolved_lookups, connectors))
 
     return claims
 
