@@ -1,0 +1,25 @@
+{
+  "entryType": "UniProtKB reviewed (Swiss-Prot)",
+  "primaryAccession": "P99999-2",
+  "secondaryAccessions": [],
+  "uniProtkbId": "TEST1_YEAST",
+  "organism": {
+    "scientificName": "Saccharomyces cerevisiae (strain ATCC 204508 / S288c)",
+    "taxonId": 559292
+  },
+  "proteinDescription": {
+    "recommendedName": {
+      "fullName": {"value": "Test-only acetyl-CoA carboxylase, isoform 2"}
+    }
+  },
+  "genes": [
+    {"geneName": {"value": "TEST1"}}
+  ],
+  "sequence": {
+    "length": 2100,
+    "value": "MTESTONLYISOFORMSEQUENCE"
+  },
+  "uniProtKBCrossReferences": [
+    {"database": "SGD", "id": "S000099999"}
+  ]
+}

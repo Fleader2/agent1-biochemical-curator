@@ -198,6 +198,14 @@ identifiers (an SGD id, a UniProt accession, a KEGG compound id) before
 final Claim persistence, which would let normalization reach `MATCHED`
 through its own existing strong-identifier path — see Open Question B.
 
+> **Increment 15 note:** that enrichment layer now exists for Protein
+> mentions — `app.entity_resolution` can resolve `EntityKind.PROTEIN`
+> mentions against UniProtKB (see
+> `docs/11_uniprot_connector_contract.md`). This is a capability available
+> to a caller that wires Entity Resolution in *before* Claim Generation
+> runs; Claim Generation's own code, contract, and behavior described in
+> this document are unchanged by that addition.
+
 ---
 
 ## 8. Predicate policy

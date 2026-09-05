@@ -142,38 +142,45 @@ accession-prefix stripping -- none has an existing, documented, deterministic
 rule anywhere in this repository, and inventing one here would violate
 ``.cursor/rules/01-scientific-integrity.mdc``.
 
-**Connector adapters deliberately omitted.** No ``protein_identity_from_sgd``
-or ``protein_identity_from_brenda`` helper exists in this module. SGD's
+**Connector adapters.** ``protein_identity_from_uniprot`` is implemented
+(Increment 15): ``app.connectors.uniprot.UniProtConnector`` is a genuine
+protein-level source whose primary accession is exactly this module's own
+Level 1 identifier, so adapting it is safe and direct -- unlike every other
+connector in this repository. No ``protein_identity_from_sgd`` or
+``protein_identity_from_brenda`` helper exists, and neither should: SGD's
 locus/gene record (``app.connectors.sgd.SgdNormalizedRecord``) exposes a
 UniProt cross-reference, but it is a *gene-side* record -- converting it
 directly into a ``ProteinIdentity`` would assert a specific Gene<->Protein
 relationship (one UniProt accession per gene) that Increment 4's own
 correction explicitly rejected as a biological oversimplification (a gene
 may correspond to more than one protein product). That SGD UniProt value
-remains available on the SGD record itself for a later, dedicated
-relationship-resolution/persistence increment to use deliberately, not
-folded silently into Protein identity here. BRENDA
-(``app.connectors.brenda``) exposes no true Protein identifier at all --
-only EC numbers, organism name strings, and free-text commentary, none of
-which this module treats as Protein identity (see "EC number policy" above,
-and the module docstring generally: organism *name* strings are not even
-organism identity here, let alone Protein identity). KEGG's connector
-(``app.connectors.kegg``) exposes no gene/protein-level record type at all
-(only ``KeggCompoundRecord``/``KeggReactionRecord``). Protein normalization
-therefore remains fully source-neutral until a UniProt-aware or genuinely
-protein-scoped connector exists.
+remains available on the SGD record itself, not folded silently into
+Protein identity here -- and ``protein_identity_from_uniprot`` itself
+follows the identical discipline in the other direction: it never reads
+``UniProtProteinRecord.gene_names`` into ``ProteinIdentity.gene_id`` (see
+that function's own docstring). BRENDA (``app.connectors.brenda``) exposes
+no true Protein identifier at all -- only EC numbers, organism name
+strings, and free-text commentary, none of which this module treats as
+Protein identity (see "EC number policy" above, and the module docstring
+generally: organism *name* strings are not even organism identity here,
+let alone Protein identity). KEGG's connector (``app.connectors.kegg``)
+exposes no gene/protein-level record type at all (only
+``KeggCompoundRecord``/``KeggReactionRecord``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.models.enums import SourceType
 from app.normalization.identifiers import require_non_empty, unique_by_id
 from app.normalization.types import MatchMethod, NormalizationResult, NormalizationStatus
+
+if TYPE_CHECKING:
+    from app.connectors.uniprot import UniProtProteinRecord
 
 _ENTITY_TYPE = "protein"
 
@@ -482,9 +489,56 @@ def normalize_protein(
     )
 
 
+def protein_identity_from_uniprot(record: UniProtProteinRecord) -> ProteinIdentity:
+    """Pure adapter: a UniProt connector's normalized protein record -> a source-neutral identity.
+
+    No I/O, no network, no inference -- exact copying of identifiers/metadata
+    already present on ``record``. ``record`` itself is never mutated -- it
+    is a frozen dataclass, and nothing here does anything but read its
+    fields.
+
+    * ``source_identifier``/``uniprot_id`` are ``record.primary_accession``,
+      exactly as UniProt returned it -- never case-folded, never stripped of
+      an isoform suffix (``P12345-2`` stays ``P12345-2``), never replaced by
+      a secondary accession. This module's own literal-isoform policy is
+      the sole authority on what two accessions being "the same" would even
+      mean; this adapter does not pre-judge that.
+    * ``name`` is ``record.protein_name`` -- already resolved by
+      ``app.connectors.uniprot.normalize_entry`` to the recommended name,
+      falling back to the first submitted name only when no recommended
+      name exists. Never invented from ``record.gene_names``.
+    * ``gene_id`` is **always** ``None``. ``record.gene_names`` is deliberately
+      never read here: promoting a UniProt gene name into
+      ``ProteinIdentity.gene_id`` would assert a specific Gene<->Protein
+      relationship this module has never been authorized to assert (see
+      module docstring's "Connector adapters" section) -- Gene<->Protein
+      reconciliation remains a distinct, unimplemented concern. No Gene
+      normalizer is imported or called anywhere in this function.
+    * ``ec_number`` is copied **only** when ``record.ec_numbers`` contains
+      *exactly one* value -- a multi-functional enzyme with several EC
+      numbers has no single unambiguous value this schema's one ``ec_number``
+      column could safely represent, so zero or multiple values both leave
+      it ``None`` rather than guessing which one to keep (Increment 15
+      instructions, Step 17). Even when set, ``ec_number`` remains inert
+      metadata (see module docstring's "EC number policy") -- it is never
+      used for identity, and this function never uses it to look up or
+      infer a Reaction relationship.
+    """
+    ec_number = record.ec_numbers[0] if len(record.ec_numbers) == 1 else None
+    return ProteinIdentity(
+        source=SourceType.UNIPROT,
+        source_identifier=record.primary_accession,
+        uniprot_id=record.primary_accession,
+        name=record.protein_name,
+        gene_id=None,
+        ec_number=ec_number,
+    )
+
+
 __all__ = [
     "ProteinCandidate",
     "ProteinIdentity",
     "ProteinLookup",
     "normalize_protein",
+    "protein_identity_from_uniprot",
 ]

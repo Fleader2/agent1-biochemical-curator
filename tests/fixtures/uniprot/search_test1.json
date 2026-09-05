@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "entryType": "UniProtKB reviewed (Swiss-Prot)",
+      "primaryAccession": "P99999",
+      "uniProtkbId": "TEST1_YEAST",
+      "organism": {
+        "scientificName": "Saccharomyces cerevisiae (strain ATCC 204508 / S288c)",
+        "taxonId": 559292
+      },
+      "proteinDescription": {
+        "recommendedName": {"fullName": {"value": "Test-only acetyl-CoA carboxylase"}}
+      }
+    },
+    {
+      "entryType": "UniProtKB unreviewed (TrEMBL)",
+      "primaryAccession": "A0A999TEST",
+      "uniProtkbId": "A0A999TEST_YEAST",
+      "organism": {
+        "scientificName": "Saccharomyces cerevisiae (strain ATCC 204508 / S288c)",
+        "taxonId": 559292
+      },
+      "proteinDescription": {
+        "submissionNames": [{"fullName": {"value": "Test-only uncharacterized protein"}}]
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "entryType": "UniProtKB unreviewed (TrEMBL)",
+  "primaryAccession": "A0A999TEST",
+  "secondaryAccessions": [],
+  "uniProtkbId": "A0A999TEST_YEAST",
+  "organism": {
+    "scientificName": "Saccharomyces cerevisiae (strain ATCC 204508 / S288c)",
+    "taxonId": 559292
+  },
+  "proteinDescription": {
+    "submissionNames": [
+      {"fullName": {"value": "Test-only uncharacterized protein"}}
+    ]
+  },
+  "genes": [
+    {"geneName": {"value": "TEST1"}}
+  ],
+  "sequence": {
+    "length": 150,
+    "value": "MTESTONLYUNREVIEWEDSEQUENCE"
+  },
+  "uniProtKBCrossReferences": []
+}

@@ -21,12 +21,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.connectors.uniprot import UniProtEntryRecord, UniProtProteinRecord
 from app.models.enums import SourceType
 from app.normalization.protein import (
     ProteinCandidate,
     ProteinIdentity,
     ProteinLookup,
     normalize_protein,
+    protein_identity_from_uniprot,
 )
 from app.normalization.types import MatchMethod, NormalizationStatus
 
@@ -767,3 +769,124 @@ def test_no_fuzzy_matching_of_name() -> None:
     result = normalize_protein(identity, organism_id=ORGANISM_A, lookup=lookup)
 
     assert result.status is NormalizationStatus.UNRESOLVED
+
+
+# --- protein_identity_from_uniprot (Increment 15) ----------------------------------
+
+
+def _uniprot_raw(**overrides) -> UniProtEntryRecord:
+    merged = {
+        "primary_accession": "P99999",
+        "entry_name": "TEST1_YEAST",
+        "entry_type": "UniProtKB reviewed (Swiss-Prot)",
+        "secondary_accessions": (),
+        "recommended_name": "Test-only protein",
+        "submitted_names": (),
+        "gene_names": ("TEST1",),
+        "organism_name": "Saccharomyces cerevisiae",
+        "organism_taxonomy_id": 559292,
+        "ec_numbers": (),
+        "sequence_length": 100,
+        "cross_references": (),
+        "raw": {},
+    } | overrides
+    return UniProtEntryRecord(**merged)
+
+
+def _uniprot_record(**overrides) -> UniProtProteinRecord:
+    raw = overrides.pop("raw", None) or _uniprot_raw()
+    merged = {
+        "primary_accession": raw.primary_accession,
+        "entry_name": raw.entry_name,
+        "reviewed": True,
+        "protein_name": raw.recommended_name,
+        "gene_names": raw.gene_names,
+        "organism_name": raw.organism_name,
+        "organism_taxonomy_id": raw.organism_taxonomy_id,
+        "ec_numbers": raw.ec_numbers,
+        "sequence_length": raw.sequence_length,
+        "secondary_accessions": raw.secondary_accessions,
+        "cross_references": raw.cross_references,
+        "raw": raw,
+    } | overrides
+    return UniProtProteinRecord(**merged)
+
+
+def test_uniprot_adapter_maps_primary_accession_to_uniprot_id() -> None:
+    identity = protein_identity_from_uniprot(_uniprot_record())
+    assert identity.uniprot_id == "P99999"
+
+
+def test_uniprot_adapter_preserves_exact_source_identifier() -> None:
+    identity = protein_identity_from_uniprot(_uniprot_record())
+    assert identity.source == SourceType.UNIPROT
+    assert identity.source_identifier == "P99999"
+
+
+def test_uniprot_adapter_maps_protein_name() -> None:
+    identity = protein_identity_from_uniprot(
+        _uniprot_record(protein_name="A specific test-only recommended name")
+    )
+    assert identity.name == "A specific test-only recommended name"
+
+
+def test_uniprot_adapter_never_sets_gene_id() -> None:
+    """Mandatory (Increment 15, Step 9): gene_id is always None, regardless of
+
+    how many gene names or cross-references the record carries."""
+    identity = protein_identity_from_uniprot(_uniprot_record(gene_names=("TEST1", "ACC1", "FAS3")))
+    assert identity.gene_id is None
+
+
+def test_uniprot_adapter_ec_number_set_when_exactly_one_present() -> None:
+    identity = protein_identity_from_uniprot(_uniprot_record(ec_numbers=("6.4.1.2",)))
+    assert identity.ec_number == "6.4.1.2"
+
+
+def test_uniprot_adapter_ec_number_none_when_zero_present() -> None:
+    identity = protein_identity_from_uniprot(_uniprot_record(ec_numbers=()))
+    assert identity.ec_number is None
+
+
+def test_uniprot_adapter_ec_number_none_when_multiple_present() -> None:
+    """A multi-functional enzyme's several EC numbers have no single
+
+    unambiguous value this schema's one ec_number column could safely
+    represent -- left None rather than guessing which one to keep."""
+    identity = protein_identity_from_uniprot(_uniprot_record(ec_numbers=("6.4.1.2", "6.3.4.14")))
+    assert identity.ec_number is None
+
+
+def test_uniprot_adapter_isoform_accession_preserved_exactly() -> None:
+    """P12345 and P12345-2 remain distinct all the way through the adapter."""
+    base = protein_identity_from_uniprot(
+        _uniprot_record(raw=_uniprot_raw(primary_accession="P99999"))
+    )
+    isoform = protein_identity_from_uniprot(
+        _uniprot_record(raw=_uniprot_raw(primary_accession="P99999-2"))
+    )
+    assert base.uniprot_id == "P99999"
+    assert isoform.uniprot_id == "P99999-2"
+    assert base.uniprot_id != isoform.uniprot_id
+
+
+def test_uniprot_adapter_output_normalizes_successfully() -> None:
+    """The resulting ProteinIdentity flows into the existing, unmodified
+
+    Protein normalizer -- no duplicated normalization logic."""
+    identity = protein_identity_from_uniprot(_uniprot_record())
+    lookup = FakeProteinLookup(proteins=(_candidate(organism_id=ORGANISM_A, uniprot_id="P99999"),))
+    result = normalize_protein(identity, organism_id=ORGANISM_A, lookup=lookup)
+    assert result.status is NormalizationStatus.MATCHED
+
+
+def test_uniprot_adapter_never_calls_gene_normalization() -> None:
+    """Structural check: no app.normalization.gene import/call appears in
+
+    protein_identity_from_uniprot's own source."""
+    import inspect
+
+    source = inspect.getsource(protein_identity_from_uniprot)
+    assert "normalize_gene" not in source
+    assert "GeneIdentity" not in source
+    assert "gene_id=None" in source
