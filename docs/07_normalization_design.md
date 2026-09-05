@@ -295,6 +295,68 @@ current schema (mirroring the same still-open questions for
 `protein.uniprot_id` (Question A), Compound's five external identifiers
 (Question E), and Compartment (Question H)). Do not change the schema now.
 
+## O. Reaction↔enzyme relationship value and association identity
+
+`app.normalization.reaction_enzyme` treats `ReactionEnzyme.relationship`
+(e.g. `CATALYZES`, `REQUIRED_FOR`, `PUTATIVE_CATALYST`, `ISOENZYME`) as
+inert metadata, not part of association identity: an incoming
+`(reaction A, protein B, CATALYZES)` may `MATCHED` against an existing
+`(reaction A, protein B, PUTATIVE_CATALYST)`, because the pair identity
+`(reaction_id, protein_id)` is the same regardless of `relationship`.
+
+**Decide** whether different `relationship` values for the same
+`(reaction_id, protein_id)` or `(reaction_id, complex_id)` pair should
+eventually represent:
+
+- the same association with changing metadata (current behavior),
+- distinct relationship records,
+- conflicting claims about one association, or
+- another explicitly modeled structure.
+
+Do not resolve this now — recorded as an explicit unresolved policy
+question, not permanent scientific semantics (the same conservative-default
+treatment Gene's `symbol` and Compound/Compartment's own Level-2 metadata
+fields already receive).
+
+## P. Reaction↔enzyme organism consistency
+
+`app.normalization.reaction_enzyme` does not enforce organism consistency
+among a Reaction and its associated Protein/EnzymeComplex.
+`ReactionEnzyme` itself contains no organism field, and this module does
+not fetch `Reaction`, `Protein`, or `EnzymeComplex` records to inspect
+their `organism_id` values.
+
+**Define** where organism compatibility should be enforced, if at all —
+possible locations include normalization, persistence validation,
+deterministic scientific validation, or claim/evidence validation. Do not
+add cross-entity lookup behavior to this normalizer unless the
+architecture is explicitly changed. Do not resolve this now.
+
+## Q. ReactionEnzyme uniqueness and constraints
+
+`reaction_enzyme` currently has no uniqueness constraints at all, and no
+database `CHECK` constraint enforces "exactly one of `protein_id`/
+`complex_id`" (the model docstring calls this "soft language, not 'must'").
+Duplicate association rows are therefore possible at the schema level.
+
+**Before persistence/import is finalized**, decide whether to add:
+
+- uniqueness for `(reaction_id, protein_id)`,
+- uniqueness for `(reaction_id, complex_id)`,
+- a `CHECK` constraint requiring exactly one target,
+- indexes supporting those lookups.
+
+Do not change the database schema in this documentation increment.
+
+## R. Reaction↔enzyme relationship vocabulary
+
+`relationship` is currently a free-form `VARCHAR` column, not backed by a
+database enum, even though `docs/02_database_schema.md` lists example
+values (`CATALYZES`, `REQUIRED_FOR`, `PUTATIVE_CATALYST`, `ISOENZYME`).
+
+**Decide** whether the project should eventually define a controlled enum
+or vocabulary for these values. Do not introduce an enum yet.
+
 ---
 
 # Finalized Normalization Policy: Protein (Increment 5)
@@ -759,3 +821,173 @@ test_no_proportional_stoichiometry_reduction
 ```
 
 All twelve already exist and pass in `tests/normalization/test_reaction.py`.
+
+---
+
+# Finalized Normalization Policy: Reaction↔Enzyme Association (Increment 9)
+
+Full rationale lives in `app/normalization/reaction_enzyme.py`'s module
+docstring; this is a summary for cross-reference. This increment is
+relationship identity normalization only — it never determines whether a
+protein truly catalyzes a reaction.
+
+## Schema semantics
+
+`ReactionEnzyme` contains:
+
+- `id`
+- `reaction_id` — non-null FK to `Reaction`
+- `protein_id` — nullable FK to `Protein`
+- `complex_id` — nullable FK to `EnzymeComplex`
+- `relationship` — non-null plain string
+- `confidence_summary` — nullable
+- `notes` — nullable
+
+The database currently has no uniqueness constraints on `ReactionEnzyme`,
+and there is no database `CHECK` constraint enforcing exactly one of
+`protein_id`/`complex_id`. Duplicate association rows are therefore
+possible. Evidence and claims are stored separately (`Claim`/`Evidence`)
+and are not part of the `ReactionEnzyme` table. The schema was not
+changed.
+
+## Association identity
+
+Two mutually exclusive Level-1 association identities:
+
+- Protein association: `(reaction_id, protein_id)`
+- Complex association: `(reaction_id, complex_id)`
+
+Exactly one target type is allowed in `ReactionEnzymeIdentity`. Protein and
+EnzymeComplex associations are distinct relationship identities and are
+never bridged automatically.
+
+## ReactionEnzymeIdentity
+
+Fields: `source`, `source_identifier`, `reaction_id`, `protein_id`,
+`complex_id`, `relationship`.
+
+Validation requires:
+
+- `reaction_id` present,
+- exactly one of `protein_id` or `complex_id`,
+- never both,
+- never neither.
+
+`relationship` is required for `NEW` because it is the schema's only
+non-null, non-identity field.
+
+## Candidate identity
+
+`ReactionEnzymeCandidate` fields: `id`, `reaction_id`, `protein_id`,
+`complex_id`, `relationship`. Confidence and notes are not part of
+normalization identity.
+
+## Lookup API
+
+Exactly two lookup operations:
+
+- `by_reaction_and_protein(reaction_id, protein_id)`
+- `by_reaction_and_complex(reaction_id, complex_id)`
+
+No lookup exists by reaction alone, protein alone, complex alone, EC
+number, gene, publication, claim, evidence, confidence, pathway, or free
+text.
+
+## Exact reconciliation
+
+- Zero candidates → `NEW` or `UNRESOLVED` depending on creation
+  completeness.
+- One candidate → `MATCHED`.
+- Multiple candidate rows for the same exact pair → `AMBIGUOUS`.
+- Candidate ordering does not affect the result.
+
+No cross-anchor reconciliation is needed, because each request has exactly
+one mutually exclusive pair identity.
+
+## Protein versus EnzymeComplex policy
+
+Reaction + Protein and Reaction + EnzymeComplex are different assertions.
+Equivalence is never inferred because the Protein is a member of the
+EnzymeComplex, because the Protein and complex share an EC number, because
+the Protein participates in the same pathway, or because the complex
+contains only one known catalytic subunit. No membership expansion or
+relationship bridging occurs in this layer.
+
+## Relationship field policy
+
+`relationship` is metadata, not part of association identity. Therefore an
+incoming `(reaction A, protein B, CATALYZES)` may `MATCH` an existing
+`(reaction A, protein B, PUTATIVE_CATALYST)`, because the pair identity is
+the same. This is recorded as an explicit unresolved policy question (see
+Open Question O), not permanent scientific semantics.
+
+## Isoenzyme policy
+
+Multiple different Protein IDs may independently associate with the same
+Reaction. These associations are not duplicates and do not conflict merely
+because they share the Reaction.
+
+## Multi-function Protein policy
+
+One Protein may independently associate with multiple Reaction IDs. These
+relationships are not merged.
+
+## EC-number policy
+
+EC number plays no role in Reaction↔enzyme association normalization:
+no EC lookup, no EC inference, no EC-based identity, no EC-based conflict.
+EC-based biochemical reasoning belongs to evidence/curation layers, not
+identity normalization.
+
+## Evidence neutrality
+
+Normalization does not inspect or use claims, evidence, publications,
+confidence scores, reviewer state, experimental support, or notes. The
+purpose of this increment is relationship identity only — whether the
+relationship is scientifically supported is handled later.
+
+## Organism policy
+
+Reaction↔enzyme normalization does not enforce organism consistency.
+`ReactionEnzyme` itself contains no organism field, and this module does
+not fetch `Reaction`, `Protein`, or `EnzymeComplex` records to inspect
+their organism IDs. See Open Question P.
+
+## NEW policy
+
+`NEW` requires:
+
+- valid `reaction_id`,
+- exactly one target (`protein_id` or `complex_id`),
+- no existing exact pair,
+- `relationship` present.
+
+If `relationship` is missing after an exact pair lookup returns no match →
+`UNRESOLVED`. Existing duplicate rows → `AMBIGUOUS`. Existing exact pair →
+`MATCHED`.
+
+## Connector policy
+
+No connector adapter is implemented. No existing connector exposes a
+trustworthy normalized `Reaction UUID + Protein UUID` or
+`Reaction UUID + EnzymeComplex UUID` relationship record. In particular,
+KEGG EC-number annotations are not converted into Reaction↔Protein
+relationships, pathway membership is not treated as catalytic evidence,
+and GO annotations are not converted into catalytic relationships.
+
+## Proposed regression tests
+
+The following tests are already implemented and passing in
+`tests/normalization/test_reaction_enzyme.py`:
+
+```text
+test_exact_reaction_protein_pair_matched
+test_exact_reaction_complex_pair_matched
+test_duplicate_rows_for_same_pair_is_ambiguous
+test_protein_association_and_complex_association_never_merged
+test_differing_relationship_value_does_not_prevent_matched
+test_two_proteins_catalyzing_one_reaction_both_allowed
+test_one_protein_catalyzing_two_reactions_both_allowed
+test_duplicate_blocks_new
+test_missing_relationship_is_unresolved_not_new
+```
