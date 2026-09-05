@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,9 +26,26 @@ class Compartment(Base):
     ``organism_id`` is nullable. The standard compartment seed rows created by
     migration ``0002_reference_data`` intentionally leave it ``NULL``, since no
     organism seed row is specified in ``docs/02_database_schema.md``.
+
+    As of migration ``0009_persistence_hardening``, ``ontology_id`` is
+    indexed (global, matching ``app.normalization.compartment``'s own global
+    ``by_ontology_id`` lookup) and ``(organism_id, name)``/
+    ``(organism_id, abbreviation)`` are each indexed as composites (matching
+    the organism-scoped ``by_name``/``by_abbreviation`` lookups). **None of
+    these three is a uniqueness constraint** -- reference rows
+    (``organism_id IS NULL``) and organism-specific rows may legitimately
+    coexist and even share a ``name``/``abbreviation``/``ontology_id``
+    (Open Question F/G/H, ``docs/07_normalization_design.md``), and this
+    increment does not collapse that distinction. These are lookup-path
+    indexes only, added because ``Compartment`` previously had no index of
+    any kind beyond its primary key.
     """
 
     __tablename__ = "compartment"
+    __table_args__ = (
+        Index("ix_compartment_organism_id_name", "organism_id", "name"),
+        Index("ix_compartment_organism_id_abbreviation", "organism_id", "abbreviation"),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
 
@@ -38,7 +55,7 @@ class Compartment(Base):
 
     name: Mapped[str] = mapped_column(String, nullable=False)
     abbreviation: Mapped[str | None] = mapped_column(String)
-    ontology_id: Mapped[str | None] = mapped_column(String)
+    ontology_id: Mapped[str | None] = mapped_column(String, index=True)
 
     notes: Mapped[str | None] = mapped_column(Text)
 

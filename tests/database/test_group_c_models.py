@@ -115,11 +115,44 @@ def test_reaction_status_is_independent_of_curation_state(db_session):
 def test_reaction_required_indexes_exist(db_session):
     inspector = inspect(db_session.get_bind())
     index_names = {ix["name"] for ix in inspector.get_indexes("reaction")}
-    assert {"ix_reaction_kegg_reaction_id", "ix_reaction_rhea_id", "ix_reaction_ec_number"} <= (
-        index_names
-    )
+    assert {
+        "ix_reaction_kegg_reaction_id",
+        "ix_reaction_rhea_id",
+        "ix_reaction_ec_number",
+        "ix_reaction_metacyc_reaction_id",
+    } <= index_names
     unique_names = {uq["name"] for uq in inspector.get_unique_constraints("reaction")}
     assert "uq_reaction_internal_id" in unique_names
+
+
+def test_reaction_external_ids_remain_non_unique(db_session):
+    """kegg_reaction_id/metacyc_reaction_id/rhea_id are indexed (all three as
+    of migration 0009_persistence_hardening) but deliberately not unique --
+    app.normalization.reaction treats a duplicate row sharing one of these
+    identifiers as a live, expected AMBIGUOUS outcome, not a defensive edge
+    case, and this schema hardening increment does not change that policy."""
+    _make_reaction(db_session, kegg_reaction_id="R-test-only-0001")
+    _make_reaction(db_session, kegg_reaction_id="R-test-only-0001")
+    _make_reaction(db_session, metacyc_reaction_id="test-only-metacyc-rxn")
+    _make_reaction(db_session, metacyc_reaction_id="test-only-metacyc-rxn")
+    _make_reaction(db_session, rhea_id="test-only-rhea-1")
+    _make_reaction(db_session, rhea_id="test-only-rhea-1")
+    db_session.flush()  # must not raise
+
+
+def test_reaction_enzyme_constraints_present(db_session):
+    """Migration 0009_persistence_hardening adds
+    ck_reaction_enzyme_exactly_one_target and two partial unique indexes on
+    reaction_enzyme."""
+    inspector = inspect(db_session.get_bind())
+    check_names = {ck["name"] for ck in inspector.get_check_constraints("reaction_enzyme")}
+    assert "ck_reaction_enzyme_exactly_one_target" in check_names
+
+    index_names = {ix["name"] for ix in inspector.get_indexes("reaction_enzyme")}
+    assert {
+        "uq_reaction_enzyme_reaction_id_protein_id",
+        "uq_reaction_enzyme_reaction_id_complex_id",
+    } <= index_names
 
 
 # --- reaction_participant -----------------------------------------------
@@ -408,18 +441,23 @@ def test_reaction_enzyme_complex_id_may_be_null(db_session):
     db_session.flush()  # must not raise
 
 
-def test_reaction_enzyme_both_may_be_null(db_session):
-    """The literal spec gives no NOT NULL and no CHECK on protein_id/complex_id
-    ("should normally" is soft language, not enforced)."""
+def test_reaction_enzyme_neither_target_is_rejected(db_session):
+    """As of migration 0009_persistence_hardening,
+    ck_reaction_enzyme_exactly_one_target enforces at the database level what
+    app.normalization.reaction_enzyme already finalized as identity policy:
+    exactly one of protein_id/complex_id, never neither. Prior to that
+    migration this was permitted (soft "should normally" language, no CHECK)."""
     reaction = _make_reaction(db_session)
     re = ReactionEnzyme(
         reaction_id=reaction.id, protein_id=None, complex_id=None, relationship="PUTATIVE_CATALYST"
     )
     db_session.add(re)
-    db_session.flush()  # must not raise
+    with pytest.raises(IntegrityError):
+        db_session.flush()
 
 
-def test_reaction_enzyme_both_may_be_non_null(db_session):
+def test_reaction_enzyme_both_targets_is_rejected(db_session):
+    """Same ck_reaction_enzyme_exactly_one_target constraint, "never both" side."""
     reaction = _make_reaction(db_session)
     organism = _make_organism(db_session, "both-non-null")
     protein = Protein(organism_id=organism.id, name="Test3p")
@@ -434,12 +472,104 @@ def test_reaction_enzyme_both_may_be_non_null(db_session):
         relationship="ISOENZYME",
     )
     db_session.add(re)
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_reaction_enzyme_duplicate_reaction_protein_pair_is_rejected(db_session):
+    """uq_reaction_enzyme_reaction_id_protein_id (migration 0009) enforces
+    that a (reaction_id, protein_id) pair is recorded at most once, regardless
+    of relationship -- app.normalization.reaction_enzyme treats relationship
+    as inert metadata for identity purposes, so the pair alone is identity."""
+    reaction = _make_reaction(db_session)
+    organism = _make_organism(db_session, "dup-protein-pair")
+    protein = Protein(organism_id=organism.id, name="Test5p")
+    db_session.add(protein)
+    db_session.flush()
+
+    db_session.add(
+        ReactionEnzyme(reaction_id=reaction.id, protein_id=protein.id, relationship="CATALYZES")
+    )
+    db_session.flush()
+
+    db_session.add(
+        ReactionEnzyme(
+            reaction_id=reaction.id, protein_id=protein.id, relationship="PUTATIVE_CATALYST"
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_reaction_enzyme_duplicate_reaction_complex_pair_is_rejected(db_session):
+    """uq_reaction_enzyme_reaction_id_complex_id (migration 0009), the
+    complex_id counterpart of the protein_id uniqueness above."""
+    reaction = _make_reaction(db_session)
+    organism = _make_organism(db_session, "dup-complex-pair")
+    complex_ = EnzymeComplex(organism_id=organism.id, name="test-only complex")
+    db_session.add(complex_)
+    db_session.flush()
+
+    db_session.add(
+        ReactionEnzyme(reaction_id=reaction.id, complex_id=complex_.id, relationship="CATALYZES")
+    )
+    db_session.flush()
+
+    db_session.add(
+        ReactionEnzyme(
+            reaction_id=reaction.id, complex_id=complex_.id, relationship="ISOENZYME"
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_reaction_enzyme_same_protein_different_reaction_is_allowed(db_session):
+    """The new pairwise uniqueness is scoped per-reaction: one protein
+    catalyzing two different reactions is two independent, legitimate rows."""
+    organism = _make_organism(db_session, "multi-reaction-protein")
+    protein = Protein(organism_id=organism.id, name="Test6p")
+    db_session.add(protein)
+    db_session.flush()
+    reaction_a = _make_reaction(db_session)
+    reaction_b = _make_reaction(db_session)
+
+    db_session.add(
+        ReactionEnzyme(reaction_id=reaction_a.id, protein_id=protein.id, relationship="CATALYZES")
+    )
+    db_session.add(
+        ReactionEnzyme(reaction_id=reaction_b.id, protein_id=protein.id, relationship="CATALYZES")
+    )
+    db_session.flush()  # must not raise
+
+
+def test_reaction_enzyme_two_proteins_same_reaction_is_allowed(db_session):
+    """Isoenzymes: two different proteins catalyzing the same reaction remain
+    two independent, legitimate rows -- the new uniqueness is per-pair, not
+    per-reaction."""
+    reaction = _make_reaction(db_session)
+    organism = _make_organism(db_session, "isoenzymes")
+    protein_a = Protein(organism_id=organism.id, name="Test7Ap")
+    protein_b = Protein(organism_id=organism.id, name="Test7Bp")
+    db_session.add_all([protein_a, protein_b])
+    db_session.flush()
+
+    db_session.add(
+        ReactionEnzyme(reaction_id=reaction.id, protein_id=protein_a.id, relationship="CATALYZES")
+    )
+    db_session.add(
+        ReactionEnzyme(reaction_id=reaction.id, protein_id=protein_b.id, relationship="CATALYZES")
+    )
     db_session.flush()  # must not raise
 
 
 def test_reaction_enzyme_invalid_reaction_id_fails(db_session):
+    organism = _make_organism(db_session, "invalid-reaction-id")
+    protein = Protein(organism_id=organism.id, name="Test8p")
+    db_session.add(protein)
+    db_session.flush()
     db_session.add(
-        ReactionEnzyme(reaction_id=uuid.uuid4(), relationship="CATALYZES")
+        ReactionEnzyme(reaction_id=uuid.uuid4(), protein_id=protein.id, relationship="CATALYZES")
     )
     with pytest.raises(IntegrityError):
         db_session.flush()
@@ -465,7 +595,13 @@ def test_reaction_enzyme_invalid_complex_id_fails(db_session):
 
 def test_deleting_referenced_reaction_is_restricted_via_enzyme(db_session):
     reaction = _make_reaction(db_session)
-    db_session.add(ReactionEnzyme(reaction_id=reaction.id, relationship="CATALYZES"))
+    organism = _make_organism(db_session, "restrict-reaction-via-enzyme")
+    protein = Protein(organism_id=organism.id, name="Test9p")
+    db_session.add(protein)
+    db_session.flush()
+    db_session.add(
+        ReactionEnzyme(reaction_id=reaction.id, protein_id=protein.id, relationship="CATALYZES")
+    )
     db_session.flush()
     reaction_id = reaction.id
     db_session.expunge_all()
@@ -513,7 +649,16 @@ def test_reaction_enzyme_confidence_summary_accepts_any_numeric_value(db_session
     type constrains it) — docs/02_database_schema.md gives no explicit range
     for this column, unlike claim/kinetic_measurement confidence_score."""
     reaction = _make_reaction(db_session)
-    re = ReactionEnzyme(reaction_id=reaction.id, relationship="CATALYZES", confidence_summary=150)
+    organism = _make_organism(db_session, "confidence-any-value")
+    protein = Protein(organism_id=organism.id, name="Test10p")
+    db_session.add(protein)
+    db_session.flush()
+    re = ReactionEnzyme(
+        reaction_id=reaction.id,
+        protein_id=protein.id,
+        relationship="CATALYZES",
+        confidence_summary=150,
+    )
     db_session.add(re)
     db_session.flush()  # must not raise despite being outside 0-100
 
@@ -522,7 +667,11 @@ def test_reaction_enzyme_confidence_summary_accepts_any_numeric_value(db_session
 
 def test_reaction_enzyme_confidence_summary_accepts_null(db_session):
     reaction = _make_reaction(db_session)
-    re = ReactionEnzyme(reaction_id=reaction.id, relationship="CATALYZES")
+    organism = _make_organism(db_session, "confidence-null")
+    protein = Protein(organism_id=organism.id, name="Test11p")
+    db_session.add(protein)
+    db_session.flush()
+    re = ReactionEnzyme(reaction_id=reaction.id, protein_id=protein.id, relationship="CATALYZES")
     db_session.add(re)
     db_session.flush()
 

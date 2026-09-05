@@ -34,6 +34,15 @@ class Organism(Base):
     same species are permitted and expected"). ``(scientific_name, strain)``
     is therefore only unique when ``strain`` is present; rows with
     ``strain IS NULL`` are not deduplicated by the schema.
+
+    ``kegg_code``/``biocyc_id`` are indexed (as of migration
+    ``0009_persistence_hardening``, matching ``ncbi_taxonomy_id``'s existing
+    index) to support ``app.persistence.organism``'s freshness-recheck
+    lookups, but deliberately remain **not** unique: a species-level NCBI
+    taxonomy ID, KEGG code, or BioCyc ID is expected to be shared across
+    multiple strain-specific ``Organism`` rows for that species, the same
+    "multiple strain rows are legitimate" rule this docstring already states
+    for ``scientific_name``.
     """
 
     __tablename__ = "organism"
@@ -52,8 +61,8 @@ class Organism(Base):
     scientific_name: Mapped[str] = mapped_column(String, nullable=False)
     common_name: Mapped[str | None] = mapped_column(String)
     ncbi_taxonomy_id: Mapped[int | None] = mapped_column(index=True)
-    kegg_code: Mapped[str | None] = mapped_column(String)
-    biocyc_id: Mapped[str | None] = mapped_column(String)
+    kegg_code: Mapped[str | None] = mapped_column(String, index=True)
+    biocyc_id: Mapped[str | None] = mapped_column(String, index=True)
 
     strain: Mapped[str | None] = mapped_column(String)
     strain_parent: Mapped[str | None] = mapped_column(String)

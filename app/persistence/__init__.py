@@ -49,43 +49,43 @@ field mappings, in every `app.persistence.*` entity module):
 
 **Stale-`NEW`-result safety.** A `NormalizationResult` is an optimistic
 snapshot: database state can change between when normalization ran and
-when persistence is asked to act on it. Most entities in this schema have
-**no database-level uniqueness constraint at all** on their identifying
-fields (`Protein.uniprot_id`, every `Compound`/`Compartment` identifier,
-`Reaction`'s external identifiers, and every `ReactionEnzyme` column --
-see each entity module's docstring and `docs/07_normalization_design.md`'s
-own open questions on this) -- so a database constraint violation cannot be
-relied on generically to catch a stale `NEW`. Every entity module's `NEW`
-path therefore re-runs an exact-match query, inside the caller's own
-transaction, against exactly the same strong identifier(s) the
-`NormalizationResult` was based on, immediately before inserting. If that
-recheck finds a row, creation is refused (`FAILED`) rather than risking a
-duplicate -- callers are expected to re-normalize and retry rather than
-replay a stale `NEW` result directly (see `app.persistence._freshness`).
-Where a real database uniqueness constraint *does* exist (`Organism`'s
-partial unique on `(scientific_name, strain)`, `Publication`'s
-`pmid`/`pmcid`/`doi`, `Gene`'s `sgd_id`/`ncbi_gene_id`/`kegg_gene_id`), it
-remains a redundant concurrency backstop underneath the same recheck, not a
-substitute for it -- a race between the recheck and the insert is still
-possible in principle, and would surface as an `IntegrityError` this
-package does not swallow (the caller's transaction handling is responsible
-for that).
+when persistence is asked to act on it. Most entities in this schema still
+have **no database-level uniqueness constraint at all** on their
+identifying fields after Increment 11's schema hardening
+(`Protein.uniprot_id`, every `Compound`/`Compartment` identifier, and
+`Reaction`'s external identifiers all remain deliberately non-unique --
+see each entity module's docstring, `docs/07_normalization_design.md`'s
+open questions, and `docs/08_normalization_persistence.md`'s Increment 11
+section for exactly which ones and why) -- so a database constraint
+violation still cannot be relied on generically to catch a stale `NEW` for
+those. Every entity module's `NEW` path therefore re-runs an exact-match
+query, inside the caller's own transaction, against exactly the same
+strong identifier(s) the `NormalizationResult` was based on, immediately
+before inserting. If that recheck finds a row, creation is refused
+(`FAILED`) rather than risking a duplicate -- callers are expected to
+re-normalize and retry rather than replay a stale `NEW` result directly
+(see `app.persistence._freshness`). Where a real database uniqueness
+constraint exists (`Organism`'s partial unique on `(scientific_name,
+strain)`, `Publication`'s `pmid`/`pmcid`/`doi`, `Gene`'s
+`sgd_id`/`ncbi_gene_id`/`kegg_gene_id`, `Reaction.internal_id`, and, as of
+Increment 11, `ReactionEnzyme`'s pairwise uniqueness), the recheck remains
+in place as a fast, friendly first line of defense, but the constraint is
+the actual concurrency authority: `app.persistence.reaction` and
+`app.persistence.reaction_enzyme` each catch the residual-race
+`IntegrityError` from their own insert and convert it to a `FAILED`
+result rather than letting a raw database exception surface as if it were
+a scientific decision (see each module's own docstring).
 
-**Reaction `NEW` is not supported in this increment.**
-`Reaction.internal_id` is `NOT NULL UNIQUE`, and normalization deliberately
-never generates one (`app.normalization.reaction`'s own docstring: "a
-persistence identifier, never incoming identity"). No allocator for values
-like `FFA_R0001` exists anywhere in this repository -- the only precedent
-found, `tests/database/test_group_c_models.py`'s `_internal_id()`, is an
-`itertools.count()` helper explicitly scoped to that one test module, not a
-production-safe, concurrency-correct allocator. Inventing a
-"`MAX` + 1"-style allocator here would be exactly the concurrency-unsafe
-shortcut this increment's instructions forbid. `persist_reaction` therefore
-implements `MATCHED`/`AMBIGUOUS`/`CONFLICTED`/`UNRESOLVED` fully, and
-returns a structured `FAILED` result for `NEW` explaining why, rather than
-allocating an ID unsafely -- see this increment's completion report for the
-recommended follow-up (a dedicated, transactional allocator, most likely a
-database sequence, which is a schema change out of this increment's scope).
+**Reaction `NEW` is supported as of Increment 11.**
+`Reaction.internal_id` is allocated by
+`app.persistence.reaction_id_allocator.allocate_reaction_internal_id`, a
+PostgreSQL-sequence-backed allocator introduced by migration
+`0009_persistence_hardening` specifically to close this gap -- see that
+module's docstring for the full mechanism and why the previously-rejected
+`MAX + 1`/counter-based approaches were never used. `persist_reaction` now
+creates the `Reaction` row, its participants (exactly as supplied, no
+inference), its `SourceCrossReference`, and its `ExternalRecord` together
+inside one `SAVEPOINT`, rolling back only that unit of work on failure.
 
 Evidence, claims, confidence scoring, and human review-state transitions
 are explicitly out of scope -- this package only ever reads/writes the

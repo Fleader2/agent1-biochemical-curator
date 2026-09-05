@@ -39,7 +39,14 @@ class Compound(Base):
     (``docs/02_database_schema.md``). No uniqueness constraint is placed on
     ``chebi_id``/``kegg_compound_id``/``pubchem_cid``/``metacyc_id``/``inchikey``:
     unlike the analogous identifier fields on ``gene`` and ``publication``, the
-    specification does not require one here.
+    specification does not require one here, and ``app.normalization.compound``
+    treats a duplicate row sharing any one of these identifiers as a live,
+    expected ``AMBIGUOUS`` outcome, not a defensive edge case -- schema
+    hardening (migration ``0009_persistence_hardening``) deliberately leaves
+    this alone. ``pubchem_cid``/``metacyc_id`` are indexed as of that same
+    migration (matching ``chebi_id``/``kegg_compound_id``/``inchikey``'s
+    existing indexes) purely to support ``app.persistence.compound``'s
+    freshness-recheck lookups -- indexing is not a uniqueness decision.
     """
 
     __tablename__ = "compound"
@@ -54,8 +61,8 @@ class Compound(Base):
 
     chebi_id: Mapped[str | None] = mapped_column(String, index=True)
     kegg_compound_id: Mapped[str | None] = mapped_column(String, index=True)
-    pubchem_cid: Mapped[str | None] = mapped_column(String)
-    metacyc_id: Mapped[str | None] = mapped_column(String)
+    pubchem_cid: Mapped[str | None] = mapped_column(String, index=True)
+    metacyc_id: Mapped[str | None] = mapped_column(String, index=True)
 
     inchi: Mapped[str | None] = mapped_column(Text)
     inchikey: Mapped[str | None] = mapped_column(String, index=True)

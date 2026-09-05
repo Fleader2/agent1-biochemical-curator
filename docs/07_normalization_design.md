@@ -49,6 +49,14 @@ constraint where non-null (the same pattern already used for
 is made, application-layer reconciliation remains the only safeguard against
 a duplicate accession being persisted twice.
 
+**Reviewed in Increment 11, deliberately left unresolved**: a database test,
+`test_protein_uniprot_id_is_not_unique`
+(`tests/database/test_group_b_models.py`), directly encodes non-uniqueness
+as a deliberate, tested design decision, and no proof was found that one
+UniProt accession must map to exactly one `Protein` row globally. `Increment
+11` (`docs/08_normalization_persistence.md`) does not add this constraint;
+see that document's Increment 11 section for the full reasoning.
+
 ## B. Gene↔Protein relationship reconciliation
 
 `Protein.gene_id` is currently carried as relationship metadata only and is
@@ -137,6 +145,16 @@ above), and whether such a constraint should differ by identifier or by
 source. Do not change the schema now — this is a decision for a later
 increment.
 
+**Reviewed in Increment 11, deliberately left unresolved**: `pubchem_cid`/
+`metacyc_id` were indexed (matching `chebi_id`/`kegg_compound_id`/
+`inchikey`'s pre-existing indexes) to support persistence freshness-recheck
+lookups, but none of the five received a uniqueness constraint --
+`app.normalization.compound` still treats a duplicate row sharing any one of
+them as a live, expected `AMBIGUOUS` outcome, and an existing database test
+(`test_compound_external_identifiers_are_not_unique`) already encodes that
+as intentional. See `docs/08_normalization_persistence.md`'s Increment 11
+section.
+
 ## F. Compartment reference-row weak lookup
 
 `app.normalization.compartment`'s organism-scoped weak lookups (`by_name`/
@@ -200,6 +218,16 @@ add indexes and/or uniqueness rules for:
 
 Do not change the database schema now — this is a decision for a later
 increment.
+
+**Reviewed in Increment 11, partially resolved**: all three received
+non-unique indexes (`ontology_id` alone, plus composites on
+`(organism_id, name)`/`(organism_id, abbreviation)`) to support persistence
+and normalization lookup paths. **No uniqueness was added** -- reference
+rows (`organism_id IS NULL`) and organism-specific rows may still
+legitimately coexist and even share a `name`/`abbreviation`/`ontology_id`,
+and this increment does not collapse that distinction (Questions F/G above
+remain fully open). See `docs/08_normalization_persistence.md`'s
+Increment 11 section.
 
 ## I. Null-organism Reaction semantics
 
@@ -295,6 +323,16 @@ current schema (mirroring the same still-open questions for
 `protein.uniprot_id` (Question A), Compound's five external identifiers
 (Question E), and Compartment (Question H)). Do not change the schema now.
 
+**Reviewed in Increment 11, deliberately left unresolved**:
+`metacyc_reaction_id` was indexed (matching `kegg_reaction_id`/`rhea_id`'s
+pre-existing indexes) to support persistence freshness-recheck lookups, but
+none of the three received a uniqueness constraint --
+`app.normalization.reaction` still treats a duplicate row sharing one of
+them as a live, expected `AMBIGUOUS` outcome. `internal_id`'s own
+allocation gap (a *persistence* identifier, never incoming identity) was
+separately resolved by migration `0009_persistence_hardening` -- see
+`docs/08_normalization_persistence.md`'s Increment 11 section for both.
+
 ## O. Reaction↔enzyme relationship value and association identity
 
 `app.normalization.reaction_enzyme` treats `ReactionEnzyme.relationship`
@@ -332,21 +370,27 @@ deterministic scientific validation, or claim/evidence validation. Do not
 add cross-entity lookup behavior to this normalizer unless the
 architecture is explicitly changed. Do not resolve this now.
 
-## Q. ReactionEnzyme uniqueness and constraints
+## Q. ReactionEnzyme uniqueness and constraints -- RESOLVED (Increment 11)
 
-`reaction_enzyme` currently has no uniqueness constraints at all, and no
-database `CHECK` constraint enforces "exactly one of `protein_id`/
-`complex_id`" (the model docstring calls this "soft language, not 'must'").
-Duplicate association rows are therefore possible at the schema level.
+`reaction_enzyme` previously had no uniqueness constraints at all, and no
+database `CHECK` constraint enforced "exactly one of `protein_id`/
+`complex_id`" (the model docstring called this "soft language, not
+'must'"). Duplicate association rows were therefore possible at the schema
+level.
 
-**Before persistence/import is finalized**, decide whether to add:
-
-- uniqueness for `(reaction_id, protein_id)`,
-- uniqueness for `(reaction_id, complex_id)`,
-- a `CHECK` constraint requiring exactly one target,
-- indexes supporting those lookups.
-
-Do not change the database schema in this documentation increment.
+**Resolved by migration `0009_persistence_hardening`** (see
+`docs/08_normalization_persistence.md`'s "Increment 11" section for full
+rationale): a `CHECK` constraint (`ck_reaction_enzyme_exactly_one_target`)
+now enforces exactly one target at the database level, and two partial
+unique indexes (`uq_reaction_enzyme_reaction_id_protein_id`/
+`uq_reaction_enzyme_reaction_id_complex_id`) now enforce uniqueness on
+`(reaction_id, protein_id)`/`(reaction_id, complex_id)` respectively.
+`relationship` is **not** part of either uniqueness index -- the pair alone
+is identity, exactly as `app.normalization.reaction_enzyme` already
+finalized (Question O, still separately open: whether different
+`relationship` values for the same pair should ever mean something other
+than "the same association with changing metadata," is unaffected by this
+schema change and remains unresolved).
 
 ## R. Reaction↔enzyme relationship vocabulary
 

@@ -17,10 +17,12 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Numeric,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -55,6 +57,17 @@ class Reaction(Base):
     ``status`` (free text) and ``curation_state`` (the ``CurationState`` enum)
     are two independent columns — the specification defines both with no
     stated relationship between them, so none is inferred or enforced here.
+
+    ``internal_id`` values are allocated by ``app.persistence.reaction``'s
+    ``allocate_reaction_internal_id`` via the ``reaction_internal_id_seq``
+    PostgreSQL sequence (migration ``0009_persistence_hardening``), never by
+    application-side ``MAX + 1`` logic — see that module's docstring.
+    ``kegg_reaction_id``/``metacyc_reaction_id``/``rhea_id`` are indexed
+    (``metacyc_reaction_id`` as of the same migration) but remain
+    deliberately **not** unique: ``app.normalization.reaction`` treats
+    duplicate rows sharing one of these identifiers as a live, expected
+    ``AMBIGUOUS`` outcome, not a defensive edge case, and this schema
+    hardening increment does not change that policy.
     """
 
     __tablename__ = "reaction"
@@ -74,7 +87,7 @@ class Reaction(Base):
     ec_number: Mapped[str | None] = mapped_column(String, index=True)
 
     kegg_reaction_id: Mapped[str | None] = mapped_column(String, index=True)
-    metacyc_reaction_id: Mapped[str | None] = mapped_column(String)
+    metacyc_reaction_id: Mapped[str | None] = mapped_column(String, index=True)
     rhea_id: Mapped[str | None] = mapped_column(String, index=True)
 
     balanced_mass: Mapped[bool | None] = mapped_column(Boolean)
@@ -157,14 +170,50 @@ class ReactionParticipant(Base):
 class ReactionEnzyme(Base):
     """Associates a reaction with a catalytic protein or enzyme complex.
 
-    The specification states that exactly one of ``protein_id``/``complex_id``
-    "should normally" be populated — soft language, not "must" — so no CHECK
-    constraint is added here, consistent with how other soft-worded rules in
-    the specification (e.g. ``knowledge_gap.priority``) are left unconstrained.
+    The specification originally described exactly one of ``protein_id``/
+    ``complex_id`` being populated as "should normally" hold -- soft
+    language, not "must". ``app.normalization.reaction_enzyme`` (Increment 9)
+    has since made "exactly one, always" the finalized identity rule
+    (``ReactionEnzymeIdentity.__post_init__``'s XOR check), and this schema
+    hardening increment (migration ``0009_persistence_hardening``) promotes
+    that rule to a database ``CHECK`` constraint
+    (``ck_reaction_enzyme_exactly_one_target``), so a row can no longer
+    violate it even outside the ORM/normalization layer.
+
+    Two partial unique indexes additionally enforce that a given
+    ``(reaction_id, protein_id)`` or ``(reaction_id, complex_id)`` pair is
+    recorded at most once, regardless of ``relationship`` --
+    ``app.normalization.reaction_enzyme`` already treats ``relationship`` as
+    inert metadata for identity purposes (its own module docstring), so the
+    pair alone is this table's identity key.
+
     No timestamp columns: the specification defines none for this table.
     """
 
     __tablename__ = "reaction_enzyme"
+    __table_args__ = (
+        # conv() marks the name as already final -- see reaction_participant's
+        # own stoichiometry CheckConstraint above for why this is required.
+        CheckConstraint(
+            "(protein_id IS NOT NULL AND complex_id IS NULL) "
+            "OR (protein_id IS NULL AND complex_id IS NOT NULL)",
+            name=conv("ck_reaction_enzyme_exactly_one_target"),
+        ),
+        Index(
+            "uq_reaction_enzyme_reaction_id_protein_id",
+            "reaction_id",
+            "protein_id",
+            unique=True,
+            postgresql_where=text("protein_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_reaction_enzyme_reaction_id_complex_id",
+            "reaction_id",
+            "complex_id",
+            unique=True,
+            postgresql_where=text("complex_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
 

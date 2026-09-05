@@ -31,13 +31,19 @@ non-identity column -- ``app.normalization.reaction_enzyme``'s own
 
 **Freshness recheck** (``NEW`` only): re-query the exact
 ``(reaction_id, protein_id)`` or ``(reaction_id, complex_id)`` pair
-``normalize_reaction_enzyme`` itself used. ``reaction_enzyme`` has **no
-index or uniqueness constraint of any kind** (module docstring of
-``app.normalization.reaction_enzyme``) -- this application-level recheck is
-this entity's only protection against a stale ``NEW``, and duplicate
-association rows (two proteins catalyzing one reaction, or the same pair
-recorded twice) are otherwise structurally indistinguishable from each
-other by the database.
+``normalize_reaction_enzyme`` itself used. As of Increment 11
+(``migrations/versions/0009_persistence_hardening.py``), this pair is
+additionally protected by two real partial unique indexes
+(``uq_reaction_enzyme_reaction_id_protein_id``/
+``uq_reaction_enzyme_reaction_id_complex_id``) -- the recheck remains as a
+fast, friendly first line of defense, but the database constraint is now
+the actual concurrency authority: the ``INSERT`` below is wrapped to catch
+the residual-race ``IntegrityError`` and convert it to a conservative
+``FAILED`` result rather than letting a raw database exception escape as
+if it were a scientific decision. A database-level ``CHECK`` constraint
+(``ck_reaction_enzyme_exactly_one_target``, same migration) also now
+enforces "exactly one of ``protein_id``/``complex_id``" independently of
+``ReactionEnzymeIdentity``'s own application-level XOR check.
 
 **No organism-consistency checking.** This module never queries
 ``Reaction``/``Protein``/``EnzymeComplex`` to confirm the referenced
@@ -50,6 +56,7 @@ table itself, and no existing architecture performs that check anywhere
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.reaction import ReactionEnzyme
@@ -169,8 +176,20 @@ def _create(
         complex_id=identity.complex_id,
         relationship=identity.relationship,
     )
-    session.add(row)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.add(row)
+            session.flush()
+    except IntegrityError as exc:
+        return PersistenceResult(
+            normalization_status=result.status,
+            action=PersistenceAction.FAILED,
+            entity_type=_ENTITY_TYPE,
+            reason=(
+                "stale NEW: the database rejected this reaction/enzyme pair as a "
+                f"duplicate despite passing the freshness recheck: {exc.orig}"
+            ),
+        )
 
     external_record_id = (
         record_external_record(session, source=identity.source, provenance=provenance)

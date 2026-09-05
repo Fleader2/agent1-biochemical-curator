@@ -687,17 +687,23 @@ def test_0008_external_records_reviews_revises_0007_regulation_assumptions_gaps(
     assert revision.down_revision == "0007_regulation_assumptions_gaps"
 
 
-def test_upgrade_to_head_creates_group_g_tables_with_no_new_enum(
+def test_upgrade_to_0008_creates_group_g_tables_with_no_new_enum(
     scratch_database: str, alembic_config: Config
 ) -> None:
     """Migration 0008 adds exactly the three Group G tables on top of
     Groups A-F and introduces no new enum type — it reuses source_type and
     curation_state rather than recreating either, and no unrelated enum
-    type appears."""
+    type appears.
+
+    Upgrades to the specific ``0008_external_records_reviews`` revision
+    rather than ``head`` -- ``head`` moved to
+    ``0009_persistence_hardening`` once that migration was added, matching
+    the same specific-revision pattern every other group test in this file
+    already uses (e.g. ``test_upgrade_to_0002_creates_exactly_group_a_tables``)."""
     from alembic import command
 
     alembic_config.set_main_option("sqlalchemy.url", scratch_database)
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0008_external_records_reviews")
 
     engine = create_engine(scratch_database)
     try:

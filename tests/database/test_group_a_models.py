@@ -8,7 +8,7 @@ See ``docs/02_database_schema.md``: "Table: organism", "Table: compound",
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from app.models.compartment import Compartment
@@ -136,6 +136,34 @@ def test_organism_multiple_null_strain_rows_are_allowed(db_session):
     db_session.flush()  # must not raise
 
 
+def test_organism_kegg_code_and_biocyc_id_are_not_unique(db_session):
+    """Multiple strain-specific Organism rows for one species may legitimately
+    share one species-level kegg_code/biocyc_id (same rationale as
+    ncbi_taxonomy_id, already permitted) -- migration 0009_persistence_hardening
+    indexes both columns but does not make either unique."""
+    db_session.add(
+        Organism(scientific_name="test-only species C", strain="A", kegg_code="tco")
+    )
+    db_session.add(
+        Organism(scientific_name="test-only species C", strain="B", kegg_code="tco")
+    )
+    db_session.add(
+        Organism(scientific_name="test-only species D", strain="A", biocyc_id="TCO-D")
+    )
+    db_session.add(
+        Organism(scientific_name="test-only species D", strain="B", biocyc_id="TCO-D")
+    )
+    db_session.flush()  # must not raise
+
+
+def test_organism_index_hardening_present(db_session):
+    """Migration 0009_persistence_hardening adds indexes on kegg_code and
+    biocyc_id, matching ncbi_taxonomy_id's pre-existing index -- neither is
+    unique."""
+    index_names = {ix["name"] for ix in inspect(db_session.get_bind()).get_indexes("organism")}
+    assert {"ix_organism_kegg_code", "ix_organism_biocyc_id"} <= index_names
+
+
 # --- publication uniqueness --------------------------------------------------
 
 
@@ -163,6 +191,29 @@ def test_compound_external_identifiers_are_not_unique(db_session):
     db_session.add(Compound(canonical_name="test-only compound A", chebi_id="CHEBI:test-only-1"))
     db_session.add(Compound(canonical_name="test-only compound B", chebi_id="CHEBI:test-only-1"))
     db_session.flush()  # must not raise
+
+
+def test_compound_pubchem_cid_and_metacyc_id_are_not_unique(db_session):
+    """Migration 0009_persistence_hardening indexes these two columns (to
+    support app.persistence.compound's freshness-recheck lookups) but
+    deliberately does not make them unique -- same policy as chebi_id above."""
+    db_session.add(Compound(canonical_name="test-only compound C", pubchem_cid="test-only-cid-1"))
+    db_session.add(Compound(canonical_name="test-only compound D", pubchem_cid="test-only-cid-1"))
+    db_session.add(
+        Compound(canonical_name="test-only compound E", metacyc_id="test-only-metacyc-1")
+    )
+    db_session.add(
+        Compound(canonical_name="test-only compound F", metacyc_id="test-only-metacyc-1")
+    )
+    db_session.flush()  # must not raise
+
+
+def test_compound_index_hardening_present(db_session):
+    """Migration 0009_persistence_hardening adds indexes on pubchem_cid and
+    metacyc_id, matching chebi_id/kegg_compound_id/inchikey's pre-existing
+    indexes -- none of the five is unique."""
+    index_names = {ix["name"] for ix in inspect(db_session.get_bind()).get_indexes("compound")}
+    assert {"ix_compound_pubchem_cid", "ix_compound_metacyc_id"} <= index_names
 
 
 # --- compound_synonym uniqueness and cascade --------------------------------
@@ -219,6 +270,41 @@ def test_seeded_compartments_have_null_organism_id(db_session):
     )
     assert len(seeded) == len(_STANDARD_COMPARTMENTS)
     assert all(c.organism_id is None for c in seeded)
+
+
+# --- compartment index hardening (migration 0009) ----------------------------
+
+
+def test_compartment_ontology_id_and_name_and_abbreviation_are_not_unique(db_session):
+    """Reference rows (organism_id IS NULL) and organism-specific rows may
+    legitimately coexist and even share an ontology_id/name/abbreviation
+    (docs/07_normalization_design.md Open Questions F/G/H) -- migration
+    0009_persistence_hardening adds lookup-path indexes only, never
+    uniqueness, for any of the three."""
+    organism = Organism(scientific_name="test-only compartment-index organism")
+    db_session.add(organism)
+    db_session.flush()
+
+    db_session.add(Compartment(name="test-only cytosol A", ontology_id="GO:test-only-0001"))
+    db_session.add(
+        Compartment(
+            organism_id=organism.id, name="test-only cytosol A", ontology_id="GO:test-only-0001"
+        )
+    )
+    db_session.flush()  # must not raise
+
+
+def test_compartment_index_hardening_present(db_session):
+    """Migration 0009_persistence_hardening adds an index on ontology_id and
+    two composite indexes on (organism_id, name)/(organism_id, abbreviation)
+    -- Compartment previously had no index of any kind beyond its primary
+    key."""
+    index_names = {ix["name"] for ix in inspect(db_session.get_bind()).get_indexes("compartment")}
+    assert {
+        "ix_compartment_ontology_id",
+        "ix_compartment_organism_id_name",
+        "ix_compartment_organism_id_abbreviation",
+    } <= index_names
 
 
 # --- NOT NULL / nullable field behavior -------------------------------------
