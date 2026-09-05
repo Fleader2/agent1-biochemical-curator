@@ -827,6 +827,22 @@ unless direct evidence exists.
 
 # Confidence Scoring Behavior
 
+> **Implementation note (Increment 17):**
+> `docs/13_single_evidence_confidence_contract.md` ("Agent 1 Single-
+> Evidence Assessment Contract") is the authoritative contract for what is
+> actually implemented today (`app.confidence.assess_single_evidence_claim`).
+> It transcribes this section's base evidence-score table exactly, but
+> produces a categorical per-evidence *assessment* only — it does **not**
+> compute a final 0-100 Claim confidence score or `ConfidenceClass`, since
+> this section's own formula is an aggregate-claim calculation (it
+> requires a replication bonus to reach its own MODERATE floor, which a
+> single evidence item cannot supply on its own). Final Claim confidence,
+> including replication bonuses, conflict penalties, and the organism/
+> experimental-relevance modifier tables below, remains deferred to a
+> future multi-evidence aggregation increment. This section itself is not
+> contradicted or narrowed by that document; it remains the full target
+> specification for that future increment.
+
 Confidence scores must be calculated from evidence attributes.
 
 The LLM may classify evidence type but must not arbitrarily assign final confidence.
