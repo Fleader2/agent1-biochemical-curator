@@ -201,6 +201,100 @@ add indexes and/or uniqueness rules for:
 Do not change the database schema now — this is a decision for a later
 increment.
 
+## I. Null-organism Reaction semantics
+
+`Reaction.organism_id` is nullable, but — unlike `Compartment`, whose
+`organism_id IS NULL` meaning is explicitly documented and verified (model
+docstring + migration `0002_reference_data`) — no repository documentation
+defines what a null-organism `Reaction` row means.
+
+**Define this explicitly** before any reaction with `organism_id = NULL`
+needs normalizing:
+
+- a generic/global biochemical reaction,
+- an unknown organism,
+- a reference/template reaction, or
+- another explicit concept.
+
+Do not resolve this now. `app.normalization.reaction` deliberately does
+**not** replicate Compartment's "`None` is compatible with any requested
+organism" reconciliation rule absent this evidence — a candidate with
+`organism_id = NULL` is currently treated as a different (conflicting)
+scope from any specific requested organism, exactly like any other
+non-matching organism value.
+
+## J. Reaction: participants required for NEW?
+
+`app.normalization.reaction`'s `NEW` rule currently requires only a
+Level 1 external identifier and a `name` — it does **not** require at
+least one participant, because the ORM schema does not enforce that a
+`Reaction` row have any `reaction_participant` rows at all.
+
+**Before Reaction persistence/import**, decide whether `NEW` should
+additionally require at least one normalized reactant/product participant,
+even though the schema does not mandate it — creating a nameless-structure
+"reaction" may be scientifically unsafe for downstream modeling
+(``docs/03_agent_behavior.md``'s "Reaction Curation Behavior": stoichiometry
+is one of the core things a reaction must have determined).
+
+Do not resolve this now.
+
+## K. Proportional stoichiometry equivalence
+
+`app.normalization.reaction` treats stoichiometry with exact `Decimal`
+comparison: `A + B -> C` and `2 A + 2 B -> 2 C` are different exact
+structures, with no canonical-ratio reduction performed.
+
+**Decide** whether reactions differing only by a common stoichiometric
+scale factor should ever be treated as structurally equivalent. Do not
+resolve this now — no existing specification defines a canonical-ratio
+policy.
+
+## L. Reversed orientation for reversible reactions
+
+`app.normalization.reaction` never treats `A -> B` as equivalent to
+`B -> A`, even when both the incoming identity and the resolved candidate
+are marked `reversible = True` — reactant/product role is part of the exact
+structural signature, and reversibility metadata is never used to reorder
+or reinterpret it.
+
+**Decide** whether a reversible `Reaction` should be considered
+structurally equivalent to the same participants with reactant/product
+roles reversed. Do not resolve this now.
+
+## M. Structure-only duplicate discovery (required architectural follow-up)
+
+`app.normalization.reaction` has no structural/participant lookup method at
+all, because no existing persistence-layer API provides one and this
+increment does not invent one. As a direct consequence, **this module
+cannot currently discover a Reaction that shares an incoming record's exact
+participant structure but no external identifier and no matching name** —
+such a duplicate is architecturally invisible to it (proven explicitly by
+`test_structure_only_duplicate_is_currently_undetectable_new_not_ambiguous`
+in `tests/normalization/test_reaction.py`).
+
+**Before high-volume Reaction persistence/import**, define and implement a
+persistence-level structural lookup or canonical structural-signature
+strategy. This is flagged as a **required architectural follow-up**, not
+merely an optional enhancement — without it, structurally duplicate
+reactions can be created undetected.
+
+## N. Reaction indexing and uniqueness
+
+`kegg_reaction_id`/`rhea_id` are indexed but not unique; `metacyc_reaction_id`
+is neither indexed nor unique; `ec_number` is indexed but non-unique;
+`reaction_participant` has no uniqueness constraint at all, so duplicate
+identical participant rows are possible at the schema level. Only
+`internal_id` is genuinely database-unique, and it is a persistence
+identifier, never incoming identity (see the Finalized Policy section
+below).
+
+**Before Reaction persistence/import**, decide whether any external
+identifiers should receive indexes and/or uniqueness constraints beyond the
+current schema (mirroring the same still-open questions for
+`protein.uniprot_id` (Question A), Compound's five external identifiers
+(Question E), and Compartment (Question H)). Do not change the schema now.
+
 ---
 
 # Finalized Normalization Policy: Protein (Increment 5)
@@ -471,3 +565,197 @@ test_foreign_strong_id_collision_never_becomes_new
 ```
 
 All twelve already exist and pass in `tests/normalization/test_compartment.py`.
+
+---
+
+# Finalized Normalization Policy: Reaction (Increment 8)
+
+Full rationale lives in `app/normalization/reaction.py`'s module docstring;
+this is a summary for cross-reference. Reaction↔enzyme association
+(`reaction_enzyme`) is out of scope for this increment.
+
+## Schema semantics
+
+- `Reaction.internal_id` is database-unique.
+- `Reaction.organism_id` is nullable, but current repository documentation
+  does not define the biological semantics of `organism_id = NULL` for
+  `Reaction` (see Open Question I).
+- `kegg_reaction_id` and `rhea_id` are indexed but not unique.
+- `metacyc_reaction_id` is neither indexed nor unique.
+- `ec_number` is indexed but non-unique.
+- `reaction_participant` has no uniqueness constraint.
+- Duplicate identical participant rows are therefore possible at the
+  schema level.
+- Participant `stoichiometry` is `Decimal`/`Numeric`, constrained to `> 0`
+  by a database `CHECK` constraint.
+
+## Identity hierarchy
+
+- **Level 1** (symmetric exact external identifiers): `kegg_reaction_id`,
+  `metacyc_reaction_id`, `rhea_id`.
+- **Level 2** (exact normalized participant structure): corroborating/
+  contradicting only in the current increment — does not independently
+  discover or `MATCH` a Reaction (see Open Question M).
+- **Level 3** (exact organism-scoped name): weak candidate generation
+  only, never independently `MATCHED`.
+- **Non-identity/inert metadata**: `ec_number`, `reaction_type`,
+  `reversible`.
+- **Internal persistence identifier**: `internal_id` is not part of
+  incoming Reaction identity.
+
+## Strong external-ID reconciliation
+
+- Zero strong matches → continue to weak/`NEW` logic.
+- One consistent candidate in the requested organism → `MATCHED`.
+- One external ID resolving to multiple rows → `AMBIGUOUS`.
+- Different external IDs resolving to different rows → `CONFLICTED`.
+- A candidate with `organism_id != requested organism_id`, **including
+  `NULL`**, → `CONFLICTED`.
+- Never chosen arbitrarily among duplicate external-ID rows.
+
+## Organism policy
+
+`normalize_reaction` requires a non-null `organism_id`. Reaction
+candidates with `organism_id = NULL` are **not** treated as global/
+reference records, because the repository does not currently define that
+meaning for `Reaction` (unlike the verified Compartment case). See Open
+Question I.
+
+## Participant identity and canonicalization
+
+`ReactionParticipantIdentity`: `compound_id`, `role`, `stoichiometry`,
+`compartment_id`. Canonical comparison is:
+
+- order-independent,
+- multiplicity-sensitive,
+- exact on `compound_id`,
+- exact on `role`,
+- exact on `compartment_id`,
+- exact on `stoichiometry`.
+
+Duplicate identical participant rows are preserved, not combined.
+
+## Stoichiometry policy
+
+- Exact `Decimal` comparison.
+- No floating-point tolerance.
+- No proportional reduction — `1:1:1` is not automatically equivalent to
+  `2:2:2` (see Open Question K).
+
+## Direction/reversibility policy
+
+- Role/direction is part of participant structure.
+- `reversible` metadata is never used to reverse or reinterpret
+  participants.
+- `A -> B` is not treated as `B -> A`, even when both reactions are
+  `reversible = True` (see Open Question L).
+- `reversible = NULL` remains unresolved.
+
+## Structural equality policy
+
+- Exact participant structure may corroborate or contradict a Level-1
+  match.
+- Exact structure alone does not currently produce `MATCHED`.
+- The current normalization layer has no structural lookup method.
+- Structure-only duplicate discovery is therefore not implemented (see
+  Open Question M — a required architectural follow-up).
+
+## Strong-ID plus structural disagreement
+
+If a Level-1 identifier resolves one candidate and incoming participants
+are supplied:
+
+- different compound → `CONFLICTED`
+- different role → `CONFLICTED`
+- different stoichiometry → `CONFLICTED`
+- different compartment → `CONFLICTED`
+
+If the candidate has no recorded participants, missing structure is
+treated as missing metadata rather than contradiction.
+
+## Compartment policy
+
+- `compartment_id` is part of structural identity.
+- Compartments are never dropped or defaulted.
+- Transport and same-compartment reactions remain distinct:
+  `A[c] -> A[m] != A[c] -> A[c]`.
+
+## Generic-compound policy
+
+- Normalized compound UUIDs are treated literally.
+- Generic and specific compounds are not substituted.
+- No class/ontology expansion occurs in Reaction normalization.
+
+## Proton/water/charge convention policy
+
+- No proton normalization.
+- No water normalization.
+- No charge-state normalization.
+- No acid/base normalization.
+- Explicit H+ or H2O differences make exact structures different.
+- Mass/charge balancing belongs to a separate deterministic validation
+  layer.
+
+## Name policy
+
+- Exact, organism-scoped lookup only.
+- Never independently `MATCHED`.
+- Any nonzero name candidate set blocks `NEW`.
+- No fuzzy matching, no synonym expansion, no punctuation or case
+  normalization beyond existing whitespace trimming.
+
+## EC-number policy
+
+- EC number is not a Reaction identity key.
+- No `by_ec_number` lookup.
+- Multiple reactions may share one EC number.
+- EC disagreement does not currently override a Level-1 match.
+
+## Reaction-type policy
+
+- `reaction_type` is metadata only.
+- It does not independently match or conflict in the current increment.
+
+## NEW policy
+
+`NEW` requires:
+
+- at least one Level-1 external reaction identifier,
+- no strong match, ambiguity, or conflict,
+- no exact name collision,
+- `name` present.
+
+Participants are **not** currently required for `NEW`, because the ORM
+schema does not require them and no repository policy yet imposes that
+stricter rule (see Open Question J). No `internal_id` is generated by
+normalization.
+
+## Connector behavior
+
+`reaction_identity_from_kegg` is implemented because an existing KEGG
+reaction record exists. The KEGG equation is not parsed — participants
+remain empty, because the connector exposes equation text, not a trusted
+normalized participant structure. No Rhea or MetaCyc adapter is
+implemented because compatible connectors do not exist.
+
+## Proposed regression tests
+
+Minimal Reaction-normalization test names proposed for
+`docs/05_testing.md` (not yet added there):
+
+```text
+test_exact_strong_id_single_candidate_in_requested_organism_matched
+test_multiple_rows_for_one_external_id_is_ambiguous
+test_foreign_organism_candidate_is_conflicted_never_new
+test_rhea_resolves_a_kegg_resolves_b_is_conflicted
+test_same_external_id_different_compound_participants_is_conflicted
+test_same_external_id_different_stoichiometry_is_conflicted
+test_forward_direction_does_not_equal_reverse_direction
+test_transport_reaction_differs_from_same_compartment_reaction
+test_structure_only_duplicate_is_currently_undetectable_new_not_ambiguous
+test_one_exact_name_candidate_is_ambiguous_never_matched
+test_reactions_may_share_ec_number_without_being_considered_same
+test_no_proportional_stoichiometry_reduction
+```
+
+All twelve already exist and pass in `tests/normalization/test_reaction.py`.
