@@ -48,6 +48,34 @@ Those responsibilities belong to downstream agents.
 
 ---
 
+# Multi-Agent Architecture
+
+Agent 1 is one component of a five-agent pipeline. Each agent has a fixed,
+non-overlapping responsibility:
+
+- **Agent 1 — Literature Curator** (this repository): curates biochemical
+  knowledge — entities, reactions, enzymes, regulation, provenance,
+  confidence, knowledge gaps, and experiment recommendations/execution —
+  into a structured, evidence-backed, reviewable knowledge base.
+- **Agent 2 — Antimony Builder**: turns Agent 1's curated knowledge into
+  syntactically valid Antimony (reactions, parameters, compartments,
+  events, rules).
+- **Agent 3 — Validator**: checks a built model for mass balance, missing
+  species, duplicate reactions, disconnected subnetworks, unit
+  consistency, and conservation laws.
+- **Agent 4 — Simulator**: runs Tellurium/COPASI simulations, parameter
+  scans, sensitivity analyses, and steady-state calculations.
+- **Agent 5 — Model Critic**: asks whether a model is thermodynamically
+  sound, whether cofactors/regulation are missing, and whether its
+  assumptions are experimentally supported.
+
+Agent 1 v1 is complete and frozen at the boundary above — it does not
+build, validate, simulate, or critique mathematical models. See
+`docs/23_agent1_v1_scope_and_completion.md` for the full scope-freeze
+contract.
+
+---
+
 # Scientific Philosophy
 
 This project follows five guiding principles.

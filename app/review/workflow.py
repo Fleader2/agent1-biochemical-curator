@@ -138,15 +138,27 @@ _MACHINE_REVIEW_TARGET_BY_CONFIDENCE_CLASS: dict[ConfidenceClass, CurationState]
 }
 
 
-def _current_curation_state(session: Session, entity_id: UUID) -> CurationState:
+def get_current_curation_state(session: Session, claim_id: UUID) -> CurationState:
     """A claim's curation state, derived from its own ``ReviewEvent`` history.
 
     ``CurationState.PROPOSED`` when no ``ReviewEvent`` exists yet -- the
     implicit starting point, not an invented default (see module
-    docstring).
+    docstring). Public (Increment 27, Agent 1 finalization): the final
+    Agent 1 read/export layer (``app.agent1``) needs this exact
+    computation to classify curated vs. non-curated claims, and must not
+    reimplement it -- see ``docs/23_agent1_v1_scope_and_completion.md``
+    §10 for the curated-knowledge eligibility policy this function backs.
     """
-    history = get_review_history(session, entity_type=_ENTITY_TYPE, entity_id=entity_id)
+    history = get_review_history(session, entity_type=_ENTITY_TYPE, entity_id=claim_id)
     return history[-1].new_state if history else CurationState.PROPOSED
+
+
+def _current_curation_state(session: Session, entity_id: UUID) -> CurationState:
+    """Private alias kept for this module's own internal call sites.
+
+    See ``get_current_curation_state``.
+    """
+    return get_current_curation_state(session, entity_id)
 
 
 def _validate_actor_target(

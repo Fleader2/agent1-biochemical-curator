@@ -17,7 +17,7 @@ from __future__ import annotations
 from app.review.errors import InvalidReviewTransitionError, ReviewError
 from app.review.history import get_review_history
 from app.review.types import ReviewDecision, ReviewerType, ReviewWorkflowResult
-from app.review.workflow import human_review_claim, machine_review_claim
+from app.review.workflow import get_current_curation_state, human_review_claim, machine_review_claim
 
 __all__ = [
     "InvalidReviewTransitionError",
@@ -25,6 +25,7 @@ __all__ = [
     "ReviewError",
     "ReviewWorkflowResult",
     "ReviewerType",
+    "get_current_curation_state",
     "get_review_history",
     "human_review_claim",
     "machine_review_claim",

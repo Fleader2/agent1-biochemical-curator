@@ -338,3 +338,12 @@ These outputs form the canonical input for Agent 2, which generates mechanistic 
 The long-term objective is to create a reusable, extensible biochemical knowledge platform capable of supporting predictive virtual-cell modeling across diverse organisms.
 
 The design should therefore prioritize extensibility, reproducibility, provenance, and scientific rigor over short-term implementation convenience.
+
+---
+
+# Agent 1 v1 Scope Freeze
+
+`docs/23_agent1_v1_scope_and_completion.md` is the final, authoritative
+Agent 1 v1 scope-freeze contract: the complete output list, the capability
+matrix, known limitations, and the explicit boundary against Agents 2-5.
+It supersedes this document wherever the two disagree on current status.
