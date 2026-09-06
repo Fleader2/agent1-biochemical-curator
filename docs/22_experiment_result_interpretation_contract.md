@@ -368,6 +368,11 @@ Future work -- explicitly **not** part of Agent 1 Version 1 -- may:
 None of these belong to Agent 1 Version 1. This increment produces
 candidate evidence and stops there.
 
+This increment closed the experimental subsystem; see
+`docs/23_agent1_v1_scope_and_completion.md` (the canonical current-state
+Agent 1 v1 scope document) for how this fits into Agent 1's final,
+complete v1 contract.
+
 ## 22. Final architectural rule
 
 > ExperimentExecution records what was done.

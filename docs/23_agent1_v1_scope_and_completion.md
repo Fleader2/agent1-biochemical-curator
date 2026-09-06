@@ -8,6 +8,19 @@ freezes Agent 1 v1's boundaries against modeling, simulation, and
 scientific-critique capabilities that belong to later agents. It is the
 final Agent 1 v1 increment. Agent 2 is explicitly not started here.
 
+**This is the canonical, current-state scope document for Agent 1 v1.**
+Where an earlier, historical increment contract (`docs/01`-`docs/22`)
+appears to disagree with this document on Agent 1's present
+responsibilities, outputs, or limitations, this document controls. Earlier
+documents remain valid historical records of the design decisions made at
+the time each increment was implemented; they are not rewritten to match
+this one except for a short forward pointer where useful. Agent 1 v1 being
+"complete" per this document means the v1 scope defined here is fully
+implemented and validated -- it does not mean Agent 1 work is finished
+forever: Agent 1.x may still add connectors, regulation curation, or
+richer cofactor semantics (§21, §27) without those enhancements being
+prerequisites for v1 completion.
+
 ## 2. Original multi-agent architecture
 
 ```text

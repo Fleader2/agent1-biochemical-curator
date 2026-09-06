@@ -104,7 +104,9 @@ rather than unsupported biological conclusions.
 
 # Project Architecture
 
-The planned workflow is:
+The planned workflow is (see `docs/23_agent1_v1_scope_and_completion.md`
+§6 for the actual, currently implemented pipeline, which supersedes this
+original planning diagram):
 
 ```text
 Scientific Sources
@@ -320,6 +322,12 @@ and so on). The roadmap below instead describes the higher-level scientific
 capability progression; each stage here may span one or more phases of the
 detailed engineering plan.
 
+**Phases 1-11 below are complete — Agent 1 v1 is done.** See
+`docs/23_agent1_v1_scope_and_completion.md` for the authoritative
+completion contract, the Agent 1.x backlog (additional connectors,
+regulation curation, richer cofactor semantics), and the Agent 2 boundary
+this roadmap's final phase hands off to.
+
 ## Phase 1
 
 Project infrastructure
@@ -342,16 +350,20 @@ Scientific connectors
 - KEGG
 - BRENDA
 - SGD
+- UniProt
+- MetaCyc
 - BioCyc
 
-Implemented: KEGG, PubMed, SGD, BRENDA.
+Implemented: KEGG, PubMed, SGD, BRENDA, UniProt.
 
-BioCyc is deferred, not abandoned. Current BioCyc access requires a paid
+MetaCyc/BioCyc are deferred, not abandoned — deferred to Agent 1.x, not a
+blocker for Agent 1 v1 completion. Current BioCyc access requires a paid
 subscription for both YeastCyc (*Saccharomyces cerevisiae*) and MetaCyc,
 which this project does not currently have. Implementing and validating a
-BioCyc connector responsibly requires licensed access to verify its actual
-request/response behavior; this is a licensing/access constraint, not a
-technical limitation. Revisit BioCyc once appropriate access is obtained.
+BioCyc/MetaCyc connector responsibly requires licensed access to verify
+its actual request/response behavior; this is a licensing/access
+constraint, not a technical limitation. Revisit once appropriate access is
+obtained.
 
 ## Phase 4
 
@@ -408,10 +420,8 @@ Add the appropriate project license before public distribution.
 
 # Project Status
 
-**Status:** Early development
+**Status:** Agent 1 v1 complete. See `docs/23_agent1_v1_scope_and_completion.md` for the authoritative completion contract.
 
-The software is under active design and implementation.
+Agent 1 v1 establishes a robust, evidence-backed scientific curation framework that can safely support downstream mechanistic model construction — it does not itself build, validate, simulate, or critique those models (Agents 2-5).
 
-The primary objective of Version 0.1 is to establish a robust scientific curation framework that can safely support downstream mechanistic model construction.
-
-Future versions will expand organism coverage, biological scope, and downstream integrations while preserving the project's core principles of provenance, reproducibility, and scientific rigor.
+"Complete" describes v1's scope, not a stopping point for the project: Agent 1.x may still add connectors (MetaCyc, BioCyc), a fuller regulation curation pipeline, and richer cofactor semantics, none of which were required for v1. Future work will expand organism coverage, biological scope, and downstream integrations while preserving the project's core principles of provenance, reproducibility, and scientific rigor.
