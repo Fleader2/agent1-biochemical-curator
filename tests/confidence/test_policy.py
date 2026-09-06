@@ -39,18 +39,21 @@ def test_every_evidence_type_enum_value_is_either_scored_or_explicitly_unscored(
 
 
 def test_unscored_evidence_types_are_exactly_the_documented_gap():
-    assert frozenset(
-        {
-            EvidenceType.LOCALIZATION,
-            EvidenceType.PROTEOMICS,
-            EvidenceType.METABOLOMICS,
-            EvidenceType.FLUXOMICS,
-            EvidenceType.TRANSCRIPTOMICS,
-            EvidenceType.STRUCTURAL,
-            EvidenceType.REVIEW,
-            EvidenceType.OTHER,
-        }
-    ) == EVIDENCE_TYPE_UNSCORED
+    assert (
+        frozenset(
+            {
+                EvidenceType.LOCALIZATION,
+                EvidenceType.PROTEOMICS,
+                EvidenceType.METABOLOMICS,
+                EvidenceType.FLUXOMICS,
+                EvidenceType.TRANSCRIPTOMICS,
+                EvidenceType.STRUCTURAL,
+                EvidenceType.REVIEW,
+                EvidenceType.OTHER,
+            }
+        )
+        == EVIDENCE_TYPE_UNSCORED
+    )
 
 
 def test_base_scores_and_unscored_set_are_disjoint():

@@ -827,21 +827,27 @@ unless direct evidence exists.
 
 # Confidence Scoring Behavior
 
-> **Implementation note (Increment 17):**
+> **Implementation note (Increments 17-18A):**
 > `docs/13_single_evidence_confidence_contract.md` ("Agent 1 Single-
-> Evidence Assessment Contract") is the authoritative contract for what is
-> actually implemented today (`app.confidence.assess_single_evidence_claim`).
-> It transcribes this section's base evidence-score table exactly, but
-> produces a categorical per-evidence *assessment* only — it does **not**
-> compute a final 0-100 Claim confidence score or `ConfidenceClass`, since
-> this section's own formula is an aggregate-claim calculation (it
-> requires a replication bonus to reach its own MODERATE floor, which a
-> single evidence item cannot supply on its own). Final Claim confidence,
-> including replication bonuses, conflict penalties, and the organism/
-> experimental-relevance modifier tables below, remains deferred to a
-> future multi-evidence aggregation increment. This section itself is not
-> contradicted or narrowed by that document; it remains the full target
-> specification for that future increment.
+> Evidence Assessment Contract") and
+> `docs/14_multi_evidence_confidence_contract.md` ("Agent 1 Multi-Evidence
+> Claim Confidence Contract") are the authoritative contracts for what is
+> actually implemented today. Increment 17
+> (`app.confidence.assess_single_evidence_claim`) transcribes this
+> section's base evidence-score table exactly but produces a categorical
+> per-evidence *assessment* only, never a final score. Increment 18
+> (`app.confidence.aggregation.aggregate_claim_confidence`) is where this
+> section's formula — base score, organism/experimental relevance,
+> replication bonus, conflict penalty, clamped 0-100, mapped through
+> Confidence Classes — is actually applied. Increment 18 found that this
+> section never specifies how *multiple, differing* evidence items' own
+> base scores combine (only that they must not simply be summed) and
+> declined to invent that rule; **Increment 18A resolves this with a
+> canonical, deterministic diminishing-return weighting algorithm** (see
+> `docs/14_multi_evidence_confidence_contract.md` §15a for the exact
+> formula and worked example). This section itself is not contradicted or
+> narrowed by either document; both remain faithful implementations of it
+> within their disclosed limits.
 
 Confidence scores must be calculated from evidence attributes.
 

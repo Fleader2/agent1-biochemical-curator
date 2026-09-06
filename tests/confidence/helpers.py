@@ -212,8 +212,13 @@ def make_claim(
     value_numeric=None,
     value_unit: str | None = None,
     qualifiers: tuple[str, ...] = (),
+    source_identifier: str = "PMID:1",
+    text: str | None = None,
 ) -> CandidateClaim:
     extraction = make_extraction(
+        text
+        if text is not None
+        else f"FadR activates fabA transcription in Escherichia coli. ({source_identifier})",
         subject_text=subject_text,
         predicate_text=predicate,
         object_text=object_text,
@@ -223,6 +228,7 @@ def make_claim(
         directness=directness,
         measurement_value=value_text,
         measurement_units=value_unit,
+        source_identifier=source_identifier,
     )
     return CandidateClaim(
         source=extraction.source,

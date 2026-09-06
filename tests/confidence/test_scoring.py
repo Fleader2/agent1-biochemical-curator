@@ -538,11 +538,21 @@ def test_result_has_no_final_score_or_confidence_class():
     assert not hasattr(result, "confidence_class")
 
 
-def test_public_module_exports_no_confidence_class_mapping():
-    import app.confidence as confidence_package
+def test_single_evidence_layer_exports_no_confidence_class_mapping():
+    """Increment 17's own modules (policy/scoring/types) never map a score
 
-    assert not hasattr(confidence_package, "classify_confidence_class")
-    assert not hasattr(confidence_package, "CONFIDENCE_CLASS_THRESHOLDS")
+    to a ConfidenceClass -- that concept was moved entirely to Increment
+    18's aggregation layer (``app.confidence.aggregate_policy``), which
+    the top-level ``app.confidence`` package re-exports for aggregate use
+    only.
+    """
+    import app.confidence.policy as single_evidence_policy_module
+    import app.confidence.scoring as scoring_module
+    import app.confidence.types as types_module
+
+    for module in (single_evidence_policy_module, scoring_module, types_module):
+        assert not hasattr(module, "classify_confidence_class")
+        assert not hasattr(module, "CONFIDENCE_CLASS_THRESHOLDS")
 
 
 # --- No persistence / no network / no connectors -----------------------------------
