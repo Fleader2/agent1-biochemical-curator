@@ -326,6 +326,11 @@ section's original "no destination columns today" analysis is no longer
 current and is kept only as historical context for why the hardening was
 needed.
 
+**See also**: `docs/19_experiment_recommendation_contract.md` (Increment
+23) converts a detected gap into a structured, deterministic experiment
+recommendation — a downstream consumer of this contract's output, never a
+change to detection semantics.
+
 ## 21. Final architectural rule
 
 > Knowledge-gap detection reports what the curated knowledge base

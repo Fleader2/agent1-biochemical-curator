@@ -270,6 +270,12 @@ round-tripping.
 4. No automatic reopen workflow exists for `RESOLVED`/`DISMISSED` gaps
    (§15) — a future increment may want one, explicitly human-gated.
 
+**See also**: `docs/19_experiment_recommendation_contract.md` (Increment
+23) consumes `KnowledgeGapCandidate`/persisted `KnowledgeGap` rows to
+produce structured, deterministic experiment recommendations. It writes
+nothing back here — `suggested_experiment`/`model_impact`/`importance`
+remain exactly as this document describes them, untouched.
+
 ## 22. Final architectural rule
 
 > KnowledgeGap persistence records deterministic analysis output.
