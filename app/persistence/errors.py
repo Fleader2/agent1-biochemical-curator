@@ -30,4 +30,22 @@ class EntityTypeMismatchError(PersistenceError):
     """
 
 
-__all__ = ["EntityTypeMismatchError", "PersistenceError"]
+class ContributionConfidenceMismatchError(PersistenceError):
+    """An ``AggregateClaimConfidence`` was passed alongside contributions it was not computed from.
+
+    Raised by ``app.persistence.claim.persist_claim_with_evidence`` when the
+    supplied ``confidence.contribution_breakdown`` does not structurally
+    correspond, entry for entry, to the supplied ``contributions`` (same
+    count, same ``source_identifier``/``publication_identifier``/
+    ``evidence_type`` in the same order) -- always a caller bug, never an
+    ordinary data condition: it means the wrong confidence result was routed
+    to the wrong evidence set, not that persistence has anything relevant to
+    report about the data itself.
+    """
+
+
+__all__ = [
+    "ContributionConfidenceMismatchError",
+    "EntityTypeMismatchError",
+    "PersistenceError",
+]
