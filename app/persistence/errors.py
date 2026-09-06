@@ -44,8 +44,45 @@ class ContributionConfidenceMismatchError(PersistenceError):
     """
 
 
+class ExperimentRecommendationPersistenceError(PersistenceError):
+    """Base class for ``app.persistence.experiment_recommendation`` exceptions."""
+
+
+class RecommendationIdentityConflictError(ExperimentRecommendationPersistenceError):
+    """An existing row's ``recommendation_identity`` matches, but its persisted content differs.
+
+    ``recommendation_identity`` is a deterministic digest of
+    ``knowledge_gap_identity``/``template_id``/``template_version`` only
+    (``app.experiment_recommendation.recommender
+    .compute_recommendation_identity``); the same three inputs should
+    always deterministically produce the same recommendation content. An
+    identity match with differing content therefore indicates a genuine
+    invariant violation -- a template registry entry changed its content
+    without bumping its version, or the caller supplied a corrupted/
+    mismatched ``ExperimentRecommendation`` -- never an ordinary data
+    condition, so this is raised rather than represented as a persistence
+    result.
+    """
+
+
+class TerminalKnowledgeGapError(ExperimentRecommendationPersistenceError):
+    """Reserved for a future caller that wants a hard failure instead of a structured result.
+
+    ``app.persistence.experiment_recommendation.persist_experiment_recommendation``
+    never raises this today: Increment 24 instructions, Step 21 explicitly
+    prefers representing "the originating KnowledgeGap is RESOLVED/
+    DISMISSED" as data (``PersistenceAction.REQUIRES_REVIEW``), the same
+    philosophy every other conservative refusal in this persistence layer
+    already uses. This class exists for API completeness and for a future
+    override-flow that might want to fail loudly instead.
+    """
+
+
 __all__ = [
     "ContributionConfidenceMismatchError",
     "EntityTypeMismatchError",
+    "ExperimentRecommendationPersistenceError",
     "PersistenceError",
+    "RecommendationIdentityConflictError",
+    "TerminalKnowledgeGapError",
 ]

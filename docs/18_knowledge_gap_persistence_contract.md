@@ -275,6 +275,10 @@ round-tripping.
 produce structured, deterministic experiment recommendations. It writes
 nothing back here — `suggested_experiment`/`model_impact`/`importance`
 remain exactly as this document describes them, untouched.
+`docs/20_experiment_recommendation_persistence_contract.md` (Increment 24)
+persists those recommendations into their own dedicated table and adds a
+human lifecycle around them — also never touching `suggested_experiment`/
+`model_impact`, and never resolving `KnowledgeGap.status`.
 
 ## 22. Final architectural rule
 

@@ -16,6 +16,10 @@ from app.models.claim import Claim, Evidence, EvidenceCondition
 from app.models.compartment import Compartment
 from app.models.compound import Compound, CompoundSynonym
 from app.models.enzyme_complex import EnzymeComplex, EnzymeComplexMember
+from app.models.experiment_recommendation import (
+    ExperimentRecommendationEvent,
+    ExperimentRecommendationRecord,
+)
 from app.models.experimental_condition import ExperimentalCondition
 from app.models.external_record import ExternalRecord
 from app.models.gene import Gene
@@ -40,6 +44,8 @@ __all__ = [
     "EnzymeComplexMember",
     "Evidence",
     "EvidenceCondition",
+    "ExperimentRecommendationEvent",
+    "ExperimentRecommendationRecord",
     "ExperimentalCondition",
     "ExternalRecord",
     "Gene",

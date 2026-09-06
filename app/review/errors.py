@@ -27,4 +27,21 @@ class InvalidReviewTransitionError(ReviewError):
     """
 
 
-__all__ = ["InvalidReviewTransitionError", "ReviewError"]
+class InvalidRecommendationTransitionError(ReviewError):
+    """A requested ``RecommendationLifecycleStatus`` transition is not represented.
+
+    Not represented by the lifecycle state machine, specifically.
+
+    The identical philosophy as ``InvalidReviewTransitionError``, applied
+    to ``app.review.experiment_recommendation_workflow``'s own lifecycle
+    state machine -- see
+    ``docs/20_experiment_recommendation_persistence_contract.md`` for the
+    full transition table.
+    """
+
+
+__all__ = [
+    "InvalidRecommendationTransitionError",
+    "InvalidReviewTransitionError",
+    "ReviewError",
+]

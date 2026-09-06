@@ -287,15 +287,17 @@ simulation, no model-impact scoring, no review-workflow change.
   `INSUFFICIENT_INFORMATION` rather than `REQUIRES_HUMAN_DESIGN` -- a
   deliberate distinction (§5), not a defect.
 
-## 20. Relationship to future recommendation persistence
+## 20. Relationship to recommendation persistence
 
-Deliberately deferred. `compute_recommendation_identity` (versioned
-`experiment-rec-v1:<sha256>`, derived from `knowledge_gap_identity` +
-`template_id` + `template_version` only, never from `rationale`) is ready
-for a future persistence increment to use as a stable row identity, the
-same way `app.persistence.knowledge_gap.compute_identity_key` already
-serves `KnowledgeGap` itself -- but no such table or write path exists
-yet, and `KnowledgeGap.suggested_experiment` remains untouched (§18).
+**Implemented by Increment 24.** `compute_recommendation_identity`
+(versioned `experiment-rec-v1:<sha256>`, derived from
+`knowledge_gap_identity` + `template_id` + `template_version` only, never
+from `rationale`) is now used exactly as anticipated here, as the stable
+row identity for a dedicated `experiment_recommendation` table, plus a
+human lifecycle around it. See
+`docs/20_experiment_recommendation_persistence_contract.md` for the
+complete contract -- `KnowledgeGap.suggested_experiment` remains untouched
+(§18), by that increment as much as this one.
 
 ## 21. Relationship to future hypothesis generation
 
