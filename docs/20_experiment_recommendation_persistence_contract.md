@@ -272,6 +272,11 @@ tiebreaker.
 
 ## 21. Explicit non-responsibilities
 
+See `docs/21_experiment_execution_result_contract.md` (Increment 25) for
+how an `ACCEPTED` recommendation is later turned into an
+`ExperimentExecution`/`ExperimentResult` -- that increment reads this
+table's `lifecycle_status` but never mutates it or any other column here.
+
 No experiment execution, no scheduling, no laboratory protocol generation,
 no hypotheses, no LLM reasoning, no automatic recommendation generation
 beyond calling Increment 23's existing recommender, no cost estimation, no

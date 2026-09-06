@@ -40,7 +40,20 @@ class InvalidRecommendationTransitionError(ReviewError):
     """
 
 
+class InvalidExperimentExecutionTransitionError(ReviewError):
+    """A requested ``ExecutionStatus`` transition is not represented.
+
+    The identical philosophy as ``InvalidReviewTransitionError``/
+    ``InvalidRecommendationTransitionError``, applied to
+    ``app.review.experiment_execution_workflow``'s own lifecycle state
+    machine -- see
+    ``docs/21_experiment_execution_result_contract.md`` for the full
+    transition table.
+    """
+
+
 __all__ = [
+    "InvalidExperimentExecutionTransitionError",
     "InvalidRecommendationTransitionError",
     "InvalidReviewTransitionError",
     "ReviewError",
