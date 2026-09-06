@@ -479,19 +479,129 @@ def test_knowledge_gap_two_arbitrary_statuses_coexist(db_session):
 
 
 def test_knowledge_gap_status_has_no_check_constraint(db_session):
-    """Direct schema inspection: no CHECK constraint restricts status to a
-    fixed vocabulary — there is deliberately no KnowledgeGapStatus enum."""
+    """Direct schema inspection: no CHECK constraint restricts ``status`` to
+    a fixed vocabulary — there is deliberately no KnowledgeGapStatus enum or
+    CHECK for it (Increment 22 enforces OPEN/RESOLVED/DISMISSED only at the
+    persistence-API boundary; see docs/18_knowledge_gap_persistence_contract
+    .md §12). Increment 22 *did* add CHECK constraints for gap_type/severity
+    — a different, unrelated pair of columns — so this test now asserts
+    status specifically is unconstrained, not that the table has none."""
     inspector = inspect(db_session.get_bind())
-    assert inspector.get_check_constraints("knowledge_gap") == []
+    check_constraints = inspector.get_check_constraints("knowledge_gap")
+    assert not any("status" in c["sqltext"] for c in check_constraints)
 
     columns = {col["name"]: col for col in inspector.get_columns("knowledge_gap")}
     # A plain VARCHAR reports as a String-family type, never ENUM/native enum.
     assert "ENUM" not in type(columns["status"]["type"]).__name__.upper()
 
 
-def test_knowledge_gap_has_no_index_beyond_primary_key(db_session):
+def test_knowledge_gap_gap_type_and_severity_are_check_constrained(db_session):
+    """Increment 22: gap_type/severity are plain VARCHARs guarded by a
+    CHECK constraint listing the exact current GapType/GapSeverity members
+    — not a native enum (see app.models.knowledge_gap's own docstring for
+    why) and not unconstrained free text either."""
     inspector = inspect(db_session.get_bind())
-    assert inspector.get_indexes("knowledge_gap") == []
+    check_constraints = {c["name"] for c in inspector.get_check_constraints("knowledge_gap")}
+    assert "ck_knowledge_gap_gap_type_valid" in check_constraints
+    assert "ck_knowledge_gap_severity_valid" in check_constraints
+
+    columns = {col["name"]: col for col in inspector.get_columns("knowledge_gap")}
+    assert "ENUM" not in type(columns["gap_type"]["type"]).__name__.upper()
+    assert "ENUM" not in type(columns["severity"]["type"]).__name__.upper()
+
+
+def test_knowledge_gap_gap_type_check_constraint_rejects_unknown_value(db_session):
+    kg = KnowledgeGap(subject_type="reaction", missing_information="x", gap_type="NOT_A_REAL_TYPE")
+    db_session.add(kg)
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_knowledge_gap_severity_check_constraint_rejects_unknown_value(db_session):
+    kg = KnowledgeGap(subject_type="reaction", missing_information="x", severity="EXTREME")
+    db_session.add(kg)
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_knowledge_gap_has_increment_22_hardening_indexes(db_session):
+    inspector = inspect(db_session.get_bind())
+    index_names = {index["name"] for index in inspector.get_indexes("knowledge_gap")}
+    assert index_names == {
+        "ix_knowledge_gap_gap_type",
+        "ix_knowledge_gap_severity",
+        "ix_knowledge_gap_status",
+        "ix_knowledge_gap_subject_type_subject_id",
+        "uq_knowledge_gap_identity_key",
+    }
+
+
+def test_knowledge_gap_identity_key_unique_when_present(db_session):
+    first = KnowledgeGap(
+        subject_type="reaction", missing_information="x", identity_key="kg-v1:abc"
+    )
+    db_session.add(first)
+    db_session.flush()
+
+    second = KnowledgeGap(
+        subject_type="reaction", missing_information="y", identity_key="kg-v1:abc"
+    )
+    db_session.add(second)
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_knowledge_gap_multiple_null_identity_keys_coexist(db_session):
+    """The unique index is partial (WHERE identity_key IS NOT NULL) -- rows
+    with no identity_key at all (legacy/manually-inserted rows) must not
+    collide with each other."""
+    db_session.add(KnowledgeGap(subject_type="reaction", missing_information="x"))
+    db_session.add(KnowledgeGap(subject_type="reaction", missing_information="y"))
+    db_session.flush()  # must not raise
+
+
+def test_knowledge_gap_structured_fields_accept_null(db_session):
+    """The six Increment 22 columns are all nullable -- a legacy row lacking
+    them entirely (as every pre-Increment-22 row necessarily does) remains
+    valid."""
+    kg = KnowledgeGap(
+        subject_type="reaction",
+        missing_information="x",
+        gap_type=None,
+        severity=None,
+        reason_codes_json=None,
+        supporting_claim_ids_json=None,
+        supporting_evidence_ids_json=None,
+        supporting_entity_ids_json=None,
+        identity_key=None,
+    )
+    db_session.add(kg)
+    db_session.flush()  # must not raise
+
+
+def test_knowledge_gap_json_fields_persist_lists_literally(db_session):
+    claim_id = str(uuid.uuid4())
+    evidence_id = str(uuid.uuid4())
+    kg = KnowledgeGap(
+        subject_type="claim",
+        missing_information="x",
+        gap_type="LOW_CONFIDENCE_CLAIM",
+        severity="MODERATE",
+        reason_codes_json=["CONFIDENCE_CLASS_LOW"],
+        supporting_claim_ids_json=[claim_id],
+        supporting_evidence_ids_json=[evidence_id],
+        supporting_entity_ids_json=[],
+    )
+    db_session.add(kg)
+    db_session.flush()
+
+    fetched = db_session.get(KnowledgeGap, kg.id)
+    assert fetched.gap_type == "LOW_CONFIDENCE_CLAIM"
+    assert fetched.severity == "MODERATE"
+    assert fetched.reason_codes_json == ["CONFIDENCE_CLASS_LOW"]
+    assert fetched.supporting_claim_ids_json == [claim_id]
+    assert fetched.supporting_evidence_ids_json == [evidence_id]
+    assert fetched.supporting_entity_ids_json == []
 
 
 def test_two_knowledge_gaps_describing_same_subject_coexist(db_session):

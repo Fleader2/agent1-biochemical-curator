@@ -312,22 +312,19 @@ green.
   because `reaction_type` has no controlled vocabulary and no functional-
   class column exists on `Protein`.
 
-## 20. Relationship to future `KnowledgeGap` persistence
+## 20. Relationship to `KnowledgeGap` persistence
 
-`KnowledgeGap` (verified against `app/models/knowledge_gap.py`) has
-`subject_type`/`subject_id` (polymorphic, no FK), `missing_information`
-(`TEXT NOT NULL`), `importance`/`status` (free `VARCHAR`, no enum),
-`model_impact`/`suggested_experiment` (free `TEXT`), `priority` (`INTEGER`,
-no range constraint), and `created_at`/`updated_at`. A future persistence
-increment would map `KnowledgeGapCandidate.explanation` onto
-`missing_information` and `entity_type`/`entity_id` onto `subject_type`/
-`subject_id` directly; `severity`/`gap_type`/`reason_codes`/
-`supporting_*_ids` have no destination columns today (`importance`/
-`status`/`priority` are all free-form, uncontrolled fields, so mapping a
-closed enum onto them is a policy decision for that future increment, not
-a mechanical one). `suggested_experiment`/`model_impact` are explicitly
-out of scope for anything this increment produces, since this increment
-never generates either.
+**Superseded by Increment 22.** `KnowledgeGap` has since been hardened
+(migration `0010_knowledge_gap_hardening`) with `gap_type`/`severity`/
+`reason_codes_json`/`supporting_claim_ids_json`/
+`supporting_evidence_ids_json`/`supporting_entity_ids_json`/`identity_key`,
+and a faithful, idempotent persistence API
+(`app.persistence.knowledge_gap.persist_knowledge_gap`) now exists. See
+`docs/18_knowledge_gap_persistence_contract.md` for the complete, current
+mapping, identity/deduplication policy, and status vocabulary — this
+section's original "no destination columns today" analysis is no longer
+current and is kept only as historical context for why the hardening was
+needed.
 
 ## 21. Final architectural rule
 
