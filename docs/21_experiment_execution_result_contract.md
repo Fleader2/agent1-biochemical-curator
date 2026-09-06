@@ -298,6 +298,11 @@ generation, no LLM reasoning, no normalization or entity resolution
 
 ## 25. Relationship to future result interpretation
 
+See `docs/22_experiment_result_interpretation_contract.md` (Increment 26)
+for that later, explicit increment -- it reads `ExperimentResult`/
+`ExperimentExecution` rows and produces deterministic `EvidenceCandidate`
+objects, never mutating anything in this contract.
+
 A later, explicit increment is expected to read `ExperimentResult` rows and
 decide what they mean scientifically -- whether a measurement supports or
 contradicts a `Claim`, whether a `KnowledgeGap` should be resolved, whether
