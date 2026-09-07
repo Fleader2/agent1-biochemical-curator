@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     """UniProtKB REST API base URL. No credential is required by UniProt's public
     API; no default is supplied here, matching ``kegg_base_url``/``sgd_base_url``."""
 
+    sabiork_base_url: str | None = None
+    """SABIO-RK Solr query API base URL (Agent 1.x Increment A). No credential
+    is required by SABIO-RK's public API; no default is supplied here, matching
+    ``kegg_base_url``/``sgd_base_url``/``uniprot_base_url`` -- unlike those,
+    ``app.connectors.sabiork.SabiorkConnector.from_settings`` falls back to a
+    live-verified default endpoint when this is unset (see that module)."""
+
+    oed_base_url: str | None = None
+    """Open Enzyme Database REST API base URL (Agent 1.x Increment A). No
+    credential is required by OED's public API; no default is supplied here,
+    matching ``kegg_base_url``/``sgd_base_url``/``uniprot_base_url``."""
+
     @property
     def sqlalchemy_url(self) -> str:
         """Database URL with an explicit driver.

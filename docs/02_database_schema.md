@@ -177,6 +177,11 @@ OTHER
 
 ## SourceType
 
+`SABIORK`/`OED` were added in Agent 1.x Increment A (kinetic-data curation
+and handoff extension; migration `0013_kinetic_measurement_sources`) --
+see `docs/24_kinetic_data_curation_and_handoff.md`. No existing value was
+renamed or removed.
+
 ```text
 PUBMED
 PMC
@@ -189,6 +194,8 @@ UNIPROT
 CHEBI
 RHEA
 NCBI
+SABIORK
+OED
 OTHER
 ```
 

@@ -425,3 +425,5 @@ Add the appropriate project license before public distribution.
 Agent 1 v1 establishes a robust, evidence-backed scientific curation framework that can safely support downstream mechanistic model construction — it does not itself build, validate, simulate, or critique those models (Agents 2-5).
 
 "Complete" describes v1's scope, not a stopping point for the project: Agent 1.x may still add connectors (MetaCyc, BioCyc), a fuller regulation curation pipeline, and richer cofactor semantics, none of which were required for v1. Future work will expand organism coverage, biological scope, and downstream integrations while preserving the project's core principles of provenance, reproducibility, and scientific rigor.
+
+**Agent 1.x Increment A** added SABIO-RK and Open Enzyme Database kinetic-data connectors and extended Agent 1's output contract with curated kinetic measurements (`AGENT1_CONTRACT_VERSION` "1.0" → "1.1"). See `docs/24_kinetic_data_curation_and_handoff.md` for the full contract; the v1 baseline above remains unchanged.

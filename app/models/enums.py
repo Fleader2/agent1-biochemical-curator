@@ -93,7 +93,20 @@ class RegulatoryEffect(StrEnum):
 
 
 class SourceType(StrEnum):
-    """External scientific source that a record or piece of evidence came from."""
+    """External scientific source that a record or piece of evidence came from.
+
+    ``SABIORK``/``OED`` added in Agent 1.x Increment A (kinetic-data
+    curation): ``SABIORK`` is SABIO-RK (https://sabiork.h-its.org), a
+    kinetic-law/parameter database; ``OED`` is Open Enzyme Database
+    (https://openenzymedb.platform.moleculemaker.org), which itself
+    aggregates data originating from BRENDA/SABIO-RK (see
+    ``docs/24_kinetic_data_curation_and_handoff.md`` §7 for the
+    source-lineage policy this enables). Adding a value to this native
+    PostgreSQL ``ENUM`` requires migration ``0013_kinetic_measurement_sources``
+    (``ALTER TYPE ... ADD VALUE``, which Postgres cannot reverse -- see that
+    migration's own docstring for its downgrade policy). No existing value
+    was renamed or removed.
+    """
 
     PUBMED = "PUBMED"
     PMC = "PMC"
@@ -106,6 +119,8 @@ class SourceType(StrEnum):
     CHEBI = "CHEBI"
     RHEA = "RHEA"
     NCBI = "NCBI"
+    SABIORK = "SABIORK"
+    OED = "OED"
     OTHER = "OTHER"
 
 

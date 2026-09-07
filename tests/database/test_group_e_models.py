@@ -432,8 +432,21 @@ def test_measurements_differing_only_by_experimental_context_remain_distinct(db_
 
 
 def test_no_natural_key_unique_constraint_exists(db_session):
-    """Direct inspection: no UNIQUE constraint or unique index exists on
-    kinetic_measurement other than the primary key."""
+    """Direct inspection: no UNIQUE constraint or unique index exists on any
+    combination of ``kinetic_measurement``'s scientific-content columns
+    (reaction/protein/compound/parameter_type/value/publication/evidence)
+    other than the primary key -- two measurements that appear identical
+    must still both be able to persist as independent rows.
+
+    ``uq_kinetic_measurement_source_source_id`` (Agent 1.x Increment A,
+    migration ``0013_kinetic_measurement_sources``) is the one exception,
+    and is deliberately narrow: a partial unique index on
+    ``(source, source_id)`` only, guarding *source-record* identity (the
+    same connector-ingested record must not be persisted twice), never
+    scientific-content identity. It does not constrain
+    ``parameter_type``/``parameter_value``/``reaction_id``/etc. at all, so
+    it does not weaken the guarantee this test protects.
+    """
     from sqlalchemy import inspect
 
     inspector = inspect(db_session.get_bind())
@@ -443,7 +456,8 @@ def test_no_natural_key_unique_constraint_exists(db_session):
     unique_indexes = [
         ix for ix in inspector.get_indexes("kinetic_measurement") if ix.get("unique")
     ]
-    assert unique_indexes == []
+    assert [ix["name"] for ix in unique_indexes] == ["uq_kinetic_measurement_source_source_id"]
+    assert unique_indexes[0]["column_names"] == ["source", "source_id"]
 
 
 # --- values and units ---------------------------------------------------

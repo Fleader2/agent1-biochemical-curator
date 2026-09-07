@@ -33,6 +33,7 @@ from app.agent1.types import (
     Agent1KnowledgePackage,
     ClaimConfidenceSummary,
     ClaimReviewState,
+    CuratedKineticMeasurement,
     ProvenanceSummary,
 )
 
@@ -42,6 +43,7 @@ __all__ = [
     "Agent1KnowledgePackage",
     "ClaimConfidenceSummary",
     "ClaimReviewState",
+    "CuratedKineticMeasurement",
     "ProvenanceSummary",
     "curated_claims",
     "get_agent1_curated_knowledge_view",

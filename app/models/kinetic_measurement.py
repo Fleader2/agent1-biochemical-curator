@@ -10,14 +10,25 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.naming import conv
 
 from app.db.base import Base
-from app.models.enums import ConfidenceClass
+from app.models.enums import ConfidenceClass, SourceType
 
 if TYPE_CHECKING:
     from app.models.claim import Evidence
@@ -33,6 +44,7 @@ if TYPE_CHECKING:
 # than recreating it): create_type=False means this ORM-level Enum instance
 # only describes the column type, it never issues CREATE TYPE itself.
 _CONFIDENCE_CLASS = Enum(ConfidenceClass, name="confidence_class", create_type=False)
+_SOURCE_TYPE = Enum(SourceType, name="source_type", create_type=False)
 
 
 class KineticMeasurement(Base):
@@ -51,6 +63,28 @@ class KineticMeasurement(Base):
     the original measurement. ``parameter_type`` is a plain, unconstrained
     ``VARCHAR`` — not an enum and not CHECK-restricted — so that future
     parameter types can be recorded without a schema migration.
+
+    **Added in Agent 1.x Increment A** (migration
+    ``0013_kinetic_measurement_sources``,
+    ``docs/24_kinetic_data_curation_and_handoff.md``): ``source``/
+    ``source_id`` identify which connector-ingested source *created* this
+    row (its primary retrieval source) -- the same ``source_type``/
+    ``source_id`` shape ``Evidence`` already uses, deliberately not routed
+    through ``SourceCrossReference`` (which has no concept of "primary"
+    among several cross-references, see
+    ``app.persistence.kinetic_measurement``'s own docstring). A partial
+    unique index on ``(source, source_id)`` (both non-null) makes
+    re-ingesting the identical source record idempotent at the database
+    layer. Additional, non-primary source lineage (e.g. an Open Enzyme
+    Database record whose original source is SABIO-RK) is instead recorded
+    as an ordinary ``SourceCrossReference`` row for
+    ``entity_type="kinetic_measurement"`` -- that table's own "0-to-many
+    external identifiers for one entity" shape already fits a measurement
+    being *also* known via another source. ``reported_rate_law``/
+    ``reported_parameter_type`` preserve a source's own free-text framing
+    (the exact rate-law equation text and the exact parameter label as the
+    source itself wrote it) independently of this table's own controlled
+    ``parameter_type`` value.
     """
 
     __tablename__ = "kinetic_measurement"
@@ -62,6 +96,13 @@ class KineticMeasurement(Base):
         CheckConstraint(
             "confidence_score IS NULL OR confidence_score BETWEEN 0 AND 100",
             name=conv("ck_kinetic_measurement_confidence_score_range"),
+        ),
+        Index(
+            "uq_kinetic_measurement_source_source_id",
+            "source",
+            "source_id",
+            unique=True,
+            postgresql_where=text("source IS NOT NULL AND source_id IS NOT NULL"),
         ),
     )
 
@@ -129,6 +170,12 @@ class KineticMeasurement(Base):
     confidence_class: Mapped[ConfidenceClass | None] = mapped_column(_CONFIDENCE_CLASS)
 
     model_applicability_score: Mapped[Decimal | None] = mapped_column(Numeric)
+
+    source: Mapped[SourceType | None] = mapped_column(_SOURCE_TYPE)
+    source_id: Mapped[str | None] = mapped_column(String)
+
+    reported_rate_law: Mapped[str | None] = mapped_column(Text)
+    reported_parameter_type: Mapped[str | None] = mapped_column(String)
 
     notes: Mapped[str | None] = mapped_column(Text)
 

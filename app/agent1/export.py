@@ -14,6 +14,15 @@ This module never queries the database itself -- it is a pure, read-only
 reshaping of an already-assembled ``Agent1KnowledgePackage``
 (``app.agent1.service.get_agent1_knowledge_package``), so it never
 duplicates that function's own query logic.
+
+**Kinetic measurements** (Agent 1.x Increment A). Every
+``package.kinetic_measurements`` row is reshaped into a
+``CuratedKineticMeasurement`` and passed through unfiltered -- see
+``app.agent1.types``'s module docstring for why no ``HUMAN_ACCEPTED``-style
+gate applies (no ``Claim``/``CurationState`` exists on this table). This
+reshaping is purely mechanical (one field copied to another of the same
+name) and asserts no kinetic-law selection, parameter mapping, or model
+usage decision -- those remain Agent 2's responsibility.
 """
 
 from __future__ import annotations
@@ -23,7 +32,9 @@ from app.agent1.types import (
     AGENT1_CONTRACT_VERSION,
     Agent1CuratedKnowledgeView,
     Agent1KnowledgePackage,
+    CuratedKineticMeasurement,
 )
+from app.models.kinetic_measurement import KineticMeasurement
 
 
 def get_agent1_curated_knowledge_view(
@@ -49,6 +60,9 @@ def get_agent1_curated_knowledge_view(
     accepted_confidence = tuple(
         summary for summary in package.confidence_summaries if summary.claim_id in accepted_ids
     )
+    kinetic_measurements = tuple(
+        _curated_kinetic_measurement(row) for row in package.kinetic_measurements
+    )
 
     return Agent1CuratedKnowledgeView(
         contract_version=AGENT1_CONTRACT_VERSION,
@@ -59,9 +73,38 @@ def get_agent1_curated_knowledge_view(
         reaction_participants=package.reaction_participants,
         reaction_enzyme_associations=package.reaction_enzyme_associations,
         regulatory_interactions=package.regulatory_interactions,
+        kinetic_measurements=kinetic_measurements,
         claims=accepted,
         evidence=accepted_evidence,
         confidence_summaries=accepted_confidence,
+    )
+
+
+def _curated_kinetic_measurement(row: KineticMeasurement) -> CuratedKineticMeasurement:
+    """Pure field-for-field reshaping of one ``KineticMeasurement`` row. No I/O, no inference."""
+    return CuratedKineticMeasurement(
+        kinetic_measurement_id=row.id,
+        reaction_id=row.reaction_id,
+        protein_id=row.protein_id,
+        complex_id=row.complex_id,
+        substrate_id=row.substrate_id,
+        organism_id=row.organism_id,
+        publication_id=row.publication_id,
+        parameter_type=row.parameter_type,
+        reported_parameter_type=row.reported_parameter_type,
+        value=row.parameter_value,
+        unit=row.unit,
+        normalized_value=row.normalized_value,
+        normalized_unit=row.normalized_unit,
+        strain=row.strain,
+        temperature_c=row.temperature_c,
+        ph=row.ph,
+        reported_rate_law=row.reported_rate_law,
+        source=row.source,
+        source_id=row.source_id,
+        confidence_score=row.confidence_score,
+        confidence_class=row.confidence_class,
+        notes=row.notes,
     )
 
 

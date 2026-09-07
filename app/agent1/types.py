@@ -30,6 +30,22 @@ owns each of those computations.
 ``AGENT1_CONTRACT_VERSION`` marks this contract's own version -- a single
 string constant, not a semantic-versioning subsystem (Increment 27
 instructions, Step 30).
+
+**Agent 1.x Increment A** added ``kinetic_measurements`` to both
+container types (raw ``KineticMeasurement`` rows on
+``Agent1KnowledgePackage``, the curated, faithfully-reshaped
+``CuratedKineticMeasurement`` on ``Agent1CuratedKnowledgeView``) and bumped
+``AGENT1_CONTRACT_VERSION`` to ``"1.1"`` -- an additive field, not a
+breaking reshape of any existing field, so a minor bump (see
+``docs/24_kinetic_data_curation_and_handoff.md``). Kinetic measurements
+carry no ``Claim``/``CurationState`` of their own (verified directly
+against ``app/models/kinetic_measurement.py``: no ``curation_state``
+column exists on that table), so ``Agent1CuratedKnowledgeView`` includes
+every ingested ``KineticMeasurement`` unfiltered, exactly the same
+"exists = curated" policy already applied to
+``reactions``/``compounds``/``compartments`` above -- never gated on
+``HUMAN_ACCEPTED`` the way ``claims``/``evidence`` are, since that gate
+does not exist for this table.
 """
 
 from __future__ import annotations
@@ -41,10 +57,11 @@ from uuid import UUID
 from app.models.claim import Claim, Evidence
 from app.models.compartment import Compartment
 from app.models.compound import Compound
-from app.models.enums import ClaimStatus, ConfidenceClass, CurationState
+from app.models.enums import ClaimStatus, ConfidenceClass, CurationState, SourceType
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
 from app.models.gene import Gene
+from app.models.kinetic_measurement import KineticMeasurement
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.organism import Organism
 from app.models.protein import Protein
@@ -55,7 +72,7 @@ from app.models.review_event import ReviewEvent
 
 #: This contract's own version. Bump only when ``Agent1KnowledgePackage``/
 #: ``Agent1CuratedKnowledgeView``'s field shape changes.
-AGENT1_CONTRACT_VERSION = "1.0"
+AGENT1_CONTRACT_VERSION = "1.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +123,60 @@ class ProvenanceSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class CuratedKineticMeasurement:
+    """Agent 2-facing view of one curated kinetic measurement (Agent 1.x Increment A).
+
+    A faithful reshaping of one ``KineticMeasurement`` row -- never a
+    reinterpretation, and never a decision about model usage. Agent 1's own
+    architectural boundary for this increment: Agent 1 curates *reported*
+    kinetic facts; Agent 2 decides model usage, kinetic-law mapping, and
+    parameter declaration; Agent 4 performs parameter fitting/calibration.
+    This type therefore carries no ``ParameterSpecification``-shaped field,
+    no kinetic-law assignment, and no boundary/module decision of any kind.
+
+    Every entity reference (``reaction_id``, ``protein_id``, ...) is exactly
+    what ``KineticMeasurement`` itself stores -- ``None`` when Agent 1 could
+    not resolve that reference, never guessed or defaulted here.
+
+    ``value``/``unit`` are ``KineticMeasurement.parameter_value``/``.unit``
+    (the as-reported figures; see ``app.persistence.kinetic_measurement``'s
+    module docstring for why ``original_value``/``original_unit`` currently
+    always equal them). ``normalized_value``/``normalized_unit`` are always
+    ``None`` in this increment -- no unit-conversion framework exists yet
+    (``docs/24_kinetic_data_curation_and_handoff.md`` §11).
+    """
+
+    kinetic_measurement_id: UUID
+
+    reaction_id: UUID | None
+    protein_id: UUID | None
+    complex_id: UUID | None
+    substrate_id: UUID | None
+    organism_id: UUID | None
+    publication_id: UUID | None
+
+    parameter_type: str
+    reported_parameter_type: str | None
+    value: Decimal
+    unit: str
+    normalized_value: Decimal | None
+    normalized_unit: str | None
+
+    strain: str | None
+    temperature_c: Decimal | None
+    ph: Decimal | None
+    reported_rate_law: str | None
+
+    source: SourceType | None
+    source_id: str | None
+
+    confidence_score: Decimal | None
+    confidence_class: ConfidenceClass | None
+
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class Agent1KnowledgePackage:
     """The complete, coherent Agent 1 v1 knowledge product for one scope.
 
@@ -128,6 +199,7 @@ class Agent1KnowledgePackage:
     reaction_enzyme_associations: tuple[ReactionEnzyme, ...]
     regulatory_interactions: tuple[RegulatoryInteraction, ...]
     publications: tuple[Publication, ...]
+    kinetic_measurements: tuple[KineticMeasurement, ...]
 
     claims: tuple[Claim, ...]
     evidence: tuple[Evidence, ...]
@@ -163,6 +235,7 @@ class Agent1CuratedKnowledgeView:
     reaction_participants: tuple[ReactionParticipant, ...]
     reaction_enzyme_associations: tuple[ReactionEnzyme, ...]
     regulatory_interactions: tuple[RegulatoryInteraction, ...]
+    kinetic_measurements: tuple[CuratedKineticMeasurement, ...]
 
     claims: tuple[Claim, ...]
     evidence: tuple[Evidence, ...]
@@ -175,5 +248,6 @@ __all__ = [
     "Agent1KnowledgePackage",
     "ClaimConfidenceSummary",
     "ClaimReviewState",
+    "CuratedKineticMeasurement",
     "ProvenanceSummary",
 ]

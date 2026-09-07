@@ -21,6 +21,14 @@ forever: Agent 1.x may still add connectors, regulation curation, or
 richer cofactor semantics (§21, §27) without those enhancements being
 prerequisites for v1 completion.
 
+**Forward pointer (Agent 1.x Increment A).** SABIO-RK and Open Enzyme
+Database connectors, kinetic-measurement normalization/persistence, and a
+`kinetic_measurements` extension to both `Agent1KnowledgePackage` and
+`Agent1CuratedKnowledgeView` (`AGENT1_CONTRACT_VERSION` "1.0" -> "1.1")
+were added after this document was frozen. See
+`docs/24_kinetic_data_curation_and_handoff.md` for the full contract; this
+document's own v1 baseline below is not rewritten.
+
 ## 2. Original multi-agent architecture
 
 ```text

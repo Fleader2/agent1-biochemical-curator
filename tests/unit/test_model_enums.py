@@ -79,6 +79,9 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
             "OTHER",
         }
     ),
+    # SABIORK/OED added in Agent 1.x Increment A (migration
+    # 0013_kinetic_measurement_sources) -- see docs/02_database_schema.md's
+    # "SourceType" section and docs/24_kinetic_data_curation_and_handoff.md.
     SourceType: frozenset(
         {
             "PUBMED",
@@ -92,6 +95,8 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
             "CHEBI",
             "RHEA",
             "NCBI",
+            "SABIORK",
+            "OED",
             "OTHER",
         }
     ),

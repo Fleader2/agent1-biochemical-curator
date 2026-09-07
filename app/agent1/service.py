@@ -39,6 +39,16 @@ in this repository writes them today (verified by inspection: no
 ``app/normalization/*``/``app/persistence/*`` module references
 ``RegulatoryInteraction`` at all) -- this function exposes whatever exists,
 it does not claim the regulation pipeline is complete.
+
+**Kinetic measurements** (Agent 1.x Increment A). ``KineticMeasurement``
+rows are scoped by ``organism_id`` when the row's own ``organism_id``
+column is set, and otherwise (a common case: many measurements resolve a
+``reaction_id``/``protein_id`` but not yet an ``organism_id``) by whether
+the row's ``reaction_id`` names one of the already-scoped reactions --
+mirroring how ``Compound`` is scoped by traversal above. A row with
+neither ``organism_id`` nor a scoped ``reaction_id`` is only included when
+``organism_id=None`` (whole-database export) -- never guessed into a
+scope it was not resolved into.
 """
 
 from __future__ import annotations
@@ -62,6 +72,7 @@ from app.models.enums import CurationState
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
 from app.models.gene import Gene
+from app.models.kinetic_measurement import KineticMeasurement
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.organism import Organism
 from app.models.protein import Protein
@@ -94,6 +105,14 @@ _KNOWN_LIMITATIONS: tuple[str, ...] = (
     "app.persistence.claim exposes no read/list API of its own -- this "
     "package reads Claim/Evidence directly via SELECT rather than "
     "duplicating a nonexistent read function.",
+    "Kinetic measurements (Agent 1.x Increment A, SABIO-RK/Open Enzyme "
+    "Database connectors): no unit-conversion framework exists yet, so "
+    "normalized_value/normalized_unit are always None -- every consumer "
+    "must read the as-reported value/unit and handle unit differences "
+    "itself. A BRENDA-reported range maximum has no dedicated column and "
+    "is preserved as plain text in notes rather than a structured field. "
+    "Open Enzyme Database's live API exposes no source-lineage field, so "
+    "cross-source derivative detection cannot fire for its records today.",
 )
 
 
@@ -124,6 +143,8 @@ def get_agent1_knowledge_package(
     compounds = _select_compounds(session, compound_ids, organism_id)
 
     regulatory_interactions = _select_by_organism(session, RegulatoryInteraction, organism_id)
+
+    kinetic_measurements = _select_kinetic_measurements(session, reaction_ids, organism_id)
 
     claims = _select_by_organism(session, Claim, organism_id)
     claim_ids = tuple(claim.id for claim in claims)
@@ -190,6 +211,7 @@ def get_agent1_knowledge_package(
         reaction_enzyme_associations=reaction_enzyme_associations,
         regulatory_interactions=regulatory_interactions,
         publications=publications,
+        kinetic_measurements=kinetic_measurements,
         claims=claims,
         evidence=evidence,
         confidence_summaries=confidence_summaries,
@@ -296,6 +318,21 @@ def _select_in(session: Session, model, column, ids: tuple) -> tuple:
         return ()
     statement = select(model).where(column.in_(ids))
     return tuple(session.execute(statement).scalars().all())
+
+
+def _select_kinetic_measurements(
+    session: Session, reaction_ids: tuple[UUID, ...], organism_id: UUID | None
+) -> tuple[KineticMeasurement, ...]:
+    if organism_id is None:
+        return tuple(session.execute(select(KineticMeasurement)).scalars().all())
+    all_measurements = session.execute(select(KineticMeasurement)).scalars().all()
+    scoped = [
+        row
+        for row in all_measurements
+        if row.organism_id == organism_id
+        or (row.organism_id is None and row.reaction_id in reaction_ids)
+    ]
+    return tuple(scoped)
 
 
 def _select_knowledge_gaps(

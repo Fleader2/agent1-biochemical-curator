@@ -33,6 +33,7 @@ from app.models.enums import (
     RegulatoryEffect,
     SourceType,
 )
+from app.models.kinetic_measurement import KineticMeasurement
 from app.models.publication import Publication
 from app.models.reaction import ReactionParticipant
 from app.models.regulatory_interaction import RegulatoryInteraction
@@ -106,6 +107,18 @@ def _rich_fixture(session):
     session.add(evidence)
     session.flush()
 
+    kinetic_measurement = KineticMeasurement(
+        reaction_id=reaction.id,
+        organism_id=organism.id,
+        parameter_type="KM",
+        parameter_value=Decimal("0.5"),
+        unit="mM",
+        source=SourceType.BRENDA,
+        source_id=f"brenda:{uuid4()}",
+    )
+    session.add(kinetic_measurement)
+    session.flush()
+
     return {
         "organism": organism,
         "gene": gene,
@@ -119,6 +132,7 @@ def _rich_fixture(session):
         "publication": publication,
         "claim": claim,
         "evidence": evidence,
+        "kinetic_measurement": kinetic_measurement,
     }
 
 
@@ -156,6 +170,12 @@ def test_package_exposes_regulatory_interaction(db_session):
     assert fixture["regulatory_interaction"].id in {
         r.id for r in package.regulatory_interactions
     }
+
+
+def test_package_exposes_kinetic_measurement(db_session):
+    fixture = _rich_fixture(db_session)
+    package = get_agent1_knowledge_package(db_session, organism_id=fixture["organism"].id)
+    assert fixture["kinetic_measurement"].id in {k.id for k in package.kinetic_measurements}
 
 
 def test_package_exposes_publication(db_session):
@@ -233,6 +253,26 @@ def test_curated_knowledge_view_is_narrower_than_package(db_session):
     assert view.claims == ()
     # Structural/schema records still pass through.
     assert [r.id for r in view.reactions] == [fixture["reaction"].id]
+
+
+def test_curated_knowledge_view_exposes_kinetic_measurement_unfiltered(db_session):
+    """No Claim/CurationState gate exists for KineticMeasurement -- it always passes through."""
+    fixture = _rich_fixture(db_session)
+    package = get_agent1_knowledge_package(db_session, organism_id=fixture["organism"].id)
+    view = get_agent1_curated_knowledge_view(package)
+
+    curated = next(
+        k for k in view.kinetic_measurements
+        if k.kinetic_measurement_id == fixture["kinetic_measurement"].id
+    )
+    assert curated.parameter_type == "KM"
+    assert curated.value == Decimal("0.5")
+    assert curated.unit == "mM"
+    assert curated.source == SourceType.BRENDA
+    assert curated.reaction_id == fixture["reaction"].id
+    # No unit-conversion framework exists yet -- always None this increment.
+    assert curated.normalized_value is None
+    assert curated.normalized_unit is None
 
 
 def test_curated_knowledge_view_includes_accepted_claim(db_session):
