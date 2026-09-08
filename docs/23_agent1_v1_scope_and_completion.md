@@ -29,6 +29,13 @@ were added after this document was frozen. See
 `docs/24_kinetic_data_curation_and_handoff.md` for the full contract; this
 document's own v1 baseline below is not rewritten.
 
+**Forward pointer (Agent 1.x Increment B).** Structured enzyme regulatory
+states -- `EnzymeState`/`EnzymeModification`/`AllostericInteraction`/
+`EnzymeStateTransition`, plus `enzyme_state_id` on `ReactionEnzyme`/
+`KineticMeasurement` -- were added after this document was frozen
+(`AGENT1_CONTRACT_VERSION` "1.1" -> "1.2"). See
+`docs/25_enzyme_regulatory_states_contract.md` for the full contract.
+
 ## 2. Original multi-agent architecture
 
 ```text

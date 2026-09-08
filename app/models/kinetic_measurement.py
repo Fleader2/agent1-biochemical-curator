@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from app.models.claim import Evidence
     from app.models.compound import Compound
     from app.models.enzyme_complex import EnzymeComplex
+    from app.models.enzyme_state import EnzymeState
     from app.models.organism import Organism
     from app.models.protein import Protein
     from app.models.publication import Publication
@@ -85,6 +86,19 @@ class KineticMeasurement(Base):
     (the exact rate-law equation text and the exact parameter label as the
     source itself wrote it) independently of this table's own controlled
     ``parameter_type`` value.
+
+    **Added in Agent 1.x Increment B** (migration
+    ``0014_enzyme_regulatory_states``,
+    ``docs/25_enzyme_regulatory_states_contract.md``): ``enzyme_state_id``
+    optionally attributes a measurement to one specific, defined
+    ``EnzymeState`` rather than only to the ``protein_id``/``complex_id``
+    generally -- e.g. a ``kcat`` reported specifically for the
+    phosphorylated form of a protein. Never required: a measurement not
+    tied to any particular state leaves this ``NULL``, exactly as before.
+    A state-specific measurement applies *only* to that state -- it is
+    never treated as applicable to the parent protein/complex generally,
+    or to any other state of it (see
+    ``docs/25_enzyme_regulatory_states_contract.md`` §15).
     """
 
     __tablename__ = "kinetic_measurement"
@@ -117,6 +131,9 @@ class KineticMeasurement(Base):
     )
     complex_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("enzyme_complex.id", ondelete="RESTRICT")
+    )
+    enzyme_state_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("enzyme_state.id", ondelete="RESTRICT"), index=True
     )
 
     parameter_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
@@ -196,3 +213,4 @@ class KineticMeasurement(Base):
     organism: Mapped[Organism | None] = relationship(back_populates="kinetic_measurements")
     publication: Mapped[Publication | None] = relationship(back_populates="kinetic_measurements")
     evidence: Mapped[Evidence | None] = relationship(back_populates="kinetic_measurements")
+    enzyme_state: Mapped[EnzymeState | None] = relationship(back_populates="kinetic_measurements")

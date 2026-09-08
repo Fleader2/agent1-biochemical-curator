@@ -36,6 +36,8 @@ PROTEIN_A = UUID("aaaaaaaa-0000-0000-0000-000000000001")
 PROTEIN_B = UUID("aaaaaaaa-0000-0000-0000-000000000002")
 COMPLEX_A = UUID("cccccccc-0000-0000-0000-000000000001")
 COMPLEX_B = UUID("cccccccc-0000-0000-0000-000000000002")
+ENZYME_STATE_A = UUID("eeeeeeee-0000-0000-0000-000000000001")
+ENZYME_STATE_B = UUID("eeeeeeee-0000-0000-0000-000000000002")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,12 +64,22 @@ class FakeReactionEnzymeLookup:
             if a.reaction_id == reaction_id and a.complex_id == complex_id
         ]
 
+    def by_reaction_and_enzyme_state(
+        self, reaction_id: UUID, enzyme_state_id: UUID
+    ) -> Sequence[ReactionEnzymeCandidate]:
+        return [
+            a
+            for a in self.associations
+            if a.reaction_id == reaction_id and a.enzyme_state_id == enzyme_state_id
+        ]
+
 
 def _candidate(
     *,
     reaction_id: UUID = REACTION_A,
     protein_id: UUID | None = None,
     complex_id: UUID | None = None,
+    enzyme_state_id: UUID | None = None,
     relationship: str | None = "CATALYZES",
     association_id: UUID | None = None,
 ) -> ReactionEnzymeCandidate:
@@ -76,6 +88,7 @@ def _candidate(
         reaction_id=reaction_id,
         protein_id=protein_id,
         complex_id=complex_id,
+        enzyme_state_id=enzyme_state_id,
         relationship=relationship,
     )
 
@@ -84,14 +97,18 @@ def _candidate(
 
 
 def test_identity_rejects_neither_protein_nor_complex() -> None:
-    with pytest.raises(ValueError, match="exactly one of protein_id or complex_id"):
+    with pytest.raises(
+        ValueError, match="exactly one of protein_id, complex_id, or enzyme_state_id"
+    ):
         ReactionEnzymeIdentity(
             source=SourceType.OTHER, source_identifier="req-1", reaction_id=REACTION_A
         )
 
 
 def test_identity_rejects_both_protein_and_complex() -> None:
-    with pytest.raises(ValueError, match="exactly one of protein_id or complex_id"):
+    with pytest.raises(
+        ValueError, match="exactly one of protein_id, complex_id, or enzyme_state_id"
+    ):
         ReactionEnzymeIdentity(
             source=SourceType.OTHER,
             source_identifier="req-2",
@@ -149,13 +166,17 @@ def test_identity_has_no_evidence_shaped_fields() -> None:
 # --- Lookup API shape ------------------------------------------------------------------
 
 
-def test_lookup_has_exactly_the_two_intended_methods() -> None:
+def test_lookup_has_exactly_the_three_intended_methods() -> None:
     method_names = {
         name
         for name, _ in inspect.getmembers(ReactionEnzymeLookup, inspect.isfunction)
         if not name.startswith("_")
     }
-    assert method_names == {"by_reaction_and_protein", "by_reaction_and_complex"}
+    assert method_names == {
+        "by_reaction_and_protein",
+        "by_reaction_and_complex",
+        "by_reaction_and_enzyme_state",
+    }
 
 
 def test_lookup_has_no_ec_number_method() -> None:
@@ -206,6 +227,60 @@ def test_exact_reaction_protein_pair_matched() -> None:
     assert result.match_method is MatchMethod.EXACT_IDENTIFIER
     assert result.matched_entity_id == association_id
     assert result.organism_id is None
+
+
+def test_exact_reaction_enzyme_state_pair_matched() -> None:
+    """Agent 1.x Increment B: enzyme-state-targeted associations resolve like protein/complex."""
+    association_id = uuid4()
+    lookup = FakeReactionEnzymeLookup(
+        associations=(
+            _candidate(
+                reaction_id=REACTION_A,
+                enzyme_state_id=ENZYME_STATE_A,
+                association_id=association_id,
+            ),
+        )
+    )
+    identity = ReactionEnzymeIdentity(
+        source=SourceType.OTHER,
+        source_identifier="req-state-1",
+        reaction_id=REACTION_A,
+        enzyme_state_id=ENZYME_STATE_A,
+    )
+
+    result = normalize_reaction_enzyme(identity, lookup=lookup)
+
+    assert result.status is NormalizationStatus.MATCHED
+    assert result.match_method is MatchMethod.EXACT_IDENTIFIER
+    assert result.matched_entity_id == association_id
+
+
+def test_reaction_enzyme_state_pair_no_match_is_new() -> None:
+    identity = ReactionEnzymeIdentity(
+        source=SourceType.OTHER,
+        source_identifier="req-state-2",
+        reaction_id=REACTION_A,
+        enzyme_state_id=ENZYME_STATE_A,
+        relationship="CATALYZES",
+    )
+    result = normalize_reaction_enzyme(identity, lookup=FakeReactionEnzymeLookup())
+    assert result.status is NormalizationStatus.NEW
+
+
+def test_reaction_enzyme_state_and_protein_are_disjoint_identity_spaces() -> None:
+    """A protein-targeted association must never match an enzyme-state-targeted lookup."""
+    lookup = FakeReactionEnzymeLookup(
+        associations=(_candidate(reaction_id=REACTION_A, protein_id=PROTEIN_A),)
+    )
+    identity = ReactionEnzymeIdentity(
+        source=SourceType.OTHER,
+        source_identifier="req-state-3",
+        reaction_id=REACTION_A,
+        enzyme_state_id=ENZYME_STATE_A,
+        relationship="CATALYZES",
+    )
+    result = normalize_reaction_enzyme(identity, lookup=lookup)
+    assert result.status is NormalizationStatus.NEW
 
 
 def test_exact_reaction_complex_pair_matched() -> None:
@@ -396,7 +471,11 @@ def test_differing_relationship_value_does_not_prevent_matched() -> None:
 
 def test_relationship_is_never_queried_or_compared_for_lookup() -> None:
     """The lookup Protocol methods take no relationship parameter at all."""
-    for name in ("by_reaction_and_protein", "by_reaction_and_complex"):
+    for name in (
+        "by_reaction_and_protein",
+        "by_reaction_and_complex",
+        "by_reaction_and_enzyme_state",
+    ):
         params = list(inspect.signature(getattr(ReactionEnzymeLookup, name)).parameters)
         assert "relationship" not in params
         assert "catalytic_role" not in params

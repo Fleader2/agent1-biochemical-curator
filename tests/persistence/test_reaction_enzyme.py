@@ -16,6 +16,7 @@ from app.persistence.errors import EntityTypeMismatchError
 from app.persistence.reaction_enzyme import persist_reaction_enzyme
 from app.persistence.types import PersistenceAction
 from tests.persistence.conftest import (
+    make_enzyme_state,
     make_organism,
     make_protein,
     make_reaction,
@@ -24,7 +25,7 @@ from tests.persistence.conftest import (
 
 
 def _identity(
-    *, reaction_id, protein_id=None, complex_id=None, **overrides
+    *, reaction_id, protein_id=None, complex_id=None, enzyme_state_id=None, **overrides
 ) -> ReactionEnzymeIdentity:
     merged = {
         "source": SourceType.OTHER,
@@ -32,6 +33,7 @@ def _identity(
         "reaction_id": reaction_id,
         "protein_id": protein_id,
         "complex_id": complex_id,
+        "enzyme_state_id": enzyme_state_id,
         "relationship": "CATALYZES",
     } | overrides
     return ReactionEnzymeIdentity(**merged)
@@ -102,6 +104,41 @@ def test_new_creates_a_protein_association(db_session):
     assert row.complex_id is None
     assert row.relationship == "CATALYZES"
     assert outcome.source_cross_reference_id is None
+
+
+def test_new_creates_an_enzyme_state_association(db_session):
+    """Agent 1.x Increment B: a reaction may be catalyzed by one specific regulatory state."""
+    organism = make_organism(db_session)
+    reaction = make_reaction(db_session, organism_id=organism.id)
+    protein = make_protein(db_session, organism_id=organism.id)
+    state = make_enzyme_state(db_session, protein_id=protein.id)
+
+    result = _result(NormalizationStatus.NEW, match_method=MatchMethod.NONE)
+    outcome = persist_reaction_enzyme(
+        _identity(reaction_id=reaction.id, enzyme_state_id=state.id), result, session=db_session
+    )
+    assert outcome.action is PersistenceAction.CREATED
+    row = db_session.get(ReactionEnzyme, outcome.entity_id)
+    assert row.enzyme_state_id == state.id
+    assert row.protein_id is None
+    assert row.complex_id is None
+
+
+def test_existing_protein_and_complex_associations_remain_valid_alongside_state_target(
+    db_session,
+):
+    """Backward compatibility: pre-existing protein/complex-targeted rows are unaffected."""
+    organism = make_organism(db_session)
+    reaction = make_reaction(db_session, organism_id=organism.id)
+    protein = make_protein(db_session, organism_id=organism.id)
+    state = make_enzyme_state(db_session, protein_id=protein.id)
+
+    protein_row = make_reaction_enzyme(db_session, reaction_id=reaction.id, protein_id=protein.id)
+    state_row = make_reaction_enzyme(
+        db_session, reaction_id=reaction.id, enzyme_state_id=state.id
+    )
+    assert protein_row.protein_id == protein.id
+    assert state_row.enzyme_state_id == state.id
 
 
 def test_new_without_relationship_fails_conservatively(db_session):

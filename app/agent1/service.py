@@ -49,6 +49,20 @@ mirroring how ``Compound`` is scoped by traversal above. A row with
 neither ``organism_id`` nor a scoped ``reaction_id`` is only included when
 ``organism_id=None`` (whole-database export) -- never guessed into a
 scope it was not resolved into.
+
+**Enzyme regulatory states** (Agent 1.x Increment B).
+``EnzymeState``/``EnzymeModification``/``AllostericInteraction``/
+``EnzymeStateTransition`` have no ``organism_id`` column of their own.
+``EnzymeState`` is scoped by whether its ``protein_id`` names one of the
+already-scoped proteins, or (for a complex-targeted state, which this
+package does not otherwise expose -- ``EnzymeComplex`` itself has no
+top-level field here, a pre-existing gap this increment does not close)
+by directly querying ``EnzymeComplex.organism_id`` for the scoped
+organism. ``EnzymeModification``/``AllostericInteraction`` are scoped by
+whether their ``enzyme_state_id`` names one of the already-scoped states;
+``EnzymeStateTransition`` by whether its ``from_state_id``/``to_state_id``
+names one. A row with no way to resolve into the requested scope is only
+included when ``organism_id=None``.
 """
 
 from __future__ import annotations
@@ -69,6 +83,13 @@ from app.models.claim import Claim, Evidence
 from app.models.compartment import Compartment
 from app.models.compound import Compound
 from app.models.enums import CurationState
+from app.models.enzyme_complex import EnzymeComplex
+from app.models.enzyme_state import (
+    AllostericInteraction,
+    EnzymeModification,
+    EnzymeState,
+    EnzymeStateTransition,
+)
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
 from app.models.gene import Gene
@@ -113,6 +134,12 @@ _KNOWN_LIMITATIONS: tuple[str, ...] = (
     "is preserved as plain text in notes rather than a structured field. "
     "Open Enzyme Database's live API exposes no source-lineage field, so "
     "cross-source derivative detection cannot fire for its records today.",
+    "Enzyme regulatory states (Agent 1.x Increment B): EnzymeComplex rows "
+    "are not exposed as a top-level Agent1KnowledgePackage field (a "
+    "pre-existing gap, not introduced by this increment) -- a "
+    "complex-targeted EnzymeState is still scoped correctly by directly "
+    "querying EnzymeComplex.organism_id, but a consumer cannot otherwise "
+    "read complex details from this package.",
 )
 
 
@@ -145,6 +172,19 @@ def get_agent1_knowledge_package(
     regulatory_interactions = _select_by_organism(session, RegulatoryInteraction, organism_id)
 
     kinetic_measurements = _select_kinetic_measurements(session, reaction_ids, organism_id)
+
+    protein_ids = tuple(protein.id for protein in proteins)
+    enzyme_states = _select_enzyme_states(session, protein_ids, organism_id)
+    enzyme_state_ids = tuple(state.id for state in enzyme_states)
+    enzyme_modifications = _select_in(
+        session, EnzymeModification, EnzymeModification.enzyme_state_id, enzyme_state_ids
+    )
+    allosteric_interactions = _select_in(
+        session, AllostericInteraction, AllostericInteraction.enzyme_state_id, enzyme_state_ids
+    )
+    enzyme_state_transitions = _select_enzyme_state_transitions(
+        session, enzyme_state_ids, organism_id
+    )
 
     claims = _select_by_organism(session, Claim, organism_id)
     claim_ids = tuple(claim.id for claim in claims)
@@ -212,6 +252,10 @@ def get_agent1_knowledge_package(
         regulatory_interactions=regulatory_interactions,
         publications=publications,
         kinetic_measurements=kinetic_measurements,
+        enzyme_states=enzyme_states,
+        enzyme_modifications=enzyme_modifications,
+        allosteric_interactions=allosteric_interactions,
+        enzyme_state_transitions=enzyme_state_transitions,
         claims=claims,
         evidence=evidence,
         confidence_summaries=confidence_summaries,
@@ -331,6 +375,42 @@ def _select_kinetic_measurements(
         for row in all_measurements
         if row.organism_id == organism_id
         or (row.organism_id is None and row.reaction_id in reaction_ids)
+    ]
+    return tuple(scoped)
+
+
+def _select_enzyme_states(
+    session: Session, protein_ids: tuple[UUID, ...], organism_id: UUID | None
+) -> tuple[EnzymeState, ...]:
+    if organism_id is None:
+        return tuple(session.execute(select(EnzymeState)).scalars().all())
+    complex_ids_for_organism = set(
+        session.execute(
+            select(EnzymeComplex.id).where(EnzymeComplex.organism_id == organism_id)
+        )
+        .scalars()
+        .all()
+    )
+    all_states = session.execute(select(EnzymeState)).scalars().all()
+    scoped = [
+        state
+        for state in all_states
+        if state.protein_id in protein_ids or state.complex_id in complex_ids_for_organism
+    ]
+    return tuple(scoped)
+
+
+def _select_enzyme_state_transitions(
+    session: Session, enzyme_state_ids: tuple[UUID, ...], organism_id: UUID | None
+) -> tuple[EnzymeStateTransition, ...]:
+    if organism_id is None:
+        return tuple(session.execute(select(EnzymeStateTransition)).scalars().all())
+    all_transitions = session.execute(select(EnzymeStateTransition)).scalars().all()
+    scoped = [
+        transition
+        for transition in all_transitions
+        if transition.from_state_id in enzyme_state_ids
+        or transition.to_state_id in enzyme_state_ids
     ]
     return tuple(scoped)
 

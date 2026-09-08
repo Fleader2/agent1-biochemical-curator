@@ -30,19 +30,22 @@ non-identity column -- ``app.normalization.reaction_enzyme``'s own
 ``_has_creation_complete_metadata`` rule).
 
 **Freshness recheck** (``NEW`` only): re-query the exact
-``(reaction_id, protein_id)`` or ``(reaction_id, complex_id)`` pair
-``normalize_reaction_enzyme`` itself used. As of Increment 11
-(``migrations/versions/0009_persistence_hardening.py``), this pair is
-additionally protected by two real partial unique indexes
-(``uq_reaction_enzyme_reaction_id_protein_id``/
-``uq_reaction_enzyme_reaction_id_complex_id``) -- the recheck remains as a
-fast, friendly first line of defense, but the database constraint is now
-the actual concurrency authority: the ``INSERT`` below is wrapped to catch
-the residual-race ``IntegrityError`` and convert it to a conservative
-``FAILED`` result rather than letting a raw database exception escape as
-if it were a scientific decision. A database-level ``CHECK`` constraint
-(``ck_reaction_enzyme_exactly_one_target``, same migration) also now
-enforces "exactly one of ``protein_id``/``complex_id``" independently of
+``(reaction_id, protein_id)``, ``(reaction_id, complex_id)``, or
+``(reaction_id, enzyme_state_id)`` pair ``normalize_reaction_enzyme``
+itself used. As of Increment 11 (``migrations/versions/0009_persistence_hardening.py``),
+this pair is additionally protected by a real partial unique index per
+target (``uq_reaction_enzyme_reaction_id_protein_id``/
+``uq_reaction_enzyme_reaction_id_complex_id``, and, since Agent 1.x
+Increment B, ``uq_reaction_enzyme_reaction_id_enzyme_state_id``) -- the
+recheck remains as a fast, friendly first line of defense, but the
+database constraint is now the actual concurrency authority: the
+``INSERT`` below is wrapped to catch the residual-race ``IntegrityError``
+and convert it to a conservative ``FAILED`` result rather than letting a
+raw database exception escape as if it were a scientific decision. A
+database-level ``CHECK`` constraint (``ck_reaction_enzyme_exactly_one_target``,
+widened from two targets to three in migration
+``0014_enzyme_regulatory_states``) also now enforces "exactly one of
+``protein_id``/``complex_id``/``enzyme_state_id``" independently of
 ``ReactionEnzymeIdentity``'s own application-level XOR check.
 
 **No organism-consistency checking.** This module never queries
@@ -154,10 +157,14 @@ def _create(
         condition = (ReactionEnzyme.reaction_id == identity.reaction_id) & (
             ReactionEnzyme.protein_id == identity.protein_id
         )
-    else:
-        assert identity.complex_id is not None  # guaranteed by ReactionEnzymeIdentity's XOR check
+    elif identity.complex_id is not None:
         condition = (ReactionEnzyme.reaction_id == identity.reaction_id) & (
             ReactionEnzyme.complex_id == identity.complex_id
+        )
+    else:
+        assert identity.enzyme_state_id is not None  # guaranteed by ReactionEnzymeIdentity's XOR
+        condition = (ReactionEnzyme.reaction_id == identity.reaction_id) & (
+            ReactionEnzyme.enzyme_state_id == identity.enzyme_state_id
         )
     if session.execute(select(ReactionEnzyme.id).where(condition).limit(1)).first() is not None:
         return PersistenceResult(
@@ -174,6 +181,7 @@ def _create(
         reaction_id=identity.reaction_id,
         protein_id=identity.protein_id,
         complex_id=identity.complex_id,
+        enzyme_state_id=identity.enzyme_state_id,
         relationship=identity.relationship,
     )
     try:

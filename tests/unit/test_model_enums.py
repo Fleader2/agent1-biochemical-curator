@@ -13,10 +13,14 @@ import pytest
 
 from app.models import enums
 from app.models.enums import (
+    AllostericEffect,
     ClaimStatus,
     ConfidenceClass,
     CurationState,
+    EnzymeStateTransitionType,
+    EnzymeStateType,
     EvidenceType,
+    ModificationType,
     ReactionParticipantRole,
     RegulatoryEffect,
     SourceType,
@@ -27,10 +31,14 @@ pytestmark = pytest.mark.unit
 _STABLE_ENUM_VALUE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 _EXPECTED_NAMES = {
+    "AllostericEffect",
     "ClaimStatus",
     "ConfidenceClass",
     "CurationState",
+    "EnzymeStateTransitionType",
+    "EnzymeStateType",
     "EvidenceType",
+    "ModificationType",
     "ReactionParticipantRole",
     "RegulatoryEffect",
     "SourceType",
@@ -100,6 +108,24 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
             "OTHER",
         }
     ),
+    # Added in Agent 1.x Increment B (migration 0014_enzyme_regulatory_states)
+    # -- see docs/02_database_schema.md's own sections for each and
+    # docs/25_enzyme_regulatory_states_contract.md.
+    EnzymeStateType: frozenset({"BASE", "MODIFIED", "ALLOSTERICALLY_BOUND", "OTHER"}),
+    ModificationType: frozenset(
+        {
+            "PHOSPHORYLATION",
+            "ACETYLATION",
+            "CYSTEINYLATION",
+            "UBIQUITINATION",
+            "METHYLATION",
+            "OTHER",
+        }
+    ),
+    AllostericEffect: frozenset({"ACTIVATOR", "INHIBITOR", "MODULATOR", "UNKNOWN"}),
+    EnzymeStateTransitionType: frozenset(
+        {"MODIFICATION", "DEMODIFICATION", "LIGAND_BINDING", "LIGAND_RELEASE", "OTHER"}
+    ),
 }
 
 
@@ -119,8 +145,13 @@ def test_enum_values_are_stable_strings(enum_cls: type) -> None:
         assert _STABLE_ENUM_VALUE.match(member.value)
 
 
-def test_exactly_seven_enums_are_defined() -> None:
-    """The module defines exactly the seven enums named in docs/02_database_schema.md."""
+def test_exactly_eleven_enums_are_defined() -> None:
+    """The module defines exactly the eleven enums named in docs/02_database_schema.md.
+
+    Seven from the original specification plus four added in Agent 1.x
+    Increment B (``EnzymeStateType``, ``ModificationType``,
+    ``AllostericEffect``, ``EnzymeStateTransitionType``).
+    """
     assert set(enums.__all__) == _EXPECTED_NAMES
 
 

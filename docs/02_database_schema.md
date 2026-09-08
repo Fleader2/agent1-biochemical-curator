@@ -199,6 +199,56 @@ OED
 OTHER
 ```
 
+## EnzymeStateType
+
+Added in Agent 1.x Increment B (migration `0014_enzyme_regulatory_states`)
+-- see `docs/25_enzyme_regulatory_states_contract.md`.
+
+```text
+BASE
+MODIFIED
+ALLOSTERICALLY_BOUND
+OTHER
+```
+
+## ModificationType
+
+Added in Agent 1.x Increment B. `CYSTEINYLATION` means specifically
+S-cysteinylation (see `docs/25_enzyme_regulatory_states_contract.md` §8) --
+not a catch-all for every cysteine modification.
+
+```text
+PHOSPHORYLATION
+ACETYLATION
+CYSTEINYLATION
+UBIQUITINATION
+METHYLATION
+OTHER
+```
+
+## AllostericEffect
+
+Added in Agent 1.x Increment B.
+
+```text
+ACTIVATOR
+INHIBITOR
+MODULATOR
+UNKNOWN
+```
+
+## EnzymeStateTransitionType
+
+Added in Agent 1.x Increment B.
+
+```text
+MODIFICATION
+DEMODIFICATION
+LIGAND_BINDING
+LIGAND_RELEASE
+OTHER
+```
+
 ---
 
 # Table: organism

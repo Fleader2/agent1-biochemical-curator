@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from app.models.compartment import Compartment
     from app.models.compound import Compound
     from app.models.enzyme_complex import EnzymeComplex
+    from app.models.enzyme_state import EnzymeState
     from app.models.kinetic_measurement import KineticMeasurement
     from app.models.organism import Organism
     from app.models.protein import Protein
@@ -168,24 +169,37 @@ class ReactionParticipant(Base):
 
 
 class ReactionEnzyme(Base):
-    """Associates a reaction with a catalytic protein or enzyme complex.
+    """Associates a reaction with a catalytic protein, enzyme complex, or enzyme state.
 
     The specification originally described exactly one of ``protein_id``/
     ``complex_id`` being populated as "should normally" hold -- soft
     language, not "must". ``app.normalization.reaction_enzyme`` (Increment 9)
     has since made "exactly one, always" the finalized identity rule
-    (``ReactionEnzymeIdentity.__post_init__``'s XOR check), and this schema
-    hardening increment (migration ``0009_persistence_hardening``) promotes
-    that rule to a database ``CHECK`` constraint
-    (``ck_reaction_enzyme_exactly_one_target``), so a row can no longer
-    violate it even outside the ORM/normalization layer.
+    (``ReactionEnzymeIdentity.__post_init__``'s XOR check), and migration
+    ``0009_persistence_hardening`` promoted that rule to a database
+    ``CHECK`` constraint (``ck_reaction_enzyme_exactly_one_target``).
 
-    Two partial unique indexes additionally enforce that a given
-    ``(reaction_id, protein_id)`` or ``(reaction_id, complex_id)`` pair is
-    recorded at most once, regardless of ``relationship`` --
-    ``app.normalization.reaction_enzyme`` already treats ``relationship`` as
-    inert metadata for identity purposes (its own module docstring), so the
-    pair alone is this table's identity key.
+    **Agent 1.x Increment B** extended both the target and the constraint
+    to three options: ``enzyme_state_id`` lets a catalytic association be
+    attributed to one specific, defined regulatory state (e.g. only the
+    phosphorylated form of a protein is catalytic) rather than the protein
+    or complex generally (``docs/25_enzyme_regulatory_states_contract.md``
+    §13). ``ck_reaction_enzyme_exactly_one_target`` was redefined (same
+    name, new 3-way body) to require exactly one of ``protein_id``/
+    ``complex_id``/``enzyme_state_id`` -- never a weakening of the existing
+    2-way rule, which remains a strict special case (an
+    ``enzyme_state_id``-targeted row simply was not expressible before).
+    Every pre-existing row (which could only ever set ``protein_id`` or
+    ``complex_id``) remains valid unchanged: no migration of existing data
+    to an explicit ``BASE`` ``EnzymeState`` is required or performed.
+
+    Three partial unique indexes (one per target) enforce that a given
+    ``(reaction_id, protein_id)``/``(reaction_id, complex_id)``/
+    ``(reaction_id, enzyme_state_id)`` pair is recorded at most once,
+    regardless of ``relationship`` -- ``app.normalization.reaction_enzyme``
+    already treats ``relationship`` as inert metadata for identity purposes
+    (its own module docstring), so the pair alone is this table's identity
+    key, independently for each of the three target kinds.
 
     No timestamp columns: the specification defines none for this table.
     """
@@ -195,8 +209,9 @@ class ReactionEnzyme(Base):
         # conv() marks the name as already final -- see reaction_participant's
         # own stoichiometry CheckConstraint above for why this is required.
         CheckConstraint(
-            "(protein_id IS NOT NULL AND complex_id IS NULL) "
-            "OR (protein_id IS NULL AND complex_id IS NOT NULL)",
+            "(CASE WHEN protein_id IS NOT NULL THEN 1 ELSE 0 END) "
+            "+ (CASE WHEN complex_id IS NOT NULL THEN 1 ELSE 0 END) "
+            "+ (CASE WHEN enzyme_state_id IS NOT NULL THEN 1 ELSE 0 END) = 1",
             name=conv("ck_reaction_enzyme_exactly_one_target"),
         ),
         Index(
@@ -213,6 +228,13 @@ class ReactionEnzyme(Base):
             unique=True,
             postgresql_where=text("complex_id IS NOT NULL"),
         ),
+        Index(
+            "uq_reaction_enzyme_reaction_id_enzyme_state_id",
+            "reaction_id",
+            "enzyme_state_id",
+            unique=True,
+            postgresql_where=text("enzyme_state_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -226,6 +248,9 @@ class ReactionEnzyme(Base):
     complex_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("enzyme_complex.id", ondelete="RESTRICT")
     )
+    enzyme_state_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("enzyme_state.id", ondelete="RESTRICT")
+    )
 
     relationship: Mapped[str] = mapped_column(String, nullable=False)
 
@@ -236,3 +261,4 @@ class ReactionEnzyme(Base):
     reaction: Mapped[Reaction] = orm_relationship(back_populates="enzymes")
     protein: Mapped[Protein | None] = orm_relationship(back_populates="reaction_enzymes")
     complex: Mapped[EnzymeComplex | None] = orm_relationship(back_populates="reaction_enzymes")
+    enzyme_state: Mapped[EnzymeState | None] = orm_relationship()

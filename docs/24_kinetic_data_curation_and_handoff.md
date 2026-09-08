@@ -12,6 +12,14 @@ Agent 1 → Agent 2 handoff contract) so curated kinetic measurements are
 now available as input data. Agent 1 v1 itself (`docs/23_agent1_v1_scope_and_completion.md`)
 remains the frozen baseline this increment extends, never rewrites.
 
+**Forward pointer (Agent 1.x Increment B).** `KineticMeasurement` gained
+an optional `enzyme_state_id` after this document was frozen, letting a
+measurement be attributed to one specific, defined enzyme regulatory
+state rather than only to a protein/complex generally
+(`AGENT1_CONTRACT_VERSION` "1.1" -> "1.2"). This document's own contract
+is otherwise unchanged. See
+`docs/25_enzyme_regulatory_states_contract.md`.
+
 ## 2. Architectural boundary
 
 ```

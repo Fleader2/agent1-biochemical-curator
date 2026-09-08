@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 
 from app.models.compartment import Compartment
 from app.models.compound import Compound
+from app.models.enums import EnzymeStateType
+from app.models.enzyme_state import EnzymeState
 from app.models.gene import Gene
 from app.models.organism import Organism
 from app.models.protein import Protein
@@ -80,13 +82,39 @@ def make_reaction(session: Session, *, organism_id=None, suffix: str | None = No
 
 
 def make_reaction_enzyme(
-    session: Session, *, reaction_id, protein_id=None, complex_id=None, relationship="CATALYZES"
+    session: Session,
+    *,
+    reaction_id,
+    protein_id=None,
+    complex_id=None,
+    enzyme_state_id=None,
+    relationship="CATALYZES",
 ) -> ReactionEnzyme:
     row = ReactionEnzyme(
         reaction_id=reaction_id,
         protein_id=protein_id,
         complex_id=complex_id,
+        enzyme_state_id=enzyme_state_id,
         relationship=relationship,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def make_enzyme_state(
+    session: Session,
+    *,
+    protein_id=None,
+    complex_id=None,
+    state_type: EnzymeStateType = EnzymeStateType.BASE,
+    suffix: str | None = None,
+) -> EnzymeState:
+    row = EnzymeState(
+        protein_id=protein_id,
+        complex_id=complex_id,
+        state_type=state_type,
+        identity_key=f"test-only-identity-key-{suffix or uuid4().hex[:12]}",
     )
     session.add(row)
     session.flush()

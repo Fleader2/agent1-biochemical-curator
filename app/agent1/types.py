@@ -46,6 +46,18 @@ every ingested ``KineticMeasurement`` unfiltered, exactly the same
 ``reactions``/``compounds``/``compartments`` above -- never gated on
 ``HUMAN_ACCEPTED`` the way ``claims``/``evidence`` are, since that gate
 does not exist for this table.
+
+**Agent 1.x Increment B** added ``enzyme_states``/``enzyme_modifications``/
+``allosteric_interactions``/``enzyme_state_transitions`` to both container
+types, and ``enzyme_state_id`` to ``CuratedKineticMeasurement``, bumping
+``AGENT1_CONTRACT_VERSION`` to ``"1.2"`` (see
+``docs/25_enzyme_regulatory_states_contract.md``). None of the four new
+tables carries a ``Claim``/``CurationState`` column either, so the same
+"exists = curated" policy applies to all four -- never gated on
+``HUMAN_ACCEPTED``. State-specific ``ReactionEnzyme`` associations need no
+separate field: ``reaction_enzyme_associations`` is already a tuple of raw
+``ReactionEnzyme`` rows, and every such row already carries its own
+``enzyme_state_id`` column (added by the same increment) for free.
 """
 
 from __future__ import annotations
@@ -57,7 +69,22 @@ from uuid import UUID
 from app.models.claim import Claim, Evidence
 from app.models.compartment import Compartment
 from app.models.compound import Compound
-from app.models.enums import ClaimStatus, ConfidenceClass, CurationState, SourceType
+from app.models.enums import (
+    AllostericEffect,
+    ClaimStatus,
+    ConfidenceClass,
+    CurationState,
+    EnzymeStateTransitionType,
+    EnzymeStateType,
+    ModificationType,
+    SourceType,
+)
+from app.models.enzyme_state import (
+    AllostericInteraction,
+    EnzymeModification,
+    EnzymeState,
+    EnzymeStateTransition,
+)
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
 from app.models.gene import Gene
@@ -72,7 +99,7 @@ from app.models.review_event import ReviewEvent
 
 #: This contract's own version. Bump only when ``Agent1KnowledgePackage``/
 #: ``Agent1CuratedKnowledgeView``'s field shape changes.
-AGENT1_CONTRACT_VERSION = "1.1"
+AGENT1_CONTRACT_VERSION = "1.2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +202,100 @@ class CuratedKineticMeasurement:
 
     notes: str | None
 
+    #: Agent 1.x Increment B. ``None`` unless this measurement was
+    #: specifically reported for one defined ``EnzymeState`` -- never
+    #: treated as applicable to the parent protein/complex generally, or
+    #: to any other state of it, when set (see
+    #: ``docs/25_enzyme_regulatory_states_contract.md`` §15).
+    enzyme_state_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedEnzymeState:
+    """Agent 2-facing view of one curated enzyme regulatory state (Agent 1.x Increment B).
+
+    A faithful reshaping of one ``EnzymeState`` row. Exactly one of
+    ``protein_id``/``complex_id`` is set, mirroring the underlying row's
+    own database ``CHECK`` constraint -- this type never conflates
+    macromolecule identity with state identity (see
+    ``docs/25_enzyme_regulatory_states_contract.md`` §4).
+    """
+
+    enzyme_state_id: UUID
+    protein_id: UUID | None
+    complex_id: UUID | None
+    state_type: EnzymeStateType
+    state_label: str | None
+    compartment_id: UUID | None
+    active_state: bool | None
+    source: SourceType | None
+    source_id: str | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedEnzymeModification:
+    """Agent 2-facing view of one curated enzyme modification (Agent 1.x Increment B).
+
+    A faithful reshaping of one ``EnzymeModification`` row, always
+    attached to one ``CuratedEnzymeState`` via ``enzyme_state_id``.
+    """
+
+    enzyme_modification_id: UUID
+    enzyme_state_id: UUID
+    modification_type: ModificationType
+    residue: str | None
+    residue_position: int | None
+    site_label: str | None
+    modifying_compound_id: UUID | None
+    stoichiometry: Decimal | None
+    source: SourceType | None
+    source_id: str | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedAllostericInteraction:
+    """Agent 2-facing view of one curated allosteric interaction (Agent 1.x Increment B).
+
+    A faithful reshaping of one ``AllostericInteraction`` row. ``effect``
+    is the curated *qualitative* regulatory relationship only -- the
+    quantitative kinetic consequence, if any, is a separate, state-specific
+    ``CuratedKineticMeasurement`` (see that type's own docstring and
+    ``docs/25_enzyme_regulatory_states_contract.md`` §11 for why the two
+    are never conflated).
+    """
+
+    allosteric_interaction_id: UUID
+    enzyme_state_id: UUID
+    ligand_compound_id: UUID
+    effect: AllostericEffect
+    site_label: str | None
+    mechanism: str | None
+    source: SourceType | None
+    source_id: str | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedEnzymeStateTransition:
+    """Agent 2-facing view of one curated enzyme state transition (Agent 1.x Increment B).
+
+    A faithful reshaping of one ``EnzymeStateTransition`` row.
+    ``reaction_id`` is ``None`` unless the source knowledge already
+    resolves the transition through the existing reaction-curation
+    pipeline -- never fabricated.
+    """
+
+    enzyme_state_transition_id: UUID
+    from_state_id: UUID
+    to_state_id: UUID
+    transition_type: EnzymeStateTransitionType
+    reaction_id: UUID | None
+    source: SourceType | None
+    source_id: str | None
+    notes: str | None
+
 
 @dataclass(frozen=True, slots=True)
 class Agent1KnowledgePackage:
@@ -200,6 +321,10 @@ class Agent1KnowledgePackage:
     regulatory_interactions: tuple[RegulatoryInteraction, ...]
     publications: tuple[Publication, ...]
     kinetic_measurements: tuple[KineticMeasurement, ...]
+    enzyme_states: tuple[EnzymeState, ...]
+    enzyme_modifications: tuple[EnzymeModification, ...]
+    allosteric_interactions: tuple[AllostericInteraction, ...]
+    enzyme_state_transitions: tuple[EnzymeStateTransition, ...]
 
     claims: tuple[Claim, ...]
     evidence: tuple[Evidence, ...]
@@ -236,6 +361,10 @@ class Agent1CuratedKnowledgeView:
     reaction_enzyme_associations: tuple[ReactionEnzyme, ...]
     regulatory_interactions: tuple[RegulatoryInteraction, ...]
     kinetic_measurements: tuple[CuratedKineticMeasurement, ...]
+    enzyme_states: tuple[CuratedEnzymeState, ...]
+    enzyme_modifications: tuple[CuratedEnzymeModification, ...]
+    allosteric_interactions: tuple[CuratedAllostericInteraction, ...]
+    enzyme_state_transitions: tuple[CuratedEnzymeStateTransition, ...]
 
     claims: tuple[Claim, ...]
     evidence: tuple[Evidence, ...]
@@ -248,6 +377,10 @@ __all__ = [
     "Agent1KnowledgePackage",
     "ClaimConfidenceSummary",
     "ClaimReviewState",
+    "CuratedAllostericInteraction",
+    "CuratedEnzymeModification",
+    "CuratedEnzymeState",
+    "CuratedEnzymeStateTransition",
     "CuratedKineticMeasurement",
     "ProvenanceSummary",
 ]

@@ -92,6 +92,85 @@ class RegulatoryEffect(StrEnum):
     OTHER = "OTHER"
 
 
+class EnzymeStateType(StrEnum):
+    """The category of a distinct biochemical/catalytic ``EnzymeState``.
+
+    Added in Agent 1.x Increment B (``docs/25_enzyme_regulatory_states_contract.md``).
+    A state's *category* here is independent of which child rows
+    (``EnzymeModification``/``AllostericInteraction``) it actually carries
+    -- a state with both modifications and a bound allosteric ligand is
+    still only one row, and this value records the curator's judgment of
+    its predominant nature, never a computed union of "has modifications"
+    and "has ligands." ``BASE`` is the default, unmodified,
+    ligand-free state of a ``Protein``/``EnzymeComplex``. ``OTHER`` is the
+    catch-all for a state that does not cleanly fit ``MODIFIED``/
+    ``ALLOSTERICALLY_BOUND`` -- never a reason to omit a curated state.
+    """
+
+    BASE = "BASE"
+    MODIFIED = "MODIFIED"
+    ALLOSTERICALLY_BOUND = "ALLOSTERICALLY_BOUND"
+    OTHER = "OTHER"
+
+
+class ModificationType(StrEnum):
+    """A covalent/post-translational modification type on an ``EnzymeState``.
+
+    Added in Agent 1.x Increment B. ``CYSTEINYLATION`` here means
+    specifically *S-cysteinylation*: the covalent, disulfide-linked
+    addition of a free cysteine to a protein cysteine residue -- a single,
+    specific, well-defined modification, deliberately **not** a catch-all
+    for every chemically distinct cysteine modification (S-nitrosylation,
+    S-glutathionylation, sulfenylation, or an intramolecular/intermolecular
+    protein-protein disulfide bond are each a different chemical event and
+    would each need their own future ``ModificationType`` member, never
+    folded into ``CYSTEINYLATION`` without evidence that the source
+    actually means this specific modification). ``OTHER`` is the catch-all
+    for any modification this vocabulary does not yet name -- never a
+    reason to omit a curated modification.
+    """
+
+    PHOSPHORYLATION = "PHOSPHORYLATION"
+    ACETYLATION = "ACETYLATION"
+    CYSTEINYLATION = "CYSTEINYLATION"
+    UBIQUITINATION = "UBIQUITINATION"
+    METHYLATION = "METHYLATION"
+    OTHER = "OTHER"
+
+
+class AllostericEffect(StrEnum):
+    """The qualitative regulatory effect of an allosteric ligand on an ``EnzymeState``.
+
+    Added in Agent 1.x Increment B. Never inferred from a kinetic value
+    (e.g. a lower ``Km`` does not by itself imply ``ACTIVATOR``) -- set
+    only when a source explicitly states the effect. ``MODULATOR`` is for
+    a source-stated effect that is neither purely activating nor purely
+    inhibiting (e.g. mixed or allosteric-but-unspecified-direction).
+    ``UNKNOWN`` is for a curated binding relationship whose effect the
+    source does not state -- never silently omitted or guessed at.
+    """
+
+    ACTIVATOR = "ACTIVATOR"
+    INHIBITOR = "INHIBITOR"
+    MODULATOR = "MODULATOR"
+    UNKNOWN = "UNKNOWN"
+
+
+class EnzymeStateTransitionType(StrEnum):
+    """The category of a transition between two ``EnzymeState`` rows.
+
+    Added in Agent 1.x Increment B. Kept deliberately minimal -- ``OTHER``
+    is the catch-all for a transition that does not cleanly fit the four
+    named categories.
+    """
+
+    MODIFICATION = "MODIFICATION"
+    DEMODIFICATION = "DEMODIFICATION"
+    LIGAND_BINDING = "LIGAND_BINDING"
+    LIGAND_RELEASE = "LIGAND_RELEASE"
+    OTHER = "OTHER"
+
+
 class SourceType(StrEnum):
     """External scientific source that a record or piece of evidence came from.
 
@@ -125,10 +204,14 @@ class SourceType(StrEnum):
 
 
 __all__ = [
+    "AllostericEffect",
     "ClaimStatus",
     "ConfidenceClass",
     "CurationState",
+    "EnzymeStateTransitionType",
+    "EnzymeStateType",
     "EvidenceType",
+    "ModificationType",
     "ReactionParticipantRole",
     "RegulatoryEffect",
     "SourceType",

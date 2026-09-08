@@ -427,3 +427,5 @@ Agent 1 v1 establishes a robust, evidence-backed scientific curation framework t
 "Complete" describes v1's scope, not a stopping point for the project: Agent 1.x may still add connectors (MetaCyc, BioCyc), a fuller regulation curation pipeline, and richer cofactor semantics, none of which were required for v1. Future work will expand organism coverage, biological scope, and downstream integrations while preserving the project's core principles of provenance, reproducibility, and scientific rigor.
 
 **Agent 1.x Increment A** added SABIO-RK and Open Enzyme Database kinetic-data connectors and extended Agent 1's output contract with curated kinetic measurements (`AGENT1_CONTRACT_VERSION` "1.0" → "1.1"). See `docs/24_kinetic_data_curation_and_handoff.md` for the full contract; the v1 baseline above remains unchanged.
+
+**Agent 1.x Increment B** added structured enzyme regulatory states (allostery, covalent/post-translational modification, and state-specific kinetic measurements) via `EnzymeState`/`EnzymeModification`/`AllostericInteraction`/`EnzymeStateTransition`, bumping `AGENT1_CONTRACT_VERSION` to "1.2". See `docs/25_enzyme_regulatory_states_contract.md`.

@@ -16,6 +16,12 @@ from app.models.claim import Claim, Evidence, EvidenceCondition
 from app.models.compartment import Compartment
 from app.models.compound import Compound, CompoundSynonym
 from app.models.enzyme_complex import EnzymeComplex, EnzymeComplexMember
+from app.models.enzyme_state import (
+    AllostericInteraction,
+    EnzymeModification,
+    EnzymeState,
+    EnzymeStateTransition,
+)
 from app.models.experiment_execution import (
     ExperimentExecution,
     ExperimentExecutionEvent,
@@ -40,6 +46,7 @@ from app.models.review_event import ReviewEvent
 from app.models.source_cross_reference import SourceCrossReference
 
 __all__ = [
+    "AllostericInteraction",
     "Base",
     "Claim",
     "Compartment",
@@ -47,6 +54,9 @@ __all__ = [
     "CompoundSynonym",
     "EnzymeComplex",
     "EnzymeComplexMember",
+    "EnzymeModification",
+    "EnzymeState",
+    "EnzymeStateTransition",
     "Evidence",
     "EvidenceCondition",
     "ExperimentExecution",

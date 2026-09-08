@@ -23,6 +23,13 @@ gate applies (no ``Claim``/``CurationState`` exists on this table). This
 reshaping is purely mechanical (one field copied to another of the same
 name) and asserts no kinetic-law selection, parameter mapping, or model
 usage decision -- those remain Agent 2's responsibility.
+
+**Enzyme regulatory states** (Agent 1.x Increment B). Every
+``package.enzyme_states``/``.enzyme_modifications``/
+``.allosteric_interactions``/``.enzyme_state_transitions`` row is reshaped
+into its ``Curated*`` counterpart and passed through unfiltered, for the
+identical reason kinetic measurements are (no ``Claim``/``CurationState``
+column on any of the four tables). Each reshaping is purely mechanical.
 """
 
 from __future__ import annotations
@@ -32,7 +39,17 @@ from app.agent1.types import (
     AGENT1_CONTRACT_VERSION,
     Agent1CuratedKnowledgeView,
     Agent1KnowledgePackage,
+    CuratedAllostericInteraction,
+    CuratedEnzymeModification,
+    CuratedEnzymeState,
+    CuratedEnzymeStateTransition,
     CuratedKineticMeasurement,
+)
+from app.models.enzyme_state import (
+    AllostericInteraction,
+    EnzymeModification,
+    EnzymeState,
+    EnzymeStateTransition,
 )
 from app.models.kinetic_measurement import KineticMeasurement
 
@@ -63,6 +80,16 @@ def get_agent1_curated_knowledge_view(
     kinetic_measurements = tuple(
         _curated_kinetic_measurement(row) for row in package.kinetic_measurements
     )
+    enzyme_states = tuple(_curated_enzyme_state(row) for row in package.enzyme_states)
+    enzyme_modifications = tuple(
+        _curated_enzyme_modification(row) for row in package.enzyme_modifications
+    )
+    allosteric_interactions = tuple(
+        _curated_allosteric_interaction(row) for row in package.allosteric_interactions
+    )
+    enzyme_state_transitions = tuple(
+        _curated_enzyme_state_transition(row) for row in package.enzyme_state_transitions
+    )
 
     return Agent1CuratedKnowledgeView(
         contract_version=AGENT1_CONTRACT_VERSION,
@@ -74,6 +101,10 @@ def get_agent1_curated_knowledge_view(
         reaction_enzyme_associations=package.reaction_enzyme_associations,
         regulatory_interactions=package.regulatory_interactions,
         kinetic_measurements=kinetic_measurements,
+        enzyme_states=enzyme_states,
+        enzyme_modifications=enzyme_modifications,
+        allosteric_interactions=allosteric_interactions,
+        enzyme_state_transitions=enzyme_state_transitions,
         claims=accepted,
         evidence=accepted_evidence,
         confidence_summaries=accepted_confidence,
@@ -104,6 +135,71 @@ def _curated_kinetic_measurement(row: KineticMeasurement) -> CuratedKineticMeasu
         source_id=row.source_id,
         confidence_score=row.confidence_score,
         confidence_class=row.confidence_class,
+        notes=row.notes,
+        enzyme_state_id=row.enzyme_state_id,
+    )
+
+
+def _curated_enzyme_state(row: EnzymeState) -> CuratedEnzymeState:
+    """Pure field-for-field reshaping of one ``EnzymeState`` row. No I/O, no inference."""
+    return CuratedEnzymeState(
+        enzyme_state_id=row.id,
+        protein_id=row.protein_id,
+        complex_id=row.complex_id,
+        state_type=row.state_type,
+        state_label=row.state_label,
+        compartment_id=row.compartment_id,
+        active_state=row.active_state,
+        source=row.source,
+        source_id=row.source_id,
+        notes=row.notes,
+    )
+
+
+def _curated_enzyme_modification(row: EnzymeModification) -> CuratedEnzymeModification:
+    """Pure field-for-field reshaping of one ``EnzymeModification`` row. No I/O, no inference."""
+    return CuratedEnzymeModification(
+        enzyme_modification_id=row.id,
+        enzyme_state_id=row.enzyme_state_id,
+        modification_type=row.modification_type,
+        residue=row.residue,
+        residue_position=row.residue_position,
+        site_label=row.site_label,
+        modifying_compound_id=row.modifying_compound_id,
+        stoichiometry=row.stoichiometry,
+        source=row.source,
+        source_id=row.source_id,
+        notes=row.notes,
+    )
+
+
+def _curated_allosteric_interaction(row: AllostericInteraction) -> CuratedAllostericInteraction:
+    """Pure field-for-field reshaping of one ``AllostericInteraction`` row. No I/O, no inference."""
+    return CuratedAllostericInteraction(
+        allosteric_interaction_id=row.id,
+        enzyme_state_id=row.enzyme_state_id,
+        ligand_compound_id=row.ligand_compound_id,
+        effect=row.effect,
+        site_label=row.site_label,
+        mechanism=row.mechanism,
+        source=row.source,
+        source_id=row.source_id,
+        notes=row.notes,
+    )
+
+
+def _curated_enzyme_state_transition(
+    row: EnzymeStateTransition,
+) -> CuratedEnzymeStateTransition:
+    """Pure field-for-field reshaping of one ``EnzymeStateTransition`` row. No I/O, no inference."""
+    return CuratedEnzymeStateTransition(
+        enzyme_state_transition_id=row.id,
+        from_state_id=row.from_state_id,
+        to_state_id=row.to_state_id,
+        transition_type=row.transition_type,
+        reaction_id=row.reaction_id,
+        source=row.source,
+        source_id=row.source_id,
         notes=row.notes,
     )
 

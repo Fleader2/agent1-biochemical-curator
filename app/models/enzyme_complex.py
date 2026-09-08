@@ -29,6 +29,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.enzyme_state import EnzymeState
     from app.models.kinetic_measurement import KineticMeasurement
     from app.models.organism import Organism
     from app.models.protein import Protein
@@ -71,6 +72,7 @@ class EnzymeComplex(Base):
     kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
         back_populates="complex"
     )
+    enzyme_states: Mapped[list[EnzymeState]] = relationship(back_populates="complex")
 
 
 class EnzymeComplexMember(Base):

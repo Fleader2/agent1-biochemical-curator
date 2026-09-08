@@ -61,17 +61,22 @@ supplied by upstream normalizers (``app.normalization.reaction``,
 names throughout, per the same "verify, do not assume" discipline every
 prior increment has followed.
 
-**Identity hierarchy.** There is exactly one identity anchor, in two
-mutually exclusive shapes: ``(reaction_id, protein_id)`` or
-``(reaction_id, complex_id)``. ``ReactionEnzymeIdentity`` enforces that
-exactly one of ``protein_id``/``complex_id`` is supplied -- never both,
-never neither -- so a single normalization request only ever queries one
-of ``by_reaction_and_protein``/``by_reaction_and_complex``, never both.
-This is a structural guarantee, not a runtime check: **Reaction+Protein and
-Reaction+Complex are two disjoint identity spaces this module never
-bridges** -- it never infers that a protein's complex membership makes a
-direct Reaction+Protein association equivalent to a Reaction+Complex one,
-and it never treats one as evidence toward the other. Each is independent.
+**Identity hierarchy.** There is exactly one identity anchor, in three
+mutually exclusive shapes: ``(reaction_id, protein_id)``,
+``(reaction_id, complex_id)``, or ``(reaction_id, enzyme_state_id)`` (the
+third added in Agent 1.x Increment B,
+``docs/25_enzyme_regulatory_states_contract.md`` §13).
+``ReactionEnzymeIdentity`` enforces that exactly one of ``protein_id``/
+``complex_id``/``enzyme_state_id`` is supplied -- never more than one,
+never none -- so a single normalization request only ever queries one of
+``by_reaction_and_protein``/``by_reaction_and_complex``/
+``by_reaction_and_enzyme_state``, never more than one. This is a
+structural guarantee, not a runtime check: **Reaction+Protein,
+Reaction+Complex, and Reaction+EnzymeState are three disjoint identity
+spaces this module never bridges** -- it never infers that a protein's
+complex membership or state ownership makes one shape's association
+equivalent to another's, and it never treats one as evidence toward
+another. Each is independent.
 
 **``relationship`` is treated as inert metadata for identity purposes**, not
 as part of the identity anchor -- a resolved ``(reaction_id, protein_id)``
@@ -159,22 +164,23 @@ def _clean(value: str | None) -> str | None:
 class ReactionEnzymeIdentity:
     """Source-neutral description of one proposed Reaction<->enzyme relationship.
 
-    ``reaction_id``/``protein_id``/``complex_id`` are already-normalized
-    UUIDs from upstream normalizers -- this module never resolves a
-    Reaction, Protein, or EnzymeComplex by name, EC number, or any other
-    weak signal itself. Deliberately excludes ``confidence_summary``/
-    ``notes`` (pure metadata, no identity role) and anything evidence-shaped
-    (claims, publications, reviewers -- see module docstring's "Evidence
-    neutrality").
+    ``reaction_id``/``protein_id``/``complex_id``/``enzyme_state_id`` are
+    already-normalized UUIDs from upstream normalizers -- this module never
+    resolves a Reaction, Protein, EnzymeComplex, or EnzymeState by name, EC
+    number, or any other weak signal itself. Deliberately excludes
+    ``confidence_summary``/``notes`` (pure metadata, no identity role) and
+    anything evidence-shaped (claims, publications, reviewers -- see module
+    docstring's "Evidence neutrality").
 
     Requires ``reaction_id`` and *exactly one* of ``protein_id``/
-    ``complex_id`` -- never both, never neither (Increment 9 instructions,
-    Step 2), even though the database schema itself only says this "should
-    normally" hold (soft language, no CHECK constraint -- see module
-    docstring). ``relationship`` is optional at construction (kept for
-    later creation-completeness checking only -- see
-    ``_has_creation_complete_metadata``); it is never compared for identity
-    or conflict purposes (see module docstring).
+    ``complex_id``/``enzyme_state_id`` -- never more than one, never none
+    (Increment 9 instructions, Step 2; widened to three targets in
+    Agent 1.x Increment B,
+    ``docs/25_enzyme_regulatory_states_contract.md`` §13 -- the original
+    2-way rule is a strict special case, not weakened). ``relationship`` is
+    optional at construction (kept for later creation-completeness checking
+    only -- see ``_has_creation_complete_metadata``); it is never compared
+    for identity or conflict purposes (see module docstring).
     """
 
     source: SourceType
@@ -183,6 +189,7 @@ class ReactionEnzymeIdentity:
 
     protein_id: UUID | None = None
     complex_id: UUID | None = None
+    enzyme_state_id: UUID | None = None
 
     relationship: str | None = None
 
@@ -194,10 +201,14 @@ class ReactionEnzymeIdentity:
         )
         if self.reaction_id is None:
             raise ValueError("ReactionEnzymeIdentity requires reaction_id")
-        if (self.protein_id is None) == (self.complex_id is None):
+        target_count = sum(
+            target is not None
+            for target in (self.protein_id, self.complex_id, self.enzyme_state_id)
+        )
+        if target_count != 1:
             raise ValueError(
-                "ReactionEnzymeIdentity requires exactly one of protein_id or complex_id "
-                "-- never both, never neither"
+                "ReactionEnzymeIdentity requires exactly one of protein_id, complex_id, or "
+                "enzyme_state_id -- never more than one, never none"
             )
         object.__setattr__(self, "relationship", _clean(self.relationship))
 
@@ -217,6 +228,7 @@ class ReactionEnzymeCandidate:
     reaction_id: UUID
     protein_id: UUID | None = None
     complex_id: UUID | None = None
+    enzyme_state_id: UUID | None = None
     relationship: str | None = None
 
 
@@ -225,14 +237,14 @@ class ReactionEnzymeLookup(Protocol):
     """Read-only candidate lookup, injected so ``normalize_reaction_enzyme`` never touches
     SQLAlchemy.
 
-    Exactly two methods, one per identity shape -- no ``by_reaction``/
-    ``by_protein``/``by_complex`` standalone method exists, since neither
-    is this module's identity anchor on its own (only the
-    ``(reaction_id, protein_id)``/``(reaction_id, complex_id)`` *pair* is).
-    No method here can insert, update, or delete a row. Deliberately has no
-    ``by_ec_number``, gene, publication, evidence, or free-text method --
-    none of those is Reaction<->enzyme relationship identity (see module
-    docstring).
+    Exactly three methods, one per identity shape -- no ``by_reaction``/
+    ``by_protein``/``by_complex``/``by_enzyme_state`` standalone method
+    exists, since none is this module's identity anchor on its own (only
+    the ``(reaction_id, protein_id)``/``(reaction_id, complex_id)``/
+    ``(reaction_id, enzyme_state_id)`` *pair* is). No method here can
+    insert, update, or delete a row. Deliberately has no ``by_ec_number``,
+    gene, publication, evidence, or free-text method -- none of those is
+    Reaction<->enzyme relationship identity (see module docstring).
     """
 
     def by_reaction_and_protein(
@@ -248,6 +260,14 @@ class ReactionEnzymeLookup(Protocol):
     ) -> Sequence[ReactionEnzymeCandidate]:
         """Existing associations with this exact ``(reaction_id, complex_id)`` pair
         (0, 1, or more).
+        """
+        ...
+
+    def by_reaction_and_enzyme_state(
+        self, reaction_id: UUID, enzyme_state_id: UUID
+    ) -> Sequence[ReactionEnzymeCandidate]:
+        """Existing associations with this exact ``(reaction_id, enzyme_state_id)`` pair
+        (0, 1, or more). Added in Agent 1.x Increment B.
         """
         ...
 
@@ -277,10 +297,14 @@ def normalize_reaction_enzyme(
         candidates = unique_by_id(
             lookup.by_reaction_and_protein(identity.reaction_id, identity.protein_id)
         )
-    else:
-        assert identity.complex_id is not None  # guaranteed by __post_init__'s XOR check
+    elif identity.complex_id is not None:
         candidates = unique_by_id(
             lookup.by_reaction_and_complex(identity.reaction_id, identity.complex_id)
+        )
+    else:
+        assert identity.enzyme_state_id is not None  # guaranteed by __post_init__'s XOR check
+        candidates = unique_by_id(
+            lookup.by_reaction_and_enzyme_state(identity.reaction_id, identity.enzyme_state_id)
         )
 
     state = classify_candidates(tuple(candidate.id for candidate in candidates))
