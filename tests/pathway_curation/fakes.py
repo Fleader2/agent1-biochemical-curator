@@ -28,6 +28,20 @@ from app.connectors.sgd import SgdLocusRecord, SgdNormalizedRecord, SgdSearchHit
 from app.connectors.uniprot import UniProtEntryRecord, UniProtProteinRecord, UniProtSearchHit
 
 
+@dataclass(frozen=True)
+class FakeKgmlEntrySpec:
+    """One synthetic KGML ``<entry>`` element for ``FakeKeggConnector.get_kgml``
+    (Increment C.2) -- rendered into real, parseable-by-the-real-parser XML, never a
+    separate hand-rolled fixture-only shape, so tests exercise
+    ``app.connectors.kegg.parse_kgml_entries`` for real.
+    """
+
+    entry_type: str
+    names: tuple[str, ...] = ()
+    reaction_ids: tuple[str, ...] = ()
+    component_ids: tuple[str, ...] = ()
+
+
 @dataclass
 class FakeKeggConnector:
     """Deterministic fake for ``app.pathway_curation.strategies.KeggPathwayCurationConnector``
@@ -52,6 +66,15 @@ class FakeKeggConnector:
     live 404, i.e. a generic "map"-prefixed pathway), so ``get_kgml`` returns
     ``None`` and callers fall through to ``link()`` exactly as before this dict
     existed -- every pre-existing test that never sets this field is unaffected.
+    """
+    kgml_catalyst_entries: dict[str, tuple[FakeKgmlEntrySpec, ...]] = field(default_factory=dict)
+    """Increment C.2 (organism-specific catalyst resolution): pathway ids keyed here
+    get additional synthetic ``<entry>`` elements (``type="gene"``/``"ortholog"``/
+    ``"group"``/anything else) in their fake KGML document, alongside the
+    ``<reaction>`` elements ``kgml_reactions`` already produces. A pathway id absent
+    from this dict gets no extra entries at all -- every pre-C.2 test that never sets
+    this field is unaffected (``discover_catalyst_context`` then sees zero ``<entry>``
+    elements and returns an empty ``KgmlCatalystContext``, a complete no-op).
     """
     calls: list[tuple[str, tuple]] = field(default_factory=list)
 
@@ -117,20 +140,33 @@ class FakeKeggConnector:
         ]
 
     def get_kgml(self, pathway_id: str) -> str | None:
-        """Fake KGML retrieval (Increment C.1 organism-specific completion): a real,
-        parseable-by-the-real-parser XML document listing exactly ``kgml_reactions``'
-        reaction ids for this pathway id, or ``None`` (mirroring a live 404) when this
-        pathway id has no entry there at all -- never a separate hand-rolled parse
-        path, so tests exercise ``parse_kgml_reaction_ids`` for real.
+        """Fake KGML retrieval (Increment C.1 organism-specific completion; extended
+        by Increment C.2): a real, parseable-by-the-real-parser XML document listing
+        exactly ``kgml_reactions``'s reaction ids plus ``kgml_catalyst_entries``'s
+        entries for this pathway id, or ``None`` (mirroring a live 404) when this
+        pathway id has neither -- never a separate hand-rolled parse path, so tests
+        exercise ``parse_kgml_reaction_ids``/``parse_kgml_entries`` for real.
         """
         self.calls.append(("get_kgml", (pathway_id,)))
-        if pathway_id not in self.kgml_reactions:
+        if pathway_id not in self.kgml_reactions and pathway_id not in self.kgml_catalyst_entries:
             return None
         reaction_elements = "".join(
             f'<reaction id="{index}" name="rn:{reaction_id}" type="irreversible"/>'
-            for index, reaction_id in enumerate(self.kgml_reactions[pathway_id], start=1)
+            for index, reaction_id in enumerate(self.kgml_reactions.get(pathway_id, ()), start=1)
         )
-        return f'<pathway name="path:{pathway_id}">{reaction_elements}</pathway>'
+        entry_elements: list[str] = []
+        for index, spec in enumerate(self.kgml_catalyst_entries.get(pathway_id, ()), start=100):
+            names_attr = " ".join(spec.names)
+            reaction_attr = " ".join(f"rn:{rid}" for rid in spec.reaction_ids)
+            components = "".join(f'<component id="{cid}"/>' for cid in spec.component_ids)
+            entry_elements.append(
+                f'<entry id="{index}" name="{names_attr}" type="{spec.entry_type}" '
+                f'reaction="{reaction_attr}">{components}</entry>'
+            )
+        return (
+            f'<pathway name="path:{pathway_id}">{reaction_elements}'
+            f"{''.join(entry_elements)}</pathway>"
+        )
 
 
 def make_kegg_reaction(
@@ -504,6 +540,7 @@ def make_oed_row(*, ec_number: str, kcat: str | None = None, km: str | None = No
 
 __all__ = [
     "FakeKeggConnector",
+    "FakeKgmlEntrySpec",
     "FakeOedConnector",
     "FakePubMedConnector",
     "FakeSabiorkConnector",

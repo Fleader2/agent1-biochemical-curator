@@ -46,6 +46,7 @@ from app.connectors.kegg import (
     KeggFlatFileRecord,
     KeggLinkEntry,
     KeggReactionRecord,
+    parse_kgml_entries,
     parse_kgml_reaction_ids,
 )
 from app.entity_resolution.adapters import (
@@ -106,10 +107,15 @@ from app.persistence.reaction_enzyme import persist_reaction_enzyme
 from app.persistence.types import PersistenceAction
 
 __all__ = [
+    "DirectCatalystEvidence",
     "KeggPathwayCurationConnector",
+    "KgmlCatalystContext",
     "ResolutionOutcome",
     "associate_catalyst",
+    "classify_and_persist_protein_candidates",
     "discover_catalyst_candidates_by_ec_number",
+    "discover_catalyst_candidates_for_one_ec",
+    "discover_catalyst_context",
     "discover_kinetics_oed",
     "discover_kinetics_sabiork",
     "discover_pathway",
@@ -117,7 +123,9 @@ __all__ = [
     "discover_reactions_in_pathway",
     "fetch_kegg_pathway_metadata",
     "fetch_kegg_reaction_record",
+    "is_fully_classified_ec",
     "resolve_compound_by_text",
+    "resolve_gene_by_kegg_gene_id",
     "resolve_gene_by_text",
     "resolve_organism",
     "resolve_participant_compound",
@@ -126,6 +134,7 @@ __all__ = [
     "resolve_reaction_by_kegg_id",
     "resolve_reaction_by_text",
     "resolve_reference_compartment_by_name",
+    "split_ec_numbers",
 ]
 
 
@@ -438,6 +447,155 @@ def discover_reactions_in_pathway(
     return tuple(ordered)
 
 
+# --- Organism-specific catalyst evidence (Increment C.2) ---------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DirectCatalystEvidence:
+    """One organism-specific KEGG gene's own explicit KGML association with one
+    reaction (Increment C.2) -- the strongest catalyst-identity evidence this package
+    has: KEGG's own pathway diagram directly drawing this gene at this reaction's own
+    node, never a broad EC-number coincidence. Produced only from a KGML
+    ``type="gene"`` entry (see ``discover_catalyst_context``'s own docstring for why
+    ``type="ortholog"``/``type="group"`` entries never produce this).
+    """
+
+    kegg_reaction_id: str
+    kegg_gene_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class KgmlCatalystContext:
+    """Every organism-specific-KGML catalyst-relevant fact one pathway's own diagram
+    declares, from a single ``get_kgml`` retrieval (Increment C.2).
+
+    ``direct_gene_evidence`` and ``complex_flagged_reaction_ids`` are kept separate
+    because they mean structurally different things to pathway-curation policy (see
+    module docstring's evidence hierarchy): the former is usable catalyst-identity
+    evidence; the latter is an explicit signal that this reaction's own diagram node
+    groups more than one entity together (KGML's ``type="group"``/``<component>``
+    mechanism) without establishing whether they are independent isozymes or
+    obligate complex subunits -- this package never guesses, and never creates an
+    ``EnzymeComplex``, so a reaction appearing here is disclosed as unresolved
+    catalyst context, never silently ignored and never fabricated into independent
+    catalysts.
+    """
+
+    direct_gene_evidence: tuple[DirectCatalystEvidence, ...] = ()
+    complex_flagged_reaction_ids: tuple[str, ...] = ()
+
+
+def discover_catalyst_context(
+    connector: KeggPathwayCurationConnector, pathway_id: str
+) -> KgmlCatalystContext:
+    """Discover one organism-specific KEGG pathway's own direct reaction<->gene
+    catalyst evidence via its KGML diagram (Increment C.2) -- ``connector.get_kgml``,
+    parsed by ``app.connectors.kegg.parse_kgml_entries``.
+
+    **The central behavioral change this increment makes**: before persisting a
+    ``ReactionEnzyme`` from a broad EC-number search (this module's pre-existing
+    ``discover_catalyst_candidates_by_ec_number``), the executor now checks whether
+    KEGG's own pathway diagram already draws a specific, organism-specific gene at
+    that exact reaction's own node -- confirmed live (``sce00061``) to exist for
+    every one of that pathway's 41 KGML-declared reactions, each traced to one of
+    that pathway's own 13 ``GENE``-field genes.
+
+    Only ``type="gene"`` entries ever populate ``direct_gene_evidence`` --
+    **``type="ortholog"`` entries never do** (Increment C.2 instructions, Step 14: "A
+    KO is not automatically an organism-specific gene" -- an ortholog id is a
+    cross-organism orthology-group identifier, KEGG's own pathway-diagram building
+    block for organisms/reactions that share no more specific gene assignment, and
+    fabricating a Gene/Protein from one would misattribute a family-level annotation
+    as though it were this organism's own specific gene product). A reaction whose
+    only associated entry is ``type="ortholog"`` simply produces no direct evidence
+    at all here -- the caller's existing EC-based fallback remains available for it
+    (Step 27), unchanged.
+
+    A ``type="group"`` entry (KGML's own mechanism for representing more than one
+    diagram node as a single visual complex, via ``<component>`` children) never
+    populates ``direct_gene_evidence`` either -- its own reaction id(s) instead
+    populate ``complex_flagged_reaction_ids``, so the caller can disclose that
+    reaction's catalyst context as unresolved rather than silently having no evidence
+    at all (Step 21). This is a structural distinction based on which KGML XML shape
+    is present (a single entry's own multi-valued ``name`` attribute vs. a
+    ``type="group"`` entry's separate ``<component>`` children) -- not a biological
+    judgment call, and not specific to any one organism or pathway.
+
+    Returns an empty ``KgmlCatalystContext`` (never an error) when this pathway id
+    has no KGML document at all (a generic "map"-prefixed reference pathway, exactly
+    like ``discover_reactions_in_pathway``'s own ``get_kgml``-returns-``None`` case)
+    -- there is no equivalent "gene evidence via ``link()``" fallback mechanism for
+    catalyst identity, unlike reaction membership.
+    """
+    kgml_text = connector.get_kgml(pathway_id)
+    if kgml_text is None:
+        return KgmlCatalystContext()
+
+    entries = parse_kgml_entries(kgml_text)
+
+    seen_evidence: set[tuple[str, str]] = set()
+    direct_gene_evidence: list[DirectCatalystEvidence] = []
+    complex_flagged_reaction_ids: list[str] = []
+    seen_complex_reaction_ids: set[str] = set()
+
+    for entry in entries:
+        if entry.entry_type == "gene":
+            for reaction_id in entry.reaction_ids:
+                for gene_id in entry.names:
+                    key = (reaction_id, gene_id)
+                    if key not in seen_evidence:
+                        seen_evidence.add(key)
+                        direct_gene_evidence.append(
+                            DirectCatalystEvidence(
+                                kegg_reaction_id=reaction_id, kegg_gene_id=gene_id
+                            )
+                        )
+        elif entry.entry_type == "group":
+            for reaction_id in entry.reaction_ids:
+                if reaction_id not in seen_complex_reaction_ids:
+                    seen_complex_reaction_ids.add(reaction_id)
+                    complex_flagged_reaction_ids.append(reaction_id)
+
+    return KgmlCatalystContext(
+        direct_gene_evidence=tuple(direct_gene_evidence),
+        complex_flagged_reaction_ids=tuple(complex_flagged_reaction_ids),
+    )
+
+
+def resolve_gene_by_kegg_gene_id(
+    connector: SgdSearchAndFetch,
+    kegg_gene_id: str,
+    *,
+    organism_id: UUID,
+    organism_context_text: str | None,
+    lookup: GeneLookup,
+    session: Session,
+) -> ResolutionOutcome:
+    """Direct-KGML-evidence gene resolution (Increment C.2): resolve one
+    organism-specific KEGG gene id (already stripped of its ``"sce:"``-style
+    organism-code prefix by ``discover_catalyst_context``) via a thin reuse of
+    ``resolve_gene_by_text``.
+
+    A KEGG organism-specific gene id (e.g. ``"YMR207C"``) is, for *Saccharomyces
+    cerevisiae*, already the same systematic ORF/locus-tag text SGD's own search
+    accepts (``app.connectors.sgd``'s own module docstring: SGD search matches both
+    systematic/ORF names and standard gene names) -- this is not a new resolution
+    algorithm, only a new *discovery key* (the KGML-declared gene id) feeding the
+    exact same, unmodified SGD discovery path ``resolve_gene_by_text`` already uses
+    for a caller-supplied seed gene symbol (mirrors
+    ``discover_catalyst_candidates_by_ec_number``'s identical "thin reuse" shape for
+    EC-number-keyed discovery).
+    """
+    return resolve_gene_by_text(
+        connector,
+        kegg_gene_id,
+        organism_id=organism_id,
+        organism_context_text=organism_context_text,
+        lookup=lookup,
+        session=session,
+    )
+
+
 def fetch_kegg_pathway_metadata(
     connector: KeggSearchAndFetch, pathway_id: str
 ) -> KeggFlatFileRecord | None:
@@ -745,6 +903,113 @@ def resolve_protein_by_text(
     )
 
 
+def split_ec_numbers(raw_ec_field: str) -> tuple[str, ...]:
+    """Split one KEGG-shaped, possibly-multi-valued ``ec_number`` field into its
+    distinct EC-number tokens (Increment C.2, Steps 29-30).
+
+    **The verified multi-EC representation**: KEGG's own flat-file ``ENZYME`` field
+    may list more than one EC number on a single, whitespace-separated row (e.g.
+    ``"2.3.1.41        2.3.1.85        2.3.1.86        2.3.1.179"``), and
+    ``app.normalization.reaction.reaction_identity_from_kegg`` copies that entire
+    row *verbatim* into ``Reaction.ec_number`` (its own docstring: "a KEGG reaction
+    may list more than one EC number; only the first [row] is copied ... [as] inert
+    metadata"). Before this increment, ``executor._discover_catalysts_from_reactions``
+    passed that whole multi-token string to UniProt as a single, invalid query
+    (``f"ec:{reaction.ec_number}"``) -- confirmed live (Real Integration Pilot 1 Run
+    3) to reliably return **zero** candidates for every reaction whose annotation had
+    two or more EC numbers, not because no catalyst exists, but because UniProt's own
+    query grammar does not accept a raw, space-joined multi-EC string as one clause.
+
+    Splitting on whitespace is safe and lossless here: KEGG's own EC-number grammar
+    (``\\d+\\.\\d+\\.\\d+\\.(\\d+|-)``) contains no internal whitespace, so every
+    token produced is either a complete EC number or a wildcard/partial one (see
+    ``is_fully_classified_ec``) -- never a fragment of one. Deduplicated,
+    order-preserving; a blank field returns ``()``.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in raw_ec_field.split():
+        if token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return tuple(ordered)
+
+
+def is_fully_classified_ec(ec_number: str) -> bool:
+    """Whether ``ec_number`` is a complete, non-wildcard EC number (Increment C.2,
+    Step 33) -- KEGG represents an incomplete/wildcard classification with a literal
+    ``"-"`` in place of one or more trailing components (e.g. ``"1.3.1.-"``,
+    ``"4.2.1.-"``). UniProt's own exact-match ``ec:`` query clause has no documented
+    wildcard syntax, so querying one directly would not "fail safely" -- it would
+    either return nothing (indistinguishable from a real empty result) or, worse,
+    silently match on a partial/malformed clause. This package therefore never
+    queries a wildcard EC number at all -- never broadening it into a guessed full
+    one (explicitly prohibited) and never querying it as though it were complete.
+    """
+    return bool(ec_number) and not ec_number.endswith("-")
+
+
+def discover_catalyst_candidates_for_one_ec(
+    connector: UniProtSearchAndFetch,
+    ec_number: str,
+    *,
+    organism_id: UUID,
+    organism_context_text: str | None,
+    lookup: ProteinLookup,
+) -> list[IdentifierCandidate]:
+    """One EC number -> UniProt's own raw, not-yet-classified candidate list
+    (Increment C.2) -- exactly one connector call, no classification, no
+    persistence. Exists so a caller resolving a reaction with *more than one* EC
+    number (``split_ec_numbers``) can query each independently and pool the raw
+    results (``classify_and_persist_protein_candidates``) before ever deciding
+    MATCHED/AMBIGUOUS/NEW -- classifying each EC's results separately would treat
+    two ECs on the very same reaction as though they were unrelated discovery
+    attempts, which is not this module's own policy (Step 32: same-reaction,
+    different-EC evidence is pooled, never scored or ranked against each other).
+    """
+    return resolve_protein_via_uniprot(
+        query=f"ec:{ec_number}",
+        original_mention=ec_number,
+        organism_id=organism_id,
+        organism_context_text=organism_context_text,
+        connector=connector,
+        lookup=lookup,
+    )
+
+
+def classify_and_persist_protein_candidates(
+    candidates: list[IdentifierCandidate],
+    *,
+    query: str,
+    organism_id: UUID,
+    lookup: ProteinLookup,
+    session: Session,
+) -> ResolutionOutcome:
+    """Classify an already-pooled, already-deduplicated list of UniProt protein
+    candidates and persist a lone ``NEW`` verdict (Increment C.2) -- the exact same,
+    unmodified ``_classify_candidates`` machinery every other discovery path in this
+    module uses, just fed a pool gathered from more than one prior connector call
+    (one per distinct, fully-classified EC number on one reaction) instead of a
+    single search's own hits. A caller with only one EC number's candidates may call
+    this directly too (see ``discover_catalyst_candidates_by_ec_number``, redefined
+    in terms of this and ``discover_catalyst_candidates_for_one_ec`` below) --
+    nothing here assumes more than one source query occurred.
+    """
+    return _classify_candidates(
+        entity_kind=EntityKind.PROTEIN,
+        query=query,
+        source=SourceType.UNIPROT,
+        candidates=candidates,
+        unresolved_reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+        persist=lambda: persist_protein(
+            candidates[0].normalization_input,
+            candidates[0].normalization_result,
+            organism_id=organism_id,
+            session=session,
+        ),
+    )
+
+
 def discover_catalyst_candidates_by_ec_number(
     connector: UniProtSearchAndFetch,
     ec_number: str,
@@ -755,9 +1020,13 @@ def discover_catalyst_candidates_by_ec_number(
     session: Session,
 ) -> ResolutionOutcome:
     """Autonomous catalyst-candidate discovery (Increment C.1, F2), keyed by a
-    resolved reaction's own EC number -- never a caller-supplied seed text.
+    resolved reaction's own **single, already-split** EC number -- never a
+    caller-supplied seed text, and never a raw, possibly-multi-valued KEGG
+    ``ec_number`` field (see ``split_ec_numbers``/Increment C.2 for that case; the
+    executor now always splits before calling either this or the multi-EC path).
 
-    A thin, organism-scoped reuse of ``resolve_protein_by_text`` -- an EC-number query
+    A thin, organism-scoped reuse of ``discover_catalyst_candidates_for_one_ec`` +
+    ``classify_and_persist_protein_candidates`` -- an EC-number query
     (``"ec:6.4.1.2"``) is simply a different *query string*; UniProt's own query
     grammar accepts an EC-number clause exactly like a gene-symbol one, so this is not
     a new resolution algorithm, only a new *discovery key* feeding the existing one
@@ -766,7 +1035,7 @@ def discover_catalyst_candidates_by_ec_number(
 
     **Multiple distinct candidates sharing one EC number are never resolved
     arbitrarily.** Confirmed directly against the live UniProt service while
-    implementing this increment: EC 6.4.1.2 in *Saccharomyces cerevisiae* alone
+    implementing Increment C.1: EC 6.4.1.2 in *Saccharomyces cerevisiae* alone
     resolves to at least two real, distinct gene products -- cytosolic ``ACC1``
     (Q00955) and mitochondrial ``HFA1`` (P32874), a genuine isozyme pair, not a
     connector artifact. Such a case reaches ``AMBIGUOUS_IDENTITY`` through the exact
@@ -777,11 +1046,17 @@ def discover_catalyst_candidates_by_ec_number(
     ambiguous outcome (see ``associate_catalyst``'s own conservatism, unchanged by
     this function).
     """
-    return resolve_protein_by_text(
+    candidates = discover_catalyst_candidates_for_one_ec(
         connector,
-        f"ec:{ec_number}",
+        ec_number,
         organism_id=organism_id,
         organism_context_text=organism_context_text,
+        lookup=lookup,
+    )
+    return classify_and_persist_protein_candidates(
+        candidates,
+        query=ec_number,
+        organism_id=organism_id,
         lookup=lookup,
         session=session,
     )

@@ -29,6 +29,7 @@ from app.pathway_curation.types import (
 )
 from tests.pathway_curation.fakes import (
     FakeKeggConnector,
+    FakeKgmlEntrySpec,
     FakeOedConnector,
     FakePubMedConnector,
     FakeSabiorkConnector,
@@ -1525,3 +1526,748 @@ def test_f10_second_organism_prefix_proves_no_organism_hardcoding(db_session: Se
     assert len(result.discovered_reaction_ids) == 2
     resolved_kegg_ids = {call[1][0] for call in kegg.calls if call[0] == "fetch"}
     assert "R09999" not in resolved_kegg_ids
+
+
+# ==================================================================================================
+# Increment C.2 -- Organism-specific catalyst resolution
+# ==================================================================================================
+
+
+def _c2_kegg(
+    *,
+    pathway_id: str = "sce00061",
+    reaction_ids: tuple[str, ...] = ("R00742",),
+    catalyst_entries: tuple[FakeKgmlEntrySpec, ...] = (),
+    ec_by_reaction: dict[str, tuple[str, ...]] | None = None,
+) -> FakeKeggConnector:
+    ec_by_reaction = ec_by_reaction or {}
+    return FakeKeggConnector(
+        pathways={pathway_id: "fatty acid biosynthesis - Saccharomyces cerevisiae"},
+        pathway_reactions={pathway_id: ()},
+        kgml_reactions={pathway_id: reaction_ids},
+        kgml_catalyst_entries={pathway_id: catalyst_entries},
+        reactions={
+            rid: make_kegg_reaction(
+                rid,
+                name=f"fake reaction {rid}",
+                # A real KEGG ENZYME field lists every EC number on one row,
+                # whitespace-separated -- reaction_identity_from_kegg copies that one
+                # row verbatim as Reaction.ec_number (see app/normalization/reaction.py).
+                # A multi-element `enzymes` tuple would instead simulate separate flat-
+                # file *rows*, of which only the first becomes ec_number -- not what a
+                # multi-EC annotation actually looks like.
+                enzymes=(" ".join(ec_by_reaction[rid]),) if rid in ec_by_reaction else (),
+            )
+            for rid in reaction_ids
+        },
+    )
+
+
+def _c2_request(**overrides) -> PathwayCurationRequest:
+    return _request(source_pathway_id="sce00061", **overrides)
+
+
+# --- one direct gene (Step 41, Case A) -----------------------------------------------------------
+
+
+def test_c2_one_direct_gene_resolves_to_reaction_enzyme(db_session: Session) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001", systematic_name="YER061C", standard_name="CEM1"
+            )
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P1",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(request_id="req-c2-one-gene", seed_entity_texts=(), include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert not any(
+        item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        for item in result.unresolved_frontier
+    )
+    # No broad EC search was ever issued for this reaction -- direct evidence handled it.
+    assert not any(
+        call[0] == "search" and str(call[1][0]).startswith("ec:") for call in uniprot.calls
+    )
+
+
+# --- multiple independent direct genes (Step 42, ACC1/HFA1 regression) --------------------------
+
+
+def test_c2_multiple_independent_direct_genes_both_persisted(db_session: Session) -> None:
+    """The central ACC1/HFA1 regression case (Step 23): KGML explicitly names both
+    organism-specific genes at one reaction node -- both are preserved as
+    source-supported candidates and both resolve to independent ReactionEnzyme rows,
+    never collapsed into one and never expanded into a 13-candidate EC ambiguity."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(
+                entry_type="gene", names=("YMR207C", "YNR016C"), reaction_ids=("R00742",)
+            ),
+        ),
+        ec_by_reaction={"R00742": ("6.4.1.2",)},
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YMR207C": make_sgd_locus(
+                sgd_id="S000004815", systematic_name="YMR207C", standard_name="HFA1"
+            ),
+            "YNR016C": make_sgd_locus(
+                sgd_id="S000005299", systematic_name="YNR016C", standard_name="ACC1"
+            ),
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "HFA1": make_uniprot_entry(
+                accession="P32874",
+                recommended_name="fake HFA1",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("6.4.1.2",),
+            ),
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="fake ACC1",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("6.4.1.2",),
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-acc1-hfa1", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 2
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 2
+    assert not any(
+        item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        for item in result.unresolved_frontier
+    )
+    # The broad 13-candidate EC search this reaction would previously have triggered
+    # never happened -- direct evidence handled the whole reaction.
+    assert not any(
+        call[0] == "search" and str(call[1][0]).startswith("ec:") for call in uniprot.calls
+    )
+
+
+# --- complex-ambiguity negative test (Step 43) ---------------------------------------------------
+
+
+def test_c2_group_entry_never_fabricates_independent_catalysts_or_a_complex(
+    db_session: Session,
+) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YAAA",), reaction_ids=()),
+            FakeKgmlEntrySpec(entry_type="gene", names=("YBBB",), reaction_ids=()),
+            FakeKgmlEntrySpec(
+                entry_type="group",
+                reaction_ids=("R00742",),
+                component_ids=("100", "101"),
+            ),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YAAA": make_sgd_locus(sgd_id="S1", systematic_name="YAAA", standard_name="AAA"),
+            "YBBB": make_sgd_locus(sgd_id="S2", systematic_name="YBBB", standard_name="BBB"),
+        }
+    )
+    uniprot = FakeUniProtConnector(entries={})
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-group-ambiguous", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    assert result.agent1_knowledge_package.proteins == ()
+    # No EnzymeComplex was ever created (this package has no code path that could).
+    unresolved = [
+        item
+        for item in result.unresolved_frontier
+        if item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        and "group" in (item.notes or "")
+    ]
+    assert len(unresolved) == 1
+    # Neither gene was ever queried against SGD -- group semantics block the attempt entirely.
+    assert sgd.calls == []
+
+
+# --- ortholog-only negative test (Step 44) -------------------------------------------------------
+
+
+def test_c2_ortholog_only_entry_never_fabricates_gene_or_protein(db_session: Session) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="ortholog", names=("K00665",), reaction_ids=("R00742",)),
+        ),
+        ec_by_reaction={"R00742": ("2.3.1.86",)},
+    )
+    sgd = FakeSgdConnector(loci={})
+    uniprot = FakeUniProtConnector(entries={})
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-ortholog-only", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.proteins == ()
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    # No SGD call was ever made from a bare KO id -- an ortholog is never treated as
+    # organism-specific gene evidence. The EC fallback *did* still run (no direct
+    # evidence existed for this reaction) and found nothing either.
+    assert sgd.calls == []
+    assert any(call[0] == "search" for call in uniprot.calls)
+
+
+# --- EC-only ambiguity negative test (Step 45, C.1 regression) -----------------------------------
+
+
+def test_c2_ec_only_reaction_still_never_fabricates_an_association(db_session: Session) -> None:
+    """No KGML gene/ortholog entry exists for this reaction at all -- pure EC
+    fallback, exactly like Increment C.1 -- multiple organism-scoped candidates must
+    still never be resolved arbitrarily."""
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("6.4.1.2",)})
+    uniprot = FakeUniProtConnector(
+        entries={
+            "6.4.1.2": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="fake ACC1",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+    uniprot.entries["ec:6.4.1.2"] = make_uniprot_entry(
+        accession="P32874",
+        recommended_name="fake HFA1",
+        gene_names=("HFA1",),
+        organism_name="Saccharomyces cerevisiae",
+        ec_numbers=("6.4.1.2",),
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-ec-only-ambiguous", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    assert any(
+        item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        for item in result.unresolved_frontier
+    )
+
+
+# --- direct evidence versus broad EC (Step 46 -- one of C.2's most important tests) --------------
+
+
+def test_c2_direct_evidence_is_not_diluted_by_broad_ec_candidates(db_session: Session) -> None:
+    """Direct KGML gene evidence names exactly one gene, resolving to P1. The same
+    reaction's EC number would, if queried broadly, surface P1/P2/P3/P4 -- but
+    because direct evidence exists, the EC fallback never even runs for this
+    reaction, so P2/P3/P4 are never fetched, never resolved, never associated."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        ),
+        ec_by_reaction={"R00742": ("2.3.1.86",)},
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P1",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+            ),
+        }
+    )
+    # The broad-EC candidates that would exist if this reaction's EC were queried --
+    # never actually queried, so these three are never even fetched by the fake.
+    uniprot.entries["ec:2.3.1.86"] = make_uniprot_entry(
+        accession="P2",
+        recommended_name="fake P2",
+        gene_names=("P2GENE",),
+        organism_name="Saccharomyces cerevisiae",
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-direct-vs-ec", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 1
+    assert proteins[0].uniprot_id == "P1"
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert not any(call[0] == "search" and "ec:" in str(call[1][0]) for call in uniprot.calls)
+
+
+# --- multi-EC tests (Step 47) ---------------------------------------------------------------------
+
+
+def test_c2_multiple_valid_ecs_query_each_independently(db_session: Session) -> None:
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("1.1.1.1", "2.2.2.2")})
+    uniprot = FakeUniProtConnector(
+        entries={
+            "1.1.1.1": make_uniprot_entry(
+                accession="PA",
+                recommended_name="fake A",
+                gene_names=("GENEA",),
+                organism_name="Saccharomyces cerevisiae",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(request_id="req-c2-multi-ec", seed_entity_texts=(), include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    ec_queries = {call[1][0] for call in uniprot.calls if call[0] == "search"}
+    assert any(q.startswith("ec:1.1.1.1") for q in ec_queries)
+    assert any(q.startswith("ec:2.2.2.2") for q in ec_queries)
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert result.agent1_knowledge_package.proteins[0].uniprot_id == "PA"
+
+
+def test_c2_duplicate_ecs_are_deduplicated(db_session: Session) -> None:
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("1.1.1.1", "1.1.1.1")})
+    uniprot = FakeUniProtConnector(entries={})
+
+    execute_pathway_curation(
+        _c2_request(request_id="req-c2-dup-ec", seed_entity_texts=(), include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    ec_queries = [call[1][0] for call in uniprot.calls if call[0] == "search"]
+    assert sum(1 for q in ec_queries if q.startswith("ec:1.1.1.1")) == 1
+
+
+def test_c2_one_ec_resolves_one_does_not(db_session: Session) -> None:
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("1.1.1.1", "9.9.9.9")})
+    uniprot = FakeUniProtConnector(
+        entries={
+            "1.1.1.1": make_uniprot_entry(
+                accession="PA",
+                recommended_name="fake A",
+                gene_names=("GENEA",),
+                organism_name="Saccharomyces cerevisiae",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-partial-ec", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert result.agent1_knowledge_package.proteins[0].uniprot_id == "PA"
+
+
+def test_c2_both_ecs_returning_same_protein_are_deduplicated(db_session: Session) -> None:
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("1.1.1.1", "2.2.2.2")})
+    shared = make_uniprot_entry(
+        accession="PSHARED",
+        recommended_name="fake shared",
+        gene_names=("SHARED",),
+        organism_name="Saccharomyces cerevisiae",
+    )
+    uniprot = FakeUniProtConnector(entries={"1.1.1.1": shared, "2.2.2.2": shared})
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-same-protein", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+
+
+def test_c2_conflicting_ec_candidate_sets_preserve_ambiguity(db_session: Session) -> None:
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("1.1.1.1", "2.2.2.2")})
+    uniprot = FakeUniProtConnector(
+        entries={
+            "1.1.1.1": make_uniprot_entry(
+                accession="PA",
+                recommended_name="fake A",
+                gene_names=("GENEA",),
+                organism_name="Saccharomyces cerevisiae",
+            ),
+            "2.2.2.2": make_uniprot_entry(
+                accession="PB",
+                recommended_name="fake B",
+                gene_names=("GENEB",),
+                organism_name="Saccharomyces cerevisiae",
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-conflicting-ec", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    assert any(
+        item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        for item in result.unresolved_frontier
+    )
+
+
+def test_c2_wildcard_ec_is_never_queried(db_session: Session) -> None:
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("1.3.1.-",)})
+    uniprot = FakeUniProtConnector(entries={})
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-wildcard-ec", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert uniprot.calls == []
+    unresolved = [
+        item
+        for item in result.unresolved_frontier
+        if item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        and "wildcard" in (item.notes or "")
+    ]
+    assert len(unresolved) == 1
+
+
+def test_c2_partial_wildcard_alongside_a_real_ec_still_queries_the_real_one(
+    db_session: Session,
+) -> None:
+    kegg = _c2_kegg(ec_by_reaction={"R00742": ("1.3.1.-", "1.1.1.1")})
+    uniprot = FakeUniProtConnector(
+        entries={
+            "1.1.1.1": make_uniprot_entry(
+                accession="PA",
+                recommended_name="fake A",
+                gene_names=("GENEA",),
+                organism_name="Saccharomyces cerevisiae",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-mixed-wildcard", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert not any(call[0] == "search" and "1.3.1.-" in str(call[1][0]) for call in uniprot.calls)
+
+
+# --- seedless autonomous catalyst test (Step 48) --------------------------------------------------
+
+
+def test_c2_direct_catalyst_resolution_requires_no_seed(db_session: Session) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P1",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(request_id="req-c2-no-seed", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, pubmed=FakePubMedConnector()
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+
+
+# --- idempotency (Step 50) ------------------------------------------------------------------------
+
+
+def test_c2_repeated_execution_does_not_duplicate_direct_catalysts(db_session: Session) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P1",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+            )
+        }
+    )
+    request = _c2_request(
+        request_id="req-c2-idempotency", seed_entity_texts=(), include_publications=False
+    )
+    connectors = PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot)
+
+    first = execute_pathway_curation(request, session=db_session, connectors=connectors)
+    db_session.flush()
+    second = execute_pathway_curation(request, session=db_session, connectors=connectors)
+
+    assert len(first.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert len(second.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert (
+        first.agent1_knowledge_package.reaction_enzyme_associations
+        == second.agent1_knowledge_package.reaction_enzyme_associations
+    )
+    assert len(second.agent1_knowledge_package.proteins) == 1
+
+
+# --- provenance (Step 51) -------------------------------------------------------------------------
+
+
+def test_c2_direct_catalyst_provenance_traceable_via_queries_executed(db_session: Session) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P1",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-provenance", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    queries = result.queries_executed
+    assert any("direct-catalyst-context" in q for q in queries)
+    assert any("direct KGML" in q and "YER061C" in q for q in queries)
+    assert any("associate direct KGML catalyst" in q for q in queries)
+
+
+# --- source failure (Step 52) ---------------------------------------------------------------------
+
+
+def test_c2_catalyst_context_failure_never_blocks_structural_reaction_processing(
+    db_session: Session,
+) -> None:
+    @dataclass
+    class _RaisingCatalystContextKeggConnector(FakeKeggConnector):
+        def get_kgml(self, pathway_id: str) -> str | None:
+            self.calls.append(("get_kgml", (pathway_id,)))
+            if self.calls.count(("get_kgml", (pathway_id,))) == 1:
+                return super(  # noqa: UP008 -- explicit dataclass-subclass super() call
+                    _RaisingCatalystContextKeggConnector, self
+                ).get_kgml(pathway_id)
+            raise ConnectorError("KGML endpoint unreachable for catalyst-context retrieval")
+
+    kegg = _RaisingCatalystContextKeggConnector(
+        pathways={"sce00061": "fatty acid biosynthesis"},
+        pathway_reactions={"sce00061": ()},
+        kgml_reactions={"sce00061": ("R00742",)},
+        reactions={"R00742": make_kegg_reaction("R00742", name="fake reaction R00742")},
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-context-failure", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    # Structural reaction curation is unaffected by the catalyst-context failure.
+    assert len(result.discovered_reaction_ids) == 1
+    assert any(
+        item.reason is FrontierReason.SOURCE_FAILURE and "catalyst-context" in item.frontier_id
+        for item in result.unresolved_frontier
+    )
+
+
+# --- direct-gene-resolution failure (Step 53) -----------------------------------------------------
+
+
+def test_c2_unresolvable_direct_gene_is_disclosed_never_replaced_by_ec_match(
+    db_session: Session,
+) -> None:
+    """KGML names a real gene id, but neither SGD nor UniProt can resolve it. Even
+    though the reaction's own EC number would, if queried, surface a real candidate,
+    the EC fallback must never run for this reaction -- the failed direct evidence is
+    disclosed as unresolved, never silently replaced."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YUNKNOWN",), reaction_ids=("R00742",)),
+        ),
+        ec_by_reaction={"R00742": ("6.4.1.2",)},
+    )
+    sgd = FakeSgdConnector(loci={})  # YUNKNOWN never resolves
+    uniprot = FakeUniProtConnector(
+        entries={
+            "6.4.1.2": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="fake ACC1",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-unresolvable-gene", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    assert result.agent1_knowledge_package.proteins == ()
+    assert not any(call[0] == "search" and "ec:" in str(call[1][0]) for call in uniprot.calls)
+    unresolved = [
+        item
+        for item in result.unresolved_frontier
+        if item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        and item.entity_text == "YUNKNOWN"
+    ]
+    assert len(unresolved) == 1
+
+
+# --- contradictory evidence disclosure (Step 54) -----------------------------------------------
+
+
+def test_c2_ec_contradiction_is_disclosed_but_association_still_persists(
+    db_session: Session,
+) -> None:
+    """Direct KGML gene evidence resolves to a protein whose own curated EC number
+    shares nothing with the reaction's own EC annotation -- a genuine contradiction,
+    disclosed via a warning, but the direct reaction->gene evidence still wins (the
+    association is still persisted, never silently dropped for either source)."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        ),
+        ec_by_reaction={"R00742": ("2.3.1.86",)},
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P1",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("9.9.9.9",),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c2-ec-contradiction", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert any("share no value" in warning for warning in result.warnings)

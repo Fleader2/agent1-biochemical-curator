@@ -695,6 +695,16 @@ that type is `app.pathway_curation`-only, attached only to
 `PathwayCurationResult` (this package's own result type), never part of
 the `Agent1KnowledgePackage`/`Agent1CuratedKnowledgeView` contract at all.
 
+**Increment C.2 bumps it to `"pathway-curation-v1.2"`.** Catalyst-discovery
+precedence materially changes: direct organism-specific KGML reaction->gene
+evidence is now tried first and, when present, entirely preempts the
+EC-based search (§47) -- a released, observable behavior change from this
+package's own public contract, exactly like C.1's own F1/F2/F4/F6 bumps
+above. `AGENT1_CONTRACT_VERSION` is unchanged for the same reason C.1's own
+bump-analysis gives: `ReactionEnzyme` rows flow through the existing,
+unmodified `Agent1KnowledgePackage.reaction_enzyme_associations` field --
+more real rows populating an already-existing field, never a new one.
+
 ## 34. Auditability
 
 `PathwayCurationResult` is the complete, auditable outcome of one run:
@@ -942,6 +952,33 @@ with zero reactions from either mechanism still produces the F9
 `PATHWAY_REACTION_MEMBERSHIP_EMPTY` block; and a synthetic, non-yeast
 organism-prefixed id (`xyz00061`) exercises the identical code path,
 proving no organism code is special-cased.
+
+**Increment C.2's organism-specific catalyst resolution** (§47) added:
+`tests/connectors/test_kegg.py` gained 13 tests for `parse_kgml_entries`/
+`KeggKgmlEntry` (one gene/one reaction, multiple genes at one entry,
+multiple reactions on one gene entry, an ortholog entry, gene and ortholog
+entries together, a reaction with no catalyst-associated entry at all, a
+`type="group"` entry with `<component>` children, duplicate-identifier
+deduplication, stable ordering, malformed XML, missing attributes,
+unrelated entry types preserved unfiltered, and an empty document).
+`test_executor.py` gained a 19-test C.2 section: one direct gene resolving
+to a `ReactionEnzyme`; the ACC1/HFA1 regression (two explicitly-named genes
+both persisted independently, never collapsed and never expanded into a
+13-candidate EC ambiguity); a `type="group"` entry never fabricating
+independent catalysts or a complex; an ortholog-only entry never fabricating
+a Gene/Protein; the pre-existing EC-only ambiguity regression (still
+conservative); direct evidence never diluted by what a broad EC search
+would otherwise surface; six multi-EC scenarios (independent per-EC
+queries, duplicate-EC dedup, one-resolves-one-fails, both-ECs-same-protein
+dedup, conflicting candidate sets staying ambiguous, wildcard ECs never
+queried, a wildcard alongside a real EC still querying the real one); a
+seedless autonomous resolution test; an idempotency test (repeated
+execution, zero duplicate `ReactionEnzyme`/`Protein` rows); a provenance
+test (`queries_executed` traces context->gene->protein->association);
+catalyst-context retrieval failure never blocking structural reaction
+processing; an unresolvable direct gene disclosed rather than silently
+replaced by an EC-matched substitute; and an EC contradiction disclosed via
+a warning while the direct-evidence association still persists.
 
 ## 39. Increment C.1 — Live Pathway Discovery Repair
 
@@ -1233,7 +1270,128 @@ already-uncommitted C.1 increment §33 introduced, not a new behavioral
 generation. `AGENT1_CONTRACT_VERSION` is unchanged: the Agent 1 -> Agent 2
 handoff schema itself gained no new field.
 
-## 47. Final architectural rule
+## 47. Increment C.2 — Organism-specific catalyst resolution
+
+Real Integration Pilot 1 Run 3 (full-budget structural completion, §46's own
+KGML mechanism at scale) reached 38 structurally curated reactions and
+**zero** `ReactionEnzyme` associations. The cause: catalyst discovery's only
+route (§42, F2) was a broad EC-number search against UniProt, and every
+EC-annotation group either surfaced too many organism-scoped candidates to
+choose among safely (5-18 for `6.4.1.2`/`2.3.1.86`-shaped annotations) or,
+for a genuine, separate reason, surfaced none at all (six annotation groups
+carrying **two or more** whitespace-separated EC numbers -- confirmed live
+to reliably return zero UniProt candidates, because the entire multi-EC
+string was sent as one invalid query clause). Increment C.2 addresses both:
+a stronger evidence path that avoids needing the broad EC search at all for
+most reactions, and a fix to that search's own query construction for when
+it must still run.
+
+**The stronger evidence path**: an organism-specific KEGG pathway's KGML
+diagram (already the source of §46's own reaction membership) also draws
+`type="gene"` diagram nodes that directly, explicitly associate one or more
+organism-specific KEGG gene ids with a specific reaction -- confirmed live
+on `sce00061` to exist for **every one of its 41 reactions**, tracing to
+exactly its own 13 `GENE`-field genes. `app.connectors.kegg.parse_kgml_entries`
+parses every `<entry>` element in a KGML document (a lower-level, more
+general counterpart to §46's `parse_kgml_reaction_ids`, which reads a
+different, top-level element); `app.pathway_curation.strategies
+.discover_catalyst_context` turns that into `KgmlCatalystContext` --
+`direct_gene_evidence` (from `type="gene"` entries only) and
+`complex_flagged_reaction_ids` (from `type="group"` entries, see below).
+
+**Gene and Protein resolution reuse existing machinery unchanged.** A KEGG
+organism-specific gene id (e.g. `YER061C`) is, for *S. cerevisiae*, already
+the same systematic ORF/locus-tag text SGD's own search accepts --
+`strategies.resolve_gene_by_kegg_gene_id` is a thin, documented reuse of
+`resolve_gene_by_text` with that id as the query, and once a Gene resolves,
+its own `symbol` (falling back to `systematic_name`) becomes the UniProt
+query text for `resolve_protein_by_text`, unmodified. Nothing about Gene/
+Protein normalization, lookup, or persistence changed at all.
+
+**Precedence, enforced in `executor._resolve_direct_catalysts_from_kgml`,
+called before the pre-existing EC fallback every iteration**: a reaction
+with direct KGML gene evidence is handled from that evidence alone -- the
+broad EC search never even runs for it, successful or not (a failed direct
+gene/protein resolution is disclosed as `REACTION_CATALYST_UNRESOLVED`,
+never silently replaced by an EC-matched substitute). `executor
+._discover_catalysts_from_reactions` (the EC fallback) now takes a
+`skip_kegg_reaction_ids` set populated by exactly that function, and remains
+otherwise unchanged in spirit: still tried only for reactions with no direct
+evidence, still conservative about ambiguity (§26 below).
+
+**Multiple genes at one entry are not automatically ambiguity.** KGML's own
+`type="gene"` entry may list more than one gene in its `name` attribute at
+one diagram position (confirmed live: `sce00061`'s own ACC1/HFA1 entry for
+`R00742`) -- this is KEGG's documented syntax for alternative/isozyme gene
+products at that position, structurally distinct from its separate
+`type="group"`/`<component>` mechanism for representing an explicit,
+multi-node visual complex. Both genes are resolved independently, and both
+may receive their own `ReactionEnzyme` row -- `app.models.reaction
+.ReactionEnzyme`'s own uniqueness constraint is per `(reaction_id,
+protein_id)` pair, not per reaction, so this required no model change. A
+`type="group"` entry's own reaction id(s), by contrast, are never treated as
+gene evidence at all: KGML's group/component structure does not by itself
+establish whether the grouped entities are independent isozymes or obligate
+complex subunits, this package still never creates an `EnzymeComplex`
+(§37/§45, unchanged), and the reaction is disclosed as unresolved catalyst
+context rather than guessing either interpretation. *Diagnostic-only, never
+hardcoded*: `sce00061` has zero `type="group"` entries -- FAS1/FAS2's own
+entry (`R05190`) uses the plain multi-name syntax, same as ACC1/HFA1, so
+this package's own general rule (not any FAS-specific one) would associate
+both as independent catalysts if that reaction's own participants had
+resolved fully (they do not -- §46's already-disclosed `R05190`
+polymer-notation gap is unrelated and untouched by C.2).
+
+**Orthologs are never organism-specific genes.** A `type="ortholog"` entry
+(a cross-organism orthology-group id, KO) never populates
+`direct_gene_evidence` -- Step 14's own principle, reflected directly in
+`discover_catalyst_context`'s type check. A reaction whose only
+KGML-associated entry is an ortholog produces no direct evidence at all;
+the EC fallback remains available for it, unchanged.
+
+**The multi-EC query fix**: `Reaction.ec_number` may itself be a single,
+whitespace-separated multi-value string (KEGG's own `ENZYME` field
+convention, verified against `app.normalization.reaction
+.reaction_identity_from_kegg`'s own docstring). `strategies.split_ec_numbers`
+splits it into distinct tokens; `strategies.is_fully_classified_ec` excludes
+wildcard/partial ones (`"1.3.1.-"`) from ever being queried at all (UniProt's
+`ec:` clause has no documented wildcard syntax, and this package never
+broadens a wildcard into a guessed full EC number); each remaining token is
+queried independently
+(`strategies.discover_catalyst_candidates_for_one_ec`, with its own
+EC-token-level cache so two reactions sharing one EC number never re-query
+it); the resulting raw candidate pools are merged and deduplicated by
+UniProt accession before being classified exactly once
+(`strategies.classify_and_persist_protein_candidates`) -- never once per EC,
+which would treat two ECs on the same reaction as unrelated searches. EC
+equality alone still never establishes a `ReactionEnzyme` by itself (§26 of
+the Increment C.2 instructions; unchanged, and covered by a dedicated
+regression test).
+
+**Contradictory evidence is disclosed, never silently resolved either way.**
+When direct KGML gene evidence resolves to a protein whose own curated EC
+number(s) share nothing at all with the reaction's own EC annotation,
+`executor._check_direct_catalyst_ec_contradiction` records a warning -- the
+association is still persisted (direct reaction->gene evidence outranks a
+generic EC-agreement check), and the disclosure exists so a human reviewer
+can investigate, not to block either source.
+
+**Non-goals, unchanged by this increment**: `R07762`/`R07763`'s missing
+`NAME`, `R02768`'s name collision, `R05190`'s polymer stoichiometry,
+enzyme-complex construction, F5's publication-export gap, regulation/
+enzyme-state discovery, and Pilot 1 Run 4 are all explicitly out of scope
+and untouched.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to
+`"pathway-curation-v1.2"` -- catalyst-discovery precedence materially
+changed (direct KGML gene evidence now runs before, and can entirely
+preempt, the EC-based search), exactly the bumping criterion §33 states.
+`AGENT1_CONTRACT_VERSION` is unchanged: `ReactionEnzyme` associations flow
+through the existing, unmodified `Agent1KnowledgePackage`/
+`Agent1CuratedKnowledgeView` export chain -- more rows populate an existing
+field, not a new one.
+
+## 48. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

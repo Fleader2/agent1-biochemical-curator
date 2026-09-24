@@ -29,12 +29,14 @@ from app.connectors.kegg import (
     KeggCompoundRecord,
     KeggConnector,
     KeggFlatFileRecord,
+    KeggKgmlEntry,
     KeggLinkEntry,
     KeggReactionRecord,
     normalize_compound,
     normalize_reaction,
     parse_find_response,
     parse_flat_file,
+    parse_kgml_entries,
     parse_kgml_reaction_ids,
     parse_link_response,
     split_kegg_identifier,
@@ -596,3 +598,152 @@ def test_parse_kgml_reaction_ids_no_reaction_elements_is_a_legitimate_empty_resu
 def test_parse_kgml_reaction_ids_malformed_xml_raises() -> None:
     with pytest.raises(ConnectorParseError):
         parse_kgml_reaction_ids("<pathway><reaction not even closed")
+
+
+# --- parse_kgml_entries() / KeggKgmlEntry (Increment C.2, organism-specific -------------------
+# catalyst resolution) ---------------------------------------------------------------------------
+
+
+def test_parse_kgml_entries_one_gene_one_reaction() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="1" name="sce:YER061C" type="gene" reaction="rn:R07762"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert entries == (
+        KeggKgmlEntry(
+            entry_id="1", entry_type="gene", names=("YER061C",), reaction_ids=("R07762",)
+        ),
+    )
+
+
+def test_parse_kgml_entries_one_reaction_multiple_organism_specific_genes() -> None:
+    """A single entry's ``name`` attribute may list more than one organism-specific
+    gene id at one diagram position -- confirmed live on ``sce00061`` (ACC1/HFA1 at
+    reaction R00742) -- every one is preserved, never just the first."""
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="161" name="sce:YMR207C sce:YNR016C" type="gene" reaction="rn:R00742"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert entries[0].names == ("YMR207C", "YNR016C")
+    assert entries[0].reaction_ids == ("R00742",)
+
+
+def test_parse_kgml_entries_one_gene_entry_multiple_reaction_ids() -> None:
+    """A gene entry's own ``reaction`` attribute may likewise list more than one
+    reaction id -- confirmed live (e.g. one gene catalyzing several elongation-cycle
+    steps); every one is preserved."""
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="5" name="sce:YKL182W" type="gene" reaction="rn:R04968 rn:R04726"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert entries[0].reaction_ids == ("R04968", "R04726")
+
+
+def test_parse_kgml_entries_ortholog_entry_associated_with_reaction() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="9" name="ko:K00665" type="ortholog" reaction="rn:R01706"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert entries == (
+        KeggKgmlEntry(
+            entry_id="9", entry_type="ortholog", names=("K00665",), reaction_ids=("R01706",)
+        ),
+    )
+
+
+def test_parse_kgml_entries_gene_and_ortholog_entries_in_same_document() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="1" name="sce:YER061C" type="gene" reaction="rn:R07762"/>'
+        '<entry id="2" name="ko:K00665" type="ortholog" reaction="rn:R01706"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert len(entries) == 2
+    assert entries[0].entry_type == "gene"
+    assert entries[1].entry_type == "ortholog"
+
+
+def test_parse_kgml_entries_reaction_with_no_catalyst_associated_entry() -> None:
+    """A top-level ``<reaction>`` element with no corresponding gene/ortholog
+    ``<entry>`` at all is not this parser's concern -- it simply returns whatever
+    entries the document actually has (here: none), never inventing one."""
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<reaction id="1" name="rn:R05190" type="irreversible"/>'
+        "</pathway>"
+    )
+    assert parse_kgml_entries(xml_text) == ()
+
+
+def test_parse_kgml_entries_group_entry_with_components() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="10" name="sce:YAAA" type="gene"/>'
+        '<entry id="11" name="sce:YBBB" type="gene"/>'
+        '<entry id="12" name="undefined" type="group" reaction="rn:R99999">'
+        '<component id="10"/><component id="11"/>'
+        "</entry>"
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    group = next(e for e in entries if e.entry_type == "group")
+    assert group.component_ids == ("10", "11")
+    assert group.reaction_ids == ("R99999",)
+
+
+def test_parse_kgml_entries_duplicate_identifiers_are_deduplicated() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="1" name="sce:YER061C sce:YER061C" type="gene" reaction="rn:R07762 rn:R07762"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert entries[0].names == ("YER061C",)
+    assert entries[0].reaction_ids == ("R07762",)
+
+
+def test_parse_kgml_entries_stable_ordering() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="3" name="sce:YCCC" type="gene" reaction="rn:R00003"/>'
+        '<entry id="1" name="sce:YAAA" type="gene" reaction="rn:R00001"/>'
+        '<entry id="2" name="sce:YBBB" type="gene" reaction="rn:R00002"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert [e.entry_id for e in entries] == ["3", "1", "2"]
+
+
+def test_parse_kgml_entries_malformed_xml_raises() -> None:
+    with pytest.raises(ConnectorParseError):
+        parse_kgml_entries("<pathway><entry not even closed")
+
+
+def test_parse_kgml_entries_missing_attributes_default_to_empty() -> None:
+    xml_text = '<pathway name="path:sce00061"><entry id="1"/></pathway>'
+    entries = parse_kgml_entries(xml_text)
+    assert entries == (KeggKgmlEntry(entry_id="1", entry_type="", names=()),)
+
+
+def test_parse_kgml_entries_unrelated_entry_types_preserved_unfiltered() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<entry id="1" name="cpd:C00024" type="compound"/>'
+        '<entry id="2" name="path:map00010" type="map"/>'
+        "</pathway>"
+    )
+    entries = parse_kgml_entries(xml_text)
+    assert [e.entry_type for e in entries] == ["compound", "map"]
+
+
+def test_parse_kgml_entries_empty_kgml_document() -> None:
+    assert parse_kgml_entries('<pathway name="path:sce00061"></pathway>') == ()

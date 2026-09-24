@@ -265,6 +265,99 @@ def parse_kgml_reaction_ids(xml_text: str) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+@dataclass(frozen=True, slots=True)
+class KeggKgmlEntry:
+    """One KGML ``<entry>`` element's own structural fields, exactly as declared --
+    no biological interpretation (Increment C.2: whether a "gene" entry is usable
+    catalyst evidence, whether an "ortholog" entry is not, and whether a "group" entry
+    represents an unresolvable complex are all pathway-curation *policy* decisions,
+    never made here -- see ``app.pathway_curation.strategies.discover_catalyst_context``).
+
+    This is a lower-level, more general counterpart to ``parse_kgml_reaction_ids``:
+    that function reads the document's separate, top-level ``<reaction>`` elements
+    (the reaction-node/participant list); this one reads ``<entry>`` elements (the
+    diagram's own gene/ortholog/compound/map/group *nodes*), which cross-reference
+    reactions via their own ``reaction`` attribute -- confirmed live to be a distinct
+    but consistent set of ids (Increment C.2 investigation: every gene-bearing entry's
+    own ``reaction`` attribute value already appears among ``parse_kgml_reaction_ids``'s
+    own output for the same document).
+
+    ``entry_id`` -- this entry's own KGML-local id (unique within one document;
+    referenced by a ``type="group"`` entry's own ``<component id="...">`` children).
+    ``entry_type`` -- KEGG's own ``type`` attribute, verbatim (``"gene"``,
+    ``"ortholog"``, ``"group"``, ``"compound"``, ``"map"``, or any other value KEGG
+    reports -- never filtered or validated against a known set here).
+    ``names`` -- every space-separated, database-prefix-stripped token in this
+    entry's own ``name`` attribute, deduplicated, order-preserved -- for a
+    ``type="gene"`` entry, one or more organism-specific KEGG gene ids (e.g.
+    ``"sce:YMR207C"`` -> ``"YMR207C"``); for ``type="ortholog"``, one or more bare KO
+    ids; for any other type, whatever KEGG's own name grammar puts there, unfiltered.
+    ``reaction_ids`` -- every space-separated, ``"rn:"``-prefix-stripped token in this
+    entry's own ``reaction`` attribute, or ``()`` when the entry carries no such
+    attribute at all (true of most ``compound``/``map`` entries).
+    ``component_ids`` -- this entry's own ``<component id="...">`` children's ids, or
+    ``()`` for any entry that has none (true of every entry that is not a populated
+    ``type="group"`` node).
+    """
+
+    entry_id: str
+    entry_type: str
+    names: tuple[str, ...]
+    reaction_ids: tuple[str, ...] = ()
+    component_ids: tuple[str, ...] = ()
+
+
+def _dedup_stripped_tokens(attr_value: str) -> tuple[str, ...]:
+    """Split a whitespace-separated KGML attribute value, strip each token's
+    database prefix, drop anything left blank, and deduplicate order-preservingly."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in attr_value.split():
+        _, bare = split_kegg_identifier(token)
+        if bare and bare not in seen:
+            seen.add(bare)
+            ordered.append(bare)
+    return tuple(ordered)
+
+
+def parse_kgml_entries(xml_text: str) -> tuple[KeggKgmlEntry, ...]:
+    """Parse every ``<entry>`` element in a KGML pathway document (Increment C.2).
+
+    Every entry is returned, in document order, regardless of its ``type`` or
+    whether it carries a ``reaction`` attribute at all -- filtering by type/relevance
+    to catalyst evidence is pathway-curation policy, never this connector's job (see
+    ``KeggKgmlEntry``'s own docstring, and the Increment C.2 instructions, Step 38:
+    "the connector ... should not decide ... whether a gene is the biological
+    catalyst"). An ``id``/``type``/``name`` attribute KEGG omits is treated as an
+    empty string, never invented -- this parser is lenient about *which* attributes
+    one entry happens to carry, but never lenient about the document's own
+    well-formedness: malformed (non-well-formed) XML still raises
+    ``ConnectorParseError``, exactly like ``parse_kgml_reaction_ids``.
+    """
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError as exc:
+        raise ConnectorParseError(f"malformed KEGG KGML document: {exc}") from exc
+
+    entries: list[KeggKgmlEntry] = []
+    for entry_element in root.findall("entry"):
+        component_ids = tuple(
+            component_id
+            for component in entry_element.findall("component")
+            if (component_id := component.get("id"))
+        )
+        entries.append(
+            KeggKgmlEntry(
+                entry_id=entry_element.get("id", ""),
+                entry_type=entry_element.get("type", ""),
+                names=_dedup_stripped_tokens(entry_element.get("name", "")),
+                reaction_ids=_dedup_stripped_tokens(entry_element.get("reaction", "")),
+                component_ids=component_ids,
+            )
+        )
+    return tuple(entries)
+
+
 def parse_flat_file(text: str) -> KeggFlatFileRecord:
     """Parse a KEGG ``get`` flat-file response into its fields.
 
@@ -481,6 +574,7 @@ __all__ = [
     "KeggCompoundRecord",
     "KeggConnector",
     "KeggFlatFileRecord",
+    "KeggKgmlEntry",
     "KeggLinkEntry",
     "KeggReactionRecord",
     "KeggSearchHit",
@@ -488,6 +582,7 @@ __all__ = [
     "normalize_reaction",
     "parse_find_response",
     "parse_flat_file",
+    "parse_kgml_entries",
     "parse_kgml_reaction_ids",
     "parse_link_response",
     "split_kegg_identifier",

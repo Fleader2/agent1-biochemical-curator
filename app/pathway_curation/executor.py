@@ -152,7 +152,11 @@ def execute_pathway_curation(
     pending_reaction_ids: list[str] = []
     resolved_protein_ec_numbers: list[tuple[UUID, str]] = []
     compound_cache: dict[str, UUID | None] = {}
+    direct_catalyst_cache: dict[str, UUID | None] = {}
+    handled_kegg_reaction_ids: set[str] = set()
     pathway_discovered = False
+    resolved_pathway_id: str | None = None
+    catalyst_context: strategies.KgmlCatalystContext | None = None
 
     for iteration_number in range(1, effective_request.max_iterations + 1):
         if state.connector_calls_made >= effective_request.max_connector_calls:
@@ -165,7 +169,7 @@ def execute_pathway_curation(
         steps_executed: list[str] = []
 
         if iteration_number == 1:
-            _discover_pathway_and_reactions(
+            resolved_pathway_id = _discover_pathway_and_reactions(
                 effective_request,
                 connectors=connectors,
                 state=state,
@@ -174,6 +178,12 @@ def execute_pathway_curation(
             steps_executed.append("discover-pathway")
             steps_executed.append("discover-reactions")
             pathway_discovered = True
+
+            if resolved_pathway_id is not None:
+                catalyst_context = _discover_direct_catalyst_context(
+                    resolved_pathway_id, connectors=connectors, state=state
+                )
+                steps_executed.append("discover-catalyst-context")
 
             if effective_request.include_regulation or effective_request.include_enzyme_states:
                 _record_regulation_not_supported(effective_request, state=state)
@@ -207,6 +217,29 @@ def execute_pathway_curation(
         if pending_reaction_ids or (iteration_number == 1 and pathway_discovered):
             steps_executed.append("resolve-reactions")
 
+        if (
+            catalyst_context is not None
+            and connectors.sgd is not None
+            and connectors.uniprot is not None
+            and state.discovered_reaction_ids
+        ):
+            _resolve_direct_catalysts_from_kgml(
+                catalyst_context=catalyst_context,
+                pathway_id=resolved_pathway_id,
+                connectors=connectors,
+                organism_id=organism_id,
+                organism_text=effective_request.organism_text,
+                gene_lookup=gene_lookup,
+                protein_lookup=protein_lookup,
+                reaction_enzyme_lookup=reaction_enzyme_lookup,
+                session=session,
+                state=state,
+                discovered_reaction_ids=state.discovered_reaction_ids,
+                direct_catalyst_cache=direct_catalyst_cache,
+                handled_kegg_reaction_ids=handled_kegg_reaction_ids,
+            )
+            steps_executed.append("discover-direct-catalysts-from-kgml")
+
         if connectors.uniprot is not None and state.discovered_reaction_ids:
             _discover_catalysts_from_reactions(
                 connectors=connectors,
@@ -217,6 +250,7 @@ def execute_pathway_curation(
                 state=state,
                 discovered_reaction_ids=state.discovered_reaction_ids,
                 resolved_protein_ec_numbers=resolved_protein_ec_numbers,
+                skip_kegg_reaction_ids=handled_kegg_reaction_ids,
             )
             steps_executed.append("discover-catalysts-from-reactions")
 
@@ -312,8 +346,15 @@ def _discover_pathway_and_reactions(
     connectors: PathwayConnectorBundle,
     state: CurationRunState,
     pending_reaction_ids: list[str],
-) -> None:
+) -> str | None:
     """Resolve one pathway and its reaction membership (Increment C.1 rewrite).
+
+    Returns the resolved structured KEGG pathway id (or ``None`` if resolution never
+    succeeded) -- Increment C.2's own direct-catalyst-evidence discovery needs this
+    same id to fetch that pathway's KGML a second time (see
+    ``_discover_direct_catalyst_context``), and re-resolving it independently there
+    would either duplicate this function's own precedence logic or silently drift
+    from it.
 
     **F4 precedence** (audited via ``queries_executed``/frontier, Step 13/20 of the
     Increment C.1 instructions): ``request.source_pathway_id``, when supplied, is
@@ -347,17 +388,17 @@ def _discover_pathway_and_reactions(
                 notes="no KEGG connector configured -- pathway discovery cannot be attempted",
             )
         )
-        return
+        return None
 
     pathway_id = _resolve_pathway_identity(request, connectors=connectors, state=state)
     if pathway_id is None:
-        return  # a frontier item explaining why was already recorded
+        return None  # a frontier item explaining why was already recorded
 
     link_identity = query_identity(
         connector=SourceType.KEGG, action="discover_reactions", pathway_id=pathway_id
     )
     if state.has_run_query(link_identity):
-        return
+        return pathway_id
     try:
         reaction_ids = strategies.discover_reactions_in_pathway(connectors.kegg, pathway_id)
     except ConnectorError as exc:
@@ -381,7 +422,7 @@ def _discover_pathway_and_reactions(
         state.record_query(
             link_identity, display_text=f"KEGG pathway reaction discovery: {pathway_id}"
         )
-        return
+        return pathway_id
     state.record_connector_call()
     state.record_query(link_identity, display_text=f"KEGG pathway reaction discovery: {pathway_id}")
 
@@ -406,13 +447,15 @@ def _discover_pathway_and_reactions(
                 ),
             )
         )
-        return
+        return pathway_id
 
     excluded = set(request.exclusions)
     for reaction_id in reaction_ids:
         if reaction_id in excluded:
             continue
         pending_reaction_ids.append(reaction_id)
+
+    return pathway_id
 
 
 def _resolve_pathway_identity(
@@ -548,6 +591,399 @@ def _discover_pathway_by_text(
         )
         return None
     return pathway_ids[0]
+
+
+def _discover_direct_catalyst_context(
+    pathway_id: str,
+    *,
+    connectors: PathwayConnectorBundle,
+    state: CurationRunState,
+) -> strategies.KgmlCatalystContext | None:
+    """Fetch one pathway's own direct organism-specific KGML reaction<->gene evidence
+    exactly once per run (Increment C.2) -- called right after
+    ``_discover_pathway_and_reactions`` resolves ``pathway_id`` (iteration 1 only);
+    the caller keeps the returned context for every subsequent iteration rather than
+    re-fetching it.
+
+    A second, explicit ``get_kgml`` call, distinct from ``discover_reactions_in_
+    pathway``'s own -- deliberately not merged into that function (which has its own,
+    already-tested, narrower contract: return this pathway's reaction ids, nothing
+    more) and not cached against it via ``state.has_run_query`` (that mechanism dedupes
+    identical *repeated* queries; this is a second, different question asked of the
+    same document, and its own cost is fully counted via ``state.record_connector_call``
+    like any other). Returns ``None`` for "no connector" or a genuine retrieval
+    failure -- Increment C.2, Step 52: a KGML catalyst-context failure must never
+    destroy already-valid structural reaction curation, so this is reported as its
+    own disclosed gap, never raised past this function.
+    """
+    if connectors.kegg is None:
+        return None
+
+    context_identity = query_identity(
+        connector=SourceType.KEGG, action="discover_catalyst_context", pathway_id=pathway_id
+    )
+    if state.has_run_query(context_identity):
+        return None
+    try:
+        context = strategies.discover_catalyst_context(connectors.kegg, pathway_id)
+    except ConnectorError as exc:
+        state.warn(f"KEGG direct-catalyst-context retrieval failed for {pathway_id}: {exc}")
+        state.add_frontier(
+            CurationFrontierItem(
+                frontier_id=build_frontier_id(
+                    entity_kind=EntityKind.PROTEIN,
+                    reason=FrontierReason.SOURCE_FAILURE,
+                    anchor=f"{pathway_id}:catalyst-context",
+                ),
+                entity_kind=EntityKind.PROTEIN,
+                reason=FrontierReason.SOURCE_FAILURE,
+                priority=3,
+                entity_text=pathway_id,
+                attempted_sources=(SourceType.KEGG,),
+                notes=(
+                    f"{exc} -- structural reaction curation is unaffected; catalyst "
+                    "discovery falls back to the pre-existing EC-based path for every "
+                    "reaction this run discovers"
+                ),
+            )
+        )
+        state.record_connector_call()
+        state.record_query(
+            context_identity, display_text=f"KEGG direct-catalyst-context: {pathway_id}"
+        )
+        return None
+    state.record_connector_call()
+    state.record_query(context_identity, display_text=f"KEGG direct-catalyst-context: {pathway_id}")
+    return context
+
+
+def _resolve_direct_catalysts_from_kgml(
+    *,
+    catalyst_context: strategies.KgmlCatalystContext,
+    pathway_id: str,
+    connectors: PathwayConnectorBundle,
+    organism_id: UUID,
+    organism_text: str,
+    gene_lookup,
+    protein_lookup,
+    reaction_enzyme_lookup,
+    session: Session,
+    state: CurationRunState,
+    discovered_reaction_ids: list[UUID],
+    direct_catalyst_cache: dict[str, UUID | None],
+    handled_kegg_reaction_ids: set[str],
+) -> None:
+    """Resolve catalysts for already-discovered reactions from their own pathway's
+    direct organism-specific KGML gene evidence (Increment C.2) -- **before** any
+    EC-number-based fallback is attempted for them (instructions, Steps 15/16/28: a
+    precise reaction->gene relationship must never be diluted back into a broad
+    EC-search candidate pool).
+
+    Mutates ``handled_kegg_reaction_ids`` in place, adding every ``kegg_reaction_id``
+    this function looked at (whether or not it actually resolved to a persisted
+    ``ReactionEnzyme``) -- ``_discover_catalysts_from_reactions`` (the EC fallback)
+    skips exactly this set. A reaction whose direct evidence *failed* to resolve is
+    still added here and is deliberately never handed to the EC fallback afterward
+    (Step 53: "do not fall through and silently associate a different EC-matching
+    protein as though it were equivalent").
+
+    A reaction associated only with a ``type="group"`` KGML entry (more than one
+    entity explicitly grouped, with no structural signal establishing independent
+    isozymes vs. obligate complex subunits) is disclosed as unresolved catalyst
+    context here and also added to ``handled_kegg_reaction_ids`` -- this package
+    never creates an ``EnzymeComplex`` and never guesses (Step 21).
+    """
+    from app.models.reaction import Reaction as ReactionModel
+
+    if (
+        not catalyst_context.direct_gene_evidence
+        and not catalyst_context.complex_flagged_reaction_ids
+    ):
+        return
+
+    genes_by_reaction: dict[str, list[str]] = {}
+    for item in catalyst_context.direct_gene_evidence:
+        genes_by_reaction.setdefault(item.kegg_reaction_id, []).append(item.kegg_gene_id)
+
+    for reaction_id in discovered_reaction_ids:
+        reaction_row = session.get(ReactionModel, reaction_id)
+        if reaction_row is None or not reaction_row.kegg_reaction_id:
+            continue
+        kegg_reaction_id = reaction_row.kegg_reaction_id
+        if kegg_reaction_id in handled_kegg_reaction_ids:
+            continue
+
+        if kegg_reaction_id in catalyst_context.complex_flagged_reaction_ids:
+            handled_kegg_reaction_ids.add(kegg_reaction_id)
+            frontier_id = build_frontier_id(
+                entity_kind=EntityKind.PROTEIN,
+                reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+                anchor=f"{reaction_id}:complex",
+            )
+            state.add_frontier(
+                CurationFrontierItem(
+                    frontier_id=frontier_id,
+                    entity_kind=EntityKind.PROTEIN,
+                    reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+                    priority=3,
+                    entity_id=reaction_id,
+                    entity_text=kegg_reaction_id,
+                    attempted_sources=(SourceType.KEGG,),
+                    notes=(
+                        f"KEGG pathway {pathway_id!r} associates reaction {kegg_reaction_id} "
+                        'with a KGML type="group" entry -- multiple entities are explicitly '
+                        "grouped, but KGML's own group/component structure does not by itself "
+                        "establish whether they are independent isozymes or obligate complex "
+                        "subunits, and this package never creates an EnzymeComplex -- disclosed "
+                        "unresolved rather than fabricating either interpretation"
+                    ),
+                )
+            )
+            continue
+
+        gene_ids = genes_by_reaction.get(kegg_reaction_id)
+        if not gene_ids:
+            continue  # no direct evidence for this reaction -- the EC fallback may still run
+        handled_kegg_reaction_ids.add(kegg_reaction_id)
+
+        for kegg_gene_id in gene_ids:
+            protein_id = _resolve_one_direct_catalyst_protein(
+                connectors=connectors,
+                kegg_gene_id=kegg_gene_id,
+                organism_id=organism_id,
+                organism_text=organism_text,
+                gene_lookup=gene_lookup,
+                protein_lookup=protein_lookup,
+                session=session,
+                state=state,
+                direct_catalyst_cache=direct_catalyst_cache,
+            )
+            frontier_id = build_frontier_id(
+                entity_kind=EntityKind.PROTEIN,
+                reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+                anchor=f"{reaction_id}:{kegg_gene_id}",
+            )
+            if protein_id is None:
+                state.add_frontier(
+                    CurationFrontierItem(
+                        frontier_id=frontier_id,
+                        entity_kind=EntityKind.PROTEIN,
+                        reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+                        priority=2,
+                        entity_id=reaction_id,
+                        entity_text=kegg_gene_id,
+                        attempted_sources=(SourceType.KEGG, SourceType.SGD, SourceType.UNIPROT),
+                        notes=(
+                            f"KEGG pathway {pathway_id!r} directly associates reaction "
+                            f"{kegg_reaction_id} with organism-specific gene {kegg_gene_id!r} "
+                            "via its own KGML diagram, but this gene (or its protein product) "
+                            "could not be resolved through existing SGD/UniProt normalization "
+                            "-- never silently replaced by a different, EC-matched protein"
+                        ),
+                    )
+                )
+                continue
+
+            _check_direct_catalyst_ec_contradiction(
+                reaction_id=reaction_id,
+                protein_id=protein_id,
+                session=session,
+                state=state,
+                kegg_reaction_id=kegg_reaction_id,
+                kegg_gene_id=kegg_gene_id,
+            )
+
+            assoc_query_identity = query_identity(
+                connector=SourceType.OTHER,
+                action="associate_direct_catalyst",
+                reaction_id=str(reaction_id),
+                protein_id=str(protein_id),
+            )
+            if state.has_run_query(assoc_query_identity):
+                continue
+            outcome = strategies.associate_catalyst(
+                reaction_id=reaction_id,
+                protein_id=protein_id,
+                relationship="CATALYZES",
+                session=session,
+                lookup=reaction_enzyme_lookup,
+            )
+            state.record_query(
+                assoc_query_identity,
+                display_text=(
+                    f"associate direct KGML catalyst: reaction {reaction_id} <- protein "
+                    f"{protein_id} (gene {kegg_gene_id})"
+                ),
+            )
+            if outcome.entity_id is not None:
+                state.resolve_frontier(frontier_id)
+            else:
+                state.add_frontier(
+                    CurationFrontierItem(
+                        frontier_id=frontier_id,
+                        entity_kind=EntityKind.PROTEIN,
+                        reason=outcome.frontier_reason
+                        or FrontierReason.REACTION_CATALYST_UNRESOLVED,
+                        priority=2,
+                        entity_id=reaction_id,
+                        entity_text=kegg_gene_id,
+                        notes=outcome.notes,
+                    )
+                )
+
+
+def _resolve_one_direct_catalyst_protein(
+    *,
+    connectors: PathwayConnectorBundle,
+    kegg_gene_id: str,
+    organism_id: UUID,
+    organism_text: str,
+    gene_lookup,
+    protein_lookup,
+    session: Session,
+    state: CurationRunState,
+    direct_catalyst_cache: dict[str, UUID | None],
+) -> UUID | None:
+    """Resolve one KEGG organism-specific gene id to a Protein UUID, reusing whatever
+    an earlier reaction in this same run already found or failed to find for that
+    exact gene id (``direct_catalyst_cache``) -- several reactions in a real pathway
+    commonly share one catalyst gene (confirmed live: yeast's own FAS iterative
+    cycle), and this avoids re-querying SGD/UniProt once per reaction that names it
+    (mirrors ``_resolve_one_participant_compound``'s identical ``compound_cache``
+    pattern).
+
+    Gene resolution uses the bare KEGG gene id as the SGD query text directly
+    (``strategies.resolve_gene_by_kegg_gene_id``); protein resolution then uses that
+    *resolved Gene's own* ``symbol`` (falling back to its ``systematic_name`` when no
+    symbol was recorded) -- never the bare KEGG gene id again -- as the UniProt query
+    text, since a systematic ORF/locus name is not reliably a UniProt gene-name
+    query term the way a real gene symbol is (Increment C.2, Step 18: "use existing
+    deterministic Gene->Protein relationships").
+    """
+    if kegg_gene_id in direct_catalyst_cache:
+        return direct_catalyst_cache[kegg_gene_id]
+
+    if connectors.sgd is None or connectors.uniprot is None:
+        direct_catalyst_cache[kegg_gene_id] = None
+        return None
+
+    from app.models.gene import Gene as GeneModel
+
+    gene_query_identity = query_identity(
+        connector=SourceType.SGD,
+        action="resolve_gene_direct_kgml",
+        query=kegg_gene_id,
+        organism_id=str(organism_id),
+    )
+    try:
+        gene_outcome = strategies.resolve_gene_by_kegg_gene_id(
+            connectors.sgd,
+            kegg_gene_id,
+            organism_id=organism_id,
+            organism_context_text=organism_text,
+            lookup=gene_lookup,
+            session=session,
+        )
+    except ConnectorError as exc:
+        state.warn(f"SGD gene resolution failed for direct KGML gene {kegg_gene_id}: {exc}")
+        state.record_connector_call()
+        state.record_query(
+            gene_query_identity, display_text=f"SGD gene search (direct KGML): {kegg_gene_id}"
+        )
+        direct_catalyst_cache[kegg_gene_id] = None
+        return None
+    state.record_connector_call()
+    state.record_query(
+        gene_query_identity, display_text=f"SGD gene search (direct KGML): {kegg_gene_id}"
+    )
+    if gene_outcome.entity_id is None:
+        direct_catalyst_cache[kegg_gene_id] = None
+        return None
+    state.record_entity(gene_outcome.entity_id)
+    gene_id = gene_outcome.entity_id
+
+    gene_row = session.get(GeneModel, gene_id)
+    protein_query_text = kegg_gene_id
+    if gene_row is not None and (gene_row.symbol or gene_row.systematic_name):
+        protein_query_text = gene_row.symbol or gene_row.systematic_name
+
+    protein_query_identity = query_identity(
+        connector=SourceType.UNIPROT,
+        action="resolve_protein_direct_kgml",
+        query=protein_query_text,
+        organism_id=str(organism_id),
+    )
+    try:
+        protein_outcome = strategies.resolve_protein_by_text(
+            connectors.uniprot,
+            protein_query_text,
+            organism_id=organism_id,
+            organism_context_text=organism_text,
+            lookup=protein_lookup,
+            session=session,
+        )
+    except ConnectorError as exc:
+        state.warn(
+            f"UniProt protein resolution failed for direct KGML gene {kegg_gene_id} "
+            f"({protein_query_text}): {exc}"
+        )
+        state.record_connector_call()
+        state.record_query(
+            protein_query_identity,
+            display_text=f"UniProt protein search (direct KGML): {protein_query_text}",
+        )
+        direct_catalyst_cache[kegg_gene_id] = None
+        return None
+    state.record_connector_call()
+    state.record_query(
+        protein_query_identity,
+        display_text=f"UniProt protein search (direct KGML): {protein_query_text}",
+    )
+
+    if protein_outcome.entity_id is None:
+        direct_catalyst_cache[kegg_gene_id] = None
+        return None
+    state.record_entity(protein_outcome.entity_id)
+    direct_catalyst_cache[kegg_gene_id] = protein_outcome.entity_id
+    return protein_outcome.entity_id
+
+
+def _check_direct_catalyst_ec_contradiction(
+    *,
+    reaction_id: UUID,
+    protein_id: UUID,
+    session: Session,
+    state: CurationRunState,
+    kegg_reaction_id: str,
+    kegg_gene_id: str,
+) -> None:
+    """Disclose (never block) a genuine EC mismatch between a direct-KGML-evidence
+    catalyst and the reaction it is being associated with (Increment C.2, Step 54) --
+    the direct reaction->gene relationship is still persisted regardless of this
+    check's outcome; this is a disclosed observation, not a veto. Only a *complete*
+    mismatch (zero shared EC tokens between the two, both non-blank) is flagged --
+    ``6.4.1.2`` on one side and ``"6.4.1.2 6.3.4.14"`` on the other still overlap and
+    are not a contradiction.
+    """
+    from app.models.protein import Protein as ProteinModel
+    from app.models.reaction import Reaction as ReactionModel
+
+    reaction_row = session.get(ReactionModel, reaction_id)
+    protein_row = session.get(ProteinModel, protein_id)
+    if reaction_row is None or protein_row is None:
+        return
+    if not reaction_row.ec_number or not protein_row.ec_number:
+        return
+    reaction_ecs = set(reaction_row.ec_number.split())
+    protein_ecs = set(protein_row.ec_number.split())
+    if reaction_ecs.isdisjoint(protein_ecs):
+        state.warn(
+            f"direct KGML catalyst gene {kegg_gene_id!r} for reaction {kegg_reaction_id} "
+            f"resolved to a protein whose own curated EC number(s) "
+            f"({protein_row.ec_number!r}) share no value with the reaction's own EC "
+            f"number(s) ({reaction_row.ec_number!r}) -- association preserved (direct "
+            "reaction->gene evidence outranks EC agreement), disclosed for review"
+        )
 
 
 def _resolve_pending_reactions(
@@ -877,6 +1313,7 @@ def _discover_catalysts_from_reactions(
     state: CurationRunState,
     discovered_reaction_ids: list[UUID],
     resolved_protein_ec_numbers: list[tuple[UUID, str]],
+    skip_kegg_reaction_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Autonomous catalyst-candidate discovery from already-resolved reaction evidence
     (Increment C.1, F2) -- runs whenever UniProt is configured and at least one
@@ -885,26 +1322,88 @@ def _discover_catalysts_from_reactions(
     catalyst/gene/protein discovery previously had no path independent of an explicit
     seed list.
 
-    For every discovered reaction's own already-persisted ``ec_number`` (KEGG's
-    ``ENZYME`` annotation, via ``reaction_identity_from_kegg`` -- never guessed), this
-    searches UniProt, organism-scoped, for candidate proteins
-    (``strategies.discover_catalyst_candidates_by_ec_number``). A resolved candidate is
-    appended to ``resolved_protein_ec_numbers`` exactly like a seed-resolved one --
-    ``_associate_catalysts``/``_discover_kinetics`` require no changes at all to pick
-    it up, since both already iterate that same list. An EC number that resolves to
-    more than one distinct candidate (a real isozyme pair, confirmed live during this
-    increment's own implementation -- e.g. yeast's cytosolic ACC1 vs. mitochondrial
-    HFA1, both genuinely EC 6.4.1.2) is never resolved arbitrarily: it becomes a
-    ``REACTION_CATALYST_UNRESOLVED`` frontier item, exactly like an EC number with no
-    candidate at all -- discovery, never invented evidence (Increment C.1
-    instructions, Step 16).
+    **This is the conservative EC-based *fallback*, not the primary path, since
+    Increment C.2.** ``skip_kegg_reaction_ids`` (populated by
+    ``_resolve_direct_catalysts_from_kgml``, run earlier in the same iteration) names
+    every reaction that pathway's own KGML diagram already gave direct,
+    organism-specific gene evidence for -- attempted or not, successfully resolved or
+    not. This function never even looks at those reactions: a precise reaction->gene
+    relationship must never be diluted back into a broad EC-search candidate pool
+    (Increment C.2 instructions, Step 28), and a *failed* direct-evidence attempt must
+    never quietly fall through to an EC-matched substitute (Step 53).
+
+    For every remaining discovered reaction's own already-persisted ``ec_number``
+    (KEGG's ``ENZYME`` annotation, via ``reaction_identity_from_kegg`` -- never
+    guessed), this searches UniProt, organism-scoped, for candidate proteins.
+    **Increment C.2 fix**: that field may itself list more than one EC number,
+    whitespace-separated (confirmed live, Real Integration Pilot 1 Run 3: six such
+    cases previously produced one invalid combined UniProt query and zero
+    candidates every time) -- ``strategies.split_ec_numbers`` splits it, each
+    fully-classified (non-wildcard, ``strategies.is_fully_classified_ec``) token is
+    queried independently (``strategies.discover_catalyst_candidates_for_one_ec``,
+    with its own EC-token-level cache so two reactions/annotation-combos sharing one
+    EC number never re-query it), and the resulting candidate pools are merged,
+    deduplicated by UniProt accession (``IdentifierCandidate.source_identifier``),
+    and classified exactly once
+    (``strategies.classify_and_persist_protein_candidates``) -- never once per EC,
+    which would treat two ECs on the very same reaction as unrelated searches. A
+    resolved candidate is appended to ``resolved_protein_ec_numbers`` exactly like a
+    seed-resolved one, keyed by the reaction's own full, original (unsplit)
+    ``ec_number`` string -- ``_associate_catalysts``/``_discover_kinetics`` require
+    no changes at all to pick it up, since both already iterate that same list and
+    compare against that same full field.
+
+    An EC annotation that resolves to more than one distinct candidate (a real
+    isozyme pair, confirmed live during Increment C.1's own implementation -- e.g.
+    yeast's cytosolic ACC1 vs. mitochondrial HFA1, both genuinely EC 6.4.1.2) is
+    never resolved arbitrarily: it becomes a ``REACTION_CATALYST_UNRESOLVED``
+    frontier item, exactly like an EC number with no candidate at all -- discovery,
+    never invented evidence (Increment C.1 instructions, Step 16; unchanged by
+    Increment C.2's multi-EC fix -- Step 26: EC equality alone still never
+    establishes a ``ReactionEnzyme`` by itself).
     """
     from app.models.reaction import Reaction as ReactionModel
+
+    ec_token_candidate_cache: dict[str, list | None] = {}  # None means "failed", not "empty"
+
+    def _candidates_for_ec_token(ec_token: str) -> list | None:
+        if ec_token in ec_token_candidate_cache:
+            return ec_token_candidate_cache[ec_token]
+        token_query_id = query_identity(
+            connector=SourceType.UNIPROT,
+            action="discover_catalyst_by_ec_token",
+            ec_number=ec_token,
+            organism_id=str(organism_id),
+        )
+        try:
+            candidates = strategies.discover_catalyst_candidates_for_one_ec(
+                connectors.uniprot,
+                ec_token,
+                organism_id=organism_id,
+                organism_context_text=organism_text,
+                lookup=protein_lookup,
+            )
+        except ConnectorError as exc:
+            state.warn(f"UniProt catalyst discovery failed for EC {ec_token}: {exc}")
+            state.record_connector_call()
+            state.record_query(
+                token_query_id, display_text=f"UniProt catalyst discovery: EC {ec_token}"
+            )
+            ec_token_candidate_cache[ec_token] = None
+            return None
+        state.record_connector_call()
+        state.record_query(
+            token_query_id, display_text=f"UniProt catalyst discovery: EC {ec_token}"
+        )
+        ec_token_candidate_cache[ec_token] = candidates
+        return candidates
 
     seen_ec_numbers: set[str] = set()
     for reaction_id in discovered_reaction_ids:
         reaction_row = session.get(ReactionModel, reaction_id)
         if reaction_row is None or not reaction_row.ec_number:
+            continue
+        if reaction_row.kegg_reaction_id in skip_kegg_reaction_ids:
             continue
         ec_number = reaction_row.ec_number
         if ec_number in seen_ec_numbers:
@@ -925,32 +1424,74 @@ def _discover_catalysts_from_reactions(
             reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
             anchor=f"{reaction_id}:{ec_number}",
         )
-        try:
-            outcome = strategies.discover_catalyst_candidates_by_ec_number(
-                connectors.uniprot,
-                ec_number,
-                organism_id=organism_id,
-                organism_context_text=organism_text,
-                lookup=protein_lookup,
-                session=session,
-            )
-        except ConnectorError as exc:
-            state.warn(f"UniProt catalyst discovery failed for EC {ec_number}: {exc}")
+
+        ec_tokens = [
+            token
+            for token in strategies.split_ec_numbers(ec_number)
+            if strategies.is_fully_classified_ec(token)
+        ]
+        if not ec_tokens:
+            state.record_query(query_id, display_text=f"UniProt catalyst discovery: EC {ec_number}")
             state.add_frontier(
                 CurationFrontierItem(
                     frontier_id=frontier_id,
+                    entity_kind=EntityKind.PROTEIN,
+                    reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+                    priority=3,
+                    entity_text=ec_number,
+                    attempted_sources=(SourceType.UNIPROT,),
+                    notes=(
+                        f"every EC token in {ec_number!r} is a wildcard/partial "
+                        "classification -- UniProt's exact-match EC query cannot be safely "
+                        "used, and this package never broadens a wildcard into a guessed "
+                        "full EC number"
+                    ),
+                )
+            )
+            continue
+
+        pooled_candidates: list = []
+        seen_accessions: set[str] = set()
+        failed_ec_tokens: list[str] = []
+        for ec_token in ec_tokens:
+            token_candidates = _candidates_for_ec_token(ec_token)
+            if token_candidates is None:
+                failed_ec_tokens.append(ec_token)
+                continue
+            for candidate in token_candidates:
+                if candidate.source_identifier not in seen_accessions:
+                    seen_accessions.add(candidate.source_identifier)
+                    pooled_candidates.append(candidate)
+
+        if failed_ec_tokens:
+            state.add_frontier(
+                CurationFrontierItem(
+                    frontier_id=build_frontier_id(
+                        entity_kind=EntityKind.PROTEIN,
+                        reason=FrontierReason.SOURCE_FAILURE,
+                        anchor=f"{reaction_id}:{ec_number}",
+                    ),
                     entity_kind=EntityKind.PROTEIN,
                     reason=FrontierReason.SOURCE_FAILURE,
                     priority=3,
                     entity_text=ec_number,
                     attempted_sources=(SourceType.UNIPROT,),
-                    notes=str(exc),
+                    notes=(
+                        f"UniProt query failed for EC token(s) {failed_ec_tokens} of "
+                        f"{ec_number!r} -- any other EC token's own successful candidates "
+                        "(if any) are still pooled and classified below, never discarded "
+                        "merely because a sibling EC failed"
+                    ),
                 )
             )
-            state.record_connector_call()
-            state.record_query(query_id, display_text=f"UniProt catalyst discovery: EC {ec_number}")
-            continue
-        state.record_connector_call()
+
+        outcome = strategies.classify_and_persist_protein_candidates(
+            pooled_candidates,
+            query=ec_number,
+            organism_id=organism_id,
+            lookup=protein_lookup,
+            session=session,
+        )
         state.record_query(query_id, display_text=f"UniProt catalyst discovery: EC {ec_number}")
 
         if outcome.entity_id is not None:

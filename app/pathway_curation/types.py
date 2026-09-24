@@ -46,7 +46,12 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: callers. Still a pre-1.0-style dotted increment, not a new ``v2``: no
 #: request/result field was removed or repurposed, only added to or
 #: corrected.
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.1"
+#:
+#: Bumped to ``v1.2`` by Agent 1.x Increment C.2: catalyst-discovery
+#: precedence changed materially -- direct organism-specific KGML
+#: reaction->gene evidence is now tried first and, when present, entirely
+#: preempts the EC-based search (see ``docs/26_...md`` §47).
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.2"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase
