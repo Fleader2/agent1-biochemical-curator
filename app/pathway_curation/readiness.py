@@ -52,6 +52,26 @@ the export but cannot be resolved is a contract-integrity defect, not a
 disclosed scientific gap, and the "missing regulation is fine" policy
 was never meant to cover a broken reference to something that does
 exist.
+
+**Increment C.1, F6: readiness is never vacuously true.** Pilot 1 Run 1
+demonstrated that a completely empty export (zero reactions, because
+structural discovery itself failed) reported ``is_ready=True`` -- there
+was nothing to find a defect *in*, so no check above ever fired. That is
+a real gap in this contract's own interpretability, not a correct reading
+of "ready": ``is_ready`` must mean "Agent 2 can build something," never
+merely "nothing found was broken." ``validate_agent2_readiness`` therefore
+also computes a **modelable-reaction count**, using exactly the structural
+invariants ``_check_participants`` already enforces per reaction (it
+exists, it has at least one participant, every participant's compound
+resolves, every non-``None`` compartment resolves, every role/stoichiometry
+is valid) -- deliberately excluding catalyst/kinetics/regulation
+completeness, none of which this contract has ever required for
+readiness (§24 of the Increment C.1 instructions: "Do not make kinetics
+mandatory"). Zero modelable reactions is always its own additional
+blocking issue (``NO_MODELABLE_REACTIONS``), regardless of what else is or
+is not present in the export -- an empty export, an organism-only export,
+and an export whose only reactions all lack participants are now all
+``is_ready=False`` for this reason alone.
 """
 
 from __future__ import annotations
@@ -79,6 +99,12 @@ class Agent2ReadinessIssueCode(StrEnum):
     REACTION_ENZYME_CATALYST_MISSING = "REACTION_ENZYME_CATALYST_MISSING"
     KINETIC_REFERENCE_MISSING = "KINETIC_REFERENCE_MISSING"
     ENZYME_STATE_REFERENCE_MISSING = "ENZYME_STATE_REFERENCE_MISSING"
+    #: Zero reactions in the export satisfy the modelable-reaction definition (module
+    #: docstring's "F6" section) -- an empty export, an organism-only export, or an
+    #: export whose only reactions all lack usable participants. Added in Increment C.1
+    #: specifically because Pilot 1 Run 1 showed this exact situation previously
+    #: reported ``is_ready=True``.
+    NO_MODELABLE_REACTIONS = "NO_MODELABLE_REACTIONS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +131,12 @@ class Agent2ReadinessAssessment:
     nonblocking_issues: tuple[Agent2ReadinessIssue, ...]
 
     reaction_count: int
+    #: Reactions satisfying the structural "modelable" definition (module docstring's
+    #: F6 section): exists, has at least one participant, every participant's compound
+    #: resolves, every non-``None`` compartment resolves, and every role/stoichiometry
+    #: is valid. Never requires a resolved catalyst, kinetics, or regulation. May be
+    #: strictly less than ``reaction_count``.
+    modelable_reaction_count: int
     participant_count: int
     compound_count: int
     compartment_count: int
@@ -117,11 +149,18 @@ def _check_participants(
     view: Agent1CuratedKnowledgeView,
     compound_ids: frozenset[UUID],
     compartment_ids: frozenset[UUID],
-) -> tuple[list[Agent2ReadinessIssue], list[Agent2ReadinessIssue]]:
+) -> tuple[list[Agent2ReadinessIssue], list[Agent2ReadinessIssue], frozenset[UUID]]:
+    """Per-reaction structural checks. Returns ``(blocking, nonblocking,
+    modelable_reaction_ids)`` -- the third element is exactly the set of reactions that
+    triggered no blocking issue here (module docstring's F6 "modelable reaction"
+    definition): it never requires a resolved catalyst/kinetics/regulation, only what
+    this function itself already checks.
+    """
     from app.models.enums import ReactionParticipantRole
 
     blocking: list[Agent2ReadinessIssue] = []
     nonblocking: list[Agent2ReadinessIssue] = []
+    modelable_reaction_ids: set[UUID] = set()
 
     participants_by_reaction: dict[UUID, list] = {}
     for participant in view.reaction_participants:
@@ -143,6 +182,7 @@ def _check_participants(
             )
             continue
 
+        reaction_is_modelable = True
         for participant in participants:
             if participant.compound_id not in compound_ids:
                 blocking.append(
@@ -157,6 +197,7 @@ def _check_participants(
                         ),
                     )
                 )
+                reaction_is_modelable = False
 
             if participant.compartment_id is None:
                 nonblocking.append(
@@ -184,6 +225,7 @@ def _check_participants(
                         ),
                     )
                 )
+                reaction_is_modelable = False
 
             if not isinstance(participant.role, ReactionParticipantRole):
                 blocking.append(  # pragma: no cover -- defensive; the DB enum guarantees this
@@ -194,6 +236,7 @@ def _check_participants(
                         message=f"participant {participant.id} has an invalid role",
                     )
                 )
+                reaction_is_modelable = False
             if participant.stoichiometry is None or participant.stoichiometry <= 0:
                 blocking.append(  # pragma: no cover -- defensive; the DB CHECK guarantees this
                     Agent2ReadinessIssue(
@@ -206,8 +249,12 @@ def _check_participants(
                         ),
                     )
                 )
+                reaction_is_modelable = False
 
-    return blocking, nonblocking
+        if reaction_is_modelable:
+            modelable_reaction_ids.add(reaction.id)
+
+    return blocking, nonblocking, frozenset(modelable_reaction_ids)
 
 
 def _check_reaction_enzymes(
@@ -379,7 +426,7 @@ def validate_agent2_readiness(
     protein_ids = frozenset(protein.id for protein in package.proteins)
     enzyme_state_ids = frozenset(state.enzyme_state_id for state in view.enzyme_states)
 
-    participant_blocking, participant_nonblocking = _check_participants(
+    participant_blocking, participant_nonblocking, modelable_reaction_ids = _check_participants(
         view, compound_ids, compartment_ids
     )
     reaction_enzyme_blocking = _check_reaction_enzymes(
@@ -388,14 +435,30 @@ def validate_agent2_readiness(
     kinetic_nonblocking = _check_kinetic_measurements(view, reaction_ids, protein_ids)
     enzyme_state_blocking = _check_enzyme_state_family(view, enzyme_state_ids)
 
-    blocking = tuple(participant_blocking + reaction_enzyme_blocking + enzyme_state_blocking)
+    blocking = list(participant_blocking + reaction_enzyme_blocking + enzyme_state_blocking)
+    if not modelable_reaction_ids:
+        blocking.append(
+            Agent2ReadinessIssue(
+                code=Agent2ReadinessIssueCode.NO_MODELABLE_REACTIONS,
+                blocking=True,
+                entity_id=None,
+                message=(
+                    f"0 of {len(view.reactions)} exported reaction(s) satisfy the "
+                    "modelable-reaction definition (participants present, every "
+                    "participant's compound/compartment reference resolves, role and "
+                    "stoichiometry valid) -- an export with no modelable reaction is "
+                    "never Agent-2-ready, regardless of what else it contains"
+                ),
+            )
+        )
     nonblocking = tuple(participant_nonblocking + kinetic_nonblocking)
 
     return Agent2ReadinessAssessment(
         is_ready=not blocking,
-        blocking_issues=blocking,
+        blocking_issues=tuple(blocking),
         nonblocking_issues=nonblocking,
         reaction_count=len(view.reactions),
+        modelable_reaction_count=len(modelable_reaction_ids),
         participant_count=len(view.reaction_participants),
         compound_count=len(view.compounds),
         compartment_count=len(view.compartments),

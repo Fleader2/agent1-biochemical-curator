@@ -35,12 +35,19 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.claim_generation.types import EntityKind
-from app.connectors.kegg import KeggCompoundRecord, KeggReactionRecord
+from app.connectors.kegg import (
+    KeggCompoundRecord,
+    KeggFlatFileRecord,
+    KeggLinkEntry,
+    KeggReactionRecord,
+    parse_kgml_reaction_ids,
+)
 from app.entity_resolution.adapters import (
     KeggSearchAndFetch,
     PubMedSearchAndFetch,
@@ -99,13 +106,16 @@ from app.persistence.reaction_enzyme import persist_reaction_enzyme
 from app.persistence.types import PersistenceAction
 
 __all__ = [
+    "KeggPathwayCurationConnector",
     "ResolutionOutcome",
     "associate_catalyst",
+    "discover_catalyst_candidates_by_ec_number",
     "discover_kinetics_oed",
     "discover_kinetics_sabiork",
     "discover_pathway",
     "discover_publications",
     "discover_reactions_in_pathway",
+    "fetch_kegg_pathway_metadata",
     "fetch_kegg_reaction_record",
     "resolve_compound_by_text",
     "resolve_gene_by_text",
@@ -117,6 +127,22 @@ __all__ = [
     "resolve_reaction_by_text",
     "resolve_reference_compartment_by_name",
 ]
+
+
+@runtime_checkable
+class KeggPathwayCurationConnector(KeggSearchAndFetch, Protocol):
+    """Every KEGG connector capability ``app.pathway_curation`` uses: the shared
+    ``search``/``fetch``/``normalize`` trio (``app.entity_resolution.adapters
+    .KeggSearchAndFetch``) plus ``link`` -- the pathway<->reaction relationship
+    operation (Increment C.1, F1) entity resolution has no use for and therefore never
+    declared. The real ``app.connectors.kegg.KeggConnector`` already satisfies this
+    structurally; this narrow extension exists only so this package's own type hints
+    stay accurate without widening (or forking) the shared entity-resolution protocol.
+    """
+
+    def link(self, target_db: str, dbentries: str) -> list[KeggLinkEntry]: ...
+
+    def get_kgml(self, pathway_id: str) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,34 +377,78 @@ def discover_pathway(connector: KeggSearchAndFetch, query: str) -> tuple[str, ..
 
 
 def discover_reactions_in_pathway(
-    connector: KeggSearchAndFetch, pathway_id: str
+    connector: KeggPathwayCurationConnector, pathway_id: str
 ) -> tuple[str, ...]:
-    """Fetch one KEGG pathway flat file and return every reaction id its ``REACTION`` field names.
+    """Discover one KEGG pathway's member reaction ids.
 
-    Deterministic, mechanical parsing only: each ``REACTION`` line's
-    first whitespace-delimited token is a KEGG reaction id (KEGG's own
-    flat-file convention) -- never inferred, never a reaction not
-    literally named in the fetched record. Order-preserving, deduplicated.
+    **Never parses the pathway's own ``/get/`` flat-file record for this purpose --
+    that was the original, incorrect assumption Pilot 1 Run 1 disproved.** Confirmed
+    directly against the live KEGG service (both a generic reference pathway and an
+    organism-specific one, plus an unrelated third pathway to rule out a
+    lipid-pathway-specific quirk): a modern KEGG pathway ``/get/`` response does not
+    reliably carry a ``REACTION`` field at all (Increment C.1's F1 correction).
+
+    **Two KEGG mechanisms, tried in a fixed order, never both, never merged:**
+
+    1. That exact ``pathway_id``'s own KGML pathway-diagram document
+       (``connector.get_kgml``/``parse_kgml_reaction_ids``) -- when present, this *is*
+       the answer, used as-is. For an organism-specific (or KO-level) pathway id, this
+       is KEGG's own curated, organism-scoped reaction membership -- confirmed live
+       (Increment C.1's organism-specific pathway-resolution completion) to be a
+       strict subset of the corresponding generic reference pathway's own reactions
+       across three independent organisms, never a superset and never a disjoint set.
+       This is what makes an organism-specific request like ``sce00061`` resolve to
+       *that organism's* reactions rather than either zero (the old, honest-but-blocked
+       F1 outcome) or the full generic reference pathway's reactions (which would
+       silently attribute reactions to an organism that may not actually carry the gene
+       for them -- confirmed live for ``map00061`` vs. ``sce00061``: several of the
+       generic pathway's reactions are discrete-enzyme bacterial/plant fatty-acid-
+       synthase-II steps yeast's own FAS-I megasynthase gene set does not separately
+       encode).
+    2. ``link("reaction", pathway_id)`` (Increment C.1's original F1 mechanism),
+       used only when step 1 yields no KGML document at all (KEGG's generic
+       "map"-prefixed reference pathways have no per-organism diagram and consistently
+       404 there -- confirmed live) or an empty one. This preserves the original F1
+       behavior completely unchanged for every pathway id this function already
+       handled correctly (any ``map``-prefixed request).
+
+    Neither branch contains any organism-code-specific logic: the same two calls run
+    for every ``pathway_id``, regardless of its prefix -- there is nothing here that
+    recognizes ``"sce"`` (or any other specific organism/KO code) as special.
+
+    Deterministic and deduplicated in both branches, but **not re-sorted**: KEGG's own
+    response order for one fixed pathway is already a stable, source-native order
+    (unlike ``discover_pathway``'s free-text search hits, which need a deterministic
+    tiebreak precisely because search-result order is not guaranteed) -- preserving it
+    is more faithful, not less deterministic.
     """
-    record = connector.fetch(pathway_id)
-    if record is None:
-        return ()
-    normalized = connector.normalize(record)
-    fields = getattr(normalized, "fields", None)
-    if not fields:
-        return ()
-    reaction_lines = fields.get("REACTION", ())
+    kgml_text = connector.get_kgml(pathway_id)
+    if kgml_text is not None:
+        kgml_reaction_ids = parse_kgml_reaction_ids(kgml_text)
+        if kgml_reaction_ids:
+            return kgml_reaction_ids
+
+    entries = connector.link("reaction", pathway_id)
     seen: set[str] = set()
     ordered: list[str] = []
-    for line in reaction_lines:
-        tokens = line.split()
-        if not tokens:
-            continue
-        reaction_id = tokens[0]
-        if reaction_id not in seen:
-            seen.add(reaction_id)
-            ordered.append(reaction_id)
+    for entry in entries:
+        if entry.target_id not in seen:
+            seen.add(entry.target_id)
+            ordered.append(entry.target_id)
     return tuple(ordered)
+
+
+def fetch_kegg_pathway_metadata(
+    connector: KeggSearchAndFetch, pathway_id: str
+) -> KeggFlatFileRecord | None:
+    """Fetch one KEGG pathway's own ``/get/`` record, for name/description/organism
+    metadata only (Increment C.1, Step 6) -- **never** as a source of reaction
+    membership (see ``discover_reactions_in_pathway``). Used to confirm an explicitly
+    supplied structured pathway id (F4) actually resolves, distinguishing "pathway not
+    found" from "pathway found, zero reactions linked" (F9/§9). Returns ``None`` for a
+    legitimate "no such pathway" outcome, never invented as an empty record.
+    """
+    return connector.fetch(pathway_id)
 
 
 def fetch_kegg_reaction_record(
@@ -672,6 +742,48 @@ def resolve_protein_by_text(
             organism_id=organism_id,
             session=session,
         ),
+    )
+
+
+def discover_catalyst_candidates_by_ec_number(
+    connector: UniProtSearchAndFetch,
+    ec_number: str,
+    *,
+    organism_id: UUID,
+    organism_context_text: str | None,
+    lookup: ProteinLookup,
+    session: Session,
+) -> ResolutionOutcome:
+    """Autonomous catalyst-candidate discovery (Increment C.1, F2), keyed by a
+    resolved reaction's own EC number -- never a caller-supplied seed text.
+
+    A thin, organism-scoped reuse of ``resolve_protein_by_text`` -- an EC-number query
+    (``"ec:6.4.1.2"``) is simply a different *query string*; UniProt's own query
+    grammar accepts an EC-number clause exactly like a gene-symbol one, so this is not
+    a new resolution algorithm, only a new *discovery key* feeding the existing one
+    (Increment C.1 instructions, Step 15: "Do not interpret them automatically as
+    proof of a specific protein->reaction association" -- discovery, not evidence).
+
+    **Multiple distinct candidates sharing one EC number are never resolved
+    arbitrarily.** Confirmed directly against the live UniProt service while
+    implementing this increment: EC 6.4.1.2 in *Saccharomyces cerevisiae* alone
+    resolves to at least two real, distinct gene products -- cytosolic ``ACC1``
+    (Q00955) and mitochondrial ``HFA1`` (P32874), a genuine isozyme pair, not a
+    connector artifact. Such a case reaches ``AMBIGUOUS_IDENTITY`` through the exact
+    same, unmodified ``classify_outcome``/``_classify_candidates`` machinery every
+    other discovery path in this module already uses -- this function invents no
+    tie-breaking rule of its own, and the caller (``executor
+    ._discover_catalysts_from_reactions``) never persists a ``ReactionEnzyme`` for an
+    ambiguous outcome (see ``associate_catalyst``'s own conservatism, unchanged by
+    this function).
+    """
+    return resolve_protein_by_text(
+        connector,
+        f"ec:{ec_number}",
+        organism_id=organism_id,
+        organism_context_text=organism_context_text,
+        lookup=lookup,
+        session=session,
     )
 
 

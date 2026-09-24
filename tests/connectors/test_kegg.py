@@ -29,11 +29,14 @@ from app.connectors.kegg import (
     KeggCompoundRecord,
     KeggConnector,
     KeggFlatFileRecord,
+    KeggLinkEntry,
     KeggReactionRecord,
     normalize_compound,
     normalize_reaction,
     parse_find_response,
     parse_flat_file,
+    parse_kgml_reaction_ids,
+    parse_link_response,
     split_kegg_identifier,
 )
 from app.models.enums import SourceType
@@ -397,3 +400,199 @@ def test_kegg_connector_from_settings_raises_when_unconfigured() -> None:
 def test_kegg_connector_declares_kegg_source() -> None:
     connector = KeggConnector(_client_for(_PathRoutingHandler({})), base_url=_BASE_URL)
     assert connector.source == SourceType.KEGG
+
+
+# --- link() / parse_link_response (Agent 1.x Increment C.1, F1) --------------------------------
+
+
+def test_kegg_link_calls_link_endpoint_and_returns_entries() -> None:
+    """``link()`` calls KEGG's ``link`` endpoint and returns structured entries -- the
+    authoritative pathway->reaction membership operation this connector previously had no
+    method for at all (see the module docstring's Increment C.1 note)."""
+    handler = _PathRoutingHandler(
+        {
+            f"{_BASE_URL}/link/reaction/map00061": httpx.Response(
+                200, text="path:map00061\trn:R00742\npath:map00061\trn:R01626\n"
+            )
+        }
+    )
+    connector = KeggConnector(_client_for(handler), base_url=_BASE_URL)
+
+    entries = connector.link("reaction", "map00061")
+
+    assert len(handler.requests) == 1
+    assert entries == [
+        KeggLinkEntry(source_id="map00061", target_id="R00742"),
+        KeggLinkEntry(source_id="map00061", target_id="R01626"),
+    ]
+
+
+def test_parse_link_response_multiple_entries() -> None:
+    entries = parse_link_response(
+        "path:sce00061\trn:R00742\npath:sce00061\trn:R01626\npath:sce00061\trn:R04355\n"
+    )
+    assert [e.target_id for e in entries] == ["R00742", "R01626", "R04355"]
+
+
+def test_parse_link_response_preserves_duplicate_rows_verbatim() -> None:
+    """Deduplication is ``discover_reactions_in_pathway``'s own job (Step 17 of the
+    Increment C.1 instructions: "deduplicate them"), never this pure parser's -- a
+    literal duplicate row in KEGG's own response is preserved exactly as returned,
+    consistent with ``parse_find_response``'s identical "never silently collapse"
+    convention."""
+    entries = parse_link_response("path:map00061\trn:R00742\npath:map00061\trn:R00742\n")
+    assert entries == [
+        KeggLinkEntry(source_id="map00061", target_id="R00742"),
+        KeggLinkEntry(source_id="map00061", target_id="R00742"),
+    ]
+
+
+def test_kegg_link_deterministic_ordering_is_response_order() -> None:
+    """``link()``/``parse_link_response`` never reorders KEGG's own response -- unlike
+    ``search()``'s hits (a free-text result needing a deterministic tiebreak),
+    KEGG's own link listing for one fixed pathway is already a stable, source-native
+    order, and re-sorting it would be less faithful, not more."""
+    entries = parse_link_response("path:map00061\trn:R04355\npath:map00061\trn:R00742\n")
+    assert [e.target_id for e in entries] == ["R04355", "R00742"]
+
+
+def test_kegg_link_empty_response_is_a_legitimate_empty_result() -> None:
+    handler = _PathRoutingHandler(
+        {f"{_BASE_URL}/link/reaction/map99999": httpx.Response(200, text="")}
+    )
+    connector = KeggConnector(_client_for(handler), base_url=_BASE_URL)
+
+    assert connector.link("reaction", "map99999") == []
+
+
+def test_parse_link_response_malformed_line_raises() -> None:
+    with pytest.raises(ConnectorParseError):
+        parse_link_response("this line has no tab at all")
+
+
+def test_parse_link_response_blank_identifier_raises() -> None:
+    with pytest.raises(ConnectorParseError):
+        parse_link_response("path:\trn:R00742")
+
+
+def test_kegg_link_wrong_relationship_type_returns_whatever_kegg_actually_reports() -> None:
+    """``link()`` never validates that the returned rows' prefixes match the requested
+    ``target_db`` -- it is a thin, faithful parse of whatever KEGG returns, mirroring
+    ``search()``'s identical "no curation policy" discipline. A caller asking for the
+    wrong relationship type gets back exactly what KEGG reports, unfiltered."""
+    handler = _PathRoutingHandler(
+        {
+            f"{_BASE_URL}/link/enzyme/map00061": httpx.Response(
+                200, text="path:map00061\tec:6.4.1.2\n"
+            )
+        }
+    )
+    connector = KeggConnector(_client_for(handler), base_url=_BASE_URL)
+
+    entries = connector.link("enzyme", "map00061")
+
+    assert entries == [KeggLinkEntry(source_id="map00061", target_id="6.4.1.2")]
+
+
+def test_kegg_link_connector_failure_raises_connector_error() -> None:
+    handler = _PathRoutingHandler(
+        {f"{_BASE_URL}/link/reaction/map00061": httpx.Response(500, text="server error")}
+    )
+    connector = KeggConnector(_client_for(handler, max_retries=0), base_url=_BASE_URL)
+
+    with pytest.raises(ConnectorHTTPError):
+        connector.link("reaction", "map00061")
+
+
+def test_kegg_link_rejects_empty_target_db() -> None:
+    connector = KeggConnector(_client_for(_PathRoutingHandler({})), base_url=_BASE_URL)
+    with pytest.raises(ValueError, match="target_db"):
+        connector.link("   ", "map00061")
+
+
+def test_kegg_link_rejects_empty_dbentries() -> None:
+    connector = KeggConnector(_client_for(_PathRoutingHandler({})), base_url=_BASE_URL)
+    with pytest.raises(ValueError, match="dbentries"):
+        connector.link("reaction", "   ")
+
+
+# --- get_kgml() / parse_kgml_reaction_ids() (Increment C.1, organism-specific -----------------
+# pathway-resolution completion) ----------------------------------------------------------------
+
+
+def test_kegg_get_kgml_returns_raw_xml_text() -> None:
+    """``get_kgml()`` returns the raw KGML document unparsed -- parsing is a separate,
+    pure step (``parse_kgml_reaction_ids``), mirroring ``fetch()``/``parse_flat_file``'s
+    identical retrieval/parsing separation."""
+    kgml_body = (
+        '<pathway name="path:sce00061" org="sce" number="00061">'
+        '<reaction id="1" name="rn:R00742" type="reversible"/>'
+        "</pathway>"
+    )
+    handler = _PathRoutingHandler(
+        {f"{_BASE_URL}/get/sce00061/kgml": httpx.Response(200, text=kgml_body)}
+    )
+    connector = KeggConnector(_client_for(handler), base_url=_BASE_URL)
+
+    assert connector.get_kgml("sce00061") == kgml_body
+    assert len(handler.requests) == 1
+
+
+def test_kegg_get_kgml_returns_none_for_404() -> None:
+    """A generic "map"-prefixed reference pathway has no per-organism KGML diagram of
+    its own and 404s on live KEGG -- ``None``, not invented as an empty document,
+    exactly like ``fetch()``'s own 404 convention."""
+    handler = _PathRoutingHandler(
+        {f"{_BASE_URL}/get/map00061/kgml": httpx.Response(404, text="not found")}
+    )
+    connector = KeggConnector(_client_for(handler, max_retries=0), base_url=_BASE_URL)
+
+    assert connector.get_kgml("map00061") is None
+
+
+def test_kegg_get_kgml_still_raises_for_non_404_failure() -> None:
+    handler = _PathRoutingHandler(
+        {f"{_BASE_URL}/get/sce00061/kgml": httpx.Response(500, text="server error")}
+    )
+    connector = KeggConnector(_client_for(handler, max_retries=0), base_url=_BASE_URL)
+
+    with pytest.raises(ConnectorHTTPError):
+        connector.get_kgml("sce00061")
+
+
+def test_kegg_get_kgml_rejects_empty_pathway_id() -> None:
+    connector = KeggConnector(_client_for(_PathRoutingHandler({})), base_url=_BASE_URL)
+    with pytest.raises(ValueError, match="pathway_id"):
+        connector.get_kgml("   ")
+
+
+def test_parse_kgml_reaction_ids_extracts_unique_reaction_ids_in_order() -> None:
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<reaction id="1" name="rn:R04969" type="irreversible"/>'
+        '<reaction id="2" name="rn:R04966" type="irreversible"/>'
+        '<reaction id="3" name="rn:R04969" type="irreversible"/>'
+        "</pathway>"
+    )
+    assert parse_kgml_reaction_ids(xml_text) == ("R04969", "R04966")
+
+
+def test_parse_kgml_reaction_ids_extracts_every_id_from_a_multi_id_name_attribute() -> None:
+    """KGML compresses parallel/isozyme reaction nodes sharing one diagram position
+    into one space-separated ``name`` attribute -- confirmed live on KEGG's own
+    ``sce00061`` diagram; every id listed is extracted, never just the first."""
+    xml_text = (
+        '<pathway name="path:sce00061">'
+        '<reaction id="1" name="rn:R00742 rn:R01706" type="irreversible"/>'
+        "</pathway>"
+    )
+    assert parse_kgml_reaction_ids(xml_text) == ("R00742", "R01706")
+
+
+def test_parse_kgml_reaction_ids_no_reaction_elements_is_a_legitimate_empty_result() -> None:
+    assert parse_kgml_reaction_ids('<pathway name="path:map00010"></pathway>') == ()
+
+
+def test_parse_kgml_reaction_ids_malformed_xml_raises() -> None:
+    with pytest.raises(ConnectorParseError):
+        parse_kgml_reaction_ids("<pathway><reaction not even closed")

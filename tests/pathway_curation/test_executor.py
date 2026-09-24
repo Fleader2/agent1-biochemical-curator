@@ -71,6 +71,22 @@ def _kegg_with_reactions(
     )
 
 
+def _kegg_with_reactions_and_ec(
+    reaction_ids: tuple[str, ...], *, ec_number: str
+) -> FakeKeggConnector:
+    reactions = {
+        reaction_id: make_kegg_reaction(
+            reaction_id, name=f"fake reaction {reaction_id}", enzymes=(ec_number,)
+        )
+        for reaction_id in reaction_ids
+    }
+    return FakeKeggConnector(
+        pathways={"map00061": "fatty acid biosynthesis"},
+        pathway_reactions={"map00061": reaction_ids},
+        reactions=reactions,
+    )
+
+
 @dataclass
 class _RaisingKeggConnector(FakeKeggConnector):
     """A ``FakeKeggConnector`` whose ``search`` always fails (Step 40's connector-failure case)."""
@@ -381,10 +397,11 @@ def test_full_fake_pilot_run_produces_a_fatty_acid_biosynthesis_like_result(
     db_session: Session,
 ) -> None:
     """One realistic, fully-wired run: two reactions sharing a compound, resolved
-    participants on every reaction, one seeded gene/protein whose EC number matches
-    reaction R00742 (triggering catalyst association), one supporting publication, and
-    one linked kinetic measurement -- exercising every enrichment path together, the way
-    the real yeast pilot eventually will, and ending in an Agent-2-ready export."""
+    participants on every reaction, one catalyst *autonomously discovered* from
+    reaction R00742's own EC number (Increment C.1, F2 -- ``seed_entity_texts`` is
+    deliberately empty), one supporting publication, and one linked kinetic
+    measurement -- exercising every enrichment path together, the way the real yeast
+    pilot eventually will, and ending in an Agent-2-ready export."""
     compounds = {
         cid: make_kegg_compound(cid, name=f"fake compound {cid}")
         for cid in ("C00024", "C00011", "C00048", "C00005", "C00010", "C00006")
@@ -407,16 +424,9 @@ def test_full_fake_pilot_run_produces_a_fatty_acid_biosynthesis_like_result(
         },
         compounds=compounds,
     )
-    sgd = FakeSgdConnector(
-        loci={
-            "ACC1": make_sgd_locus(
-                sgd_id="S000000002", systematic_name="YNR016C", standard_name="ACC1"
-            )
-        }
-    )
     uniprot = FakeUniProtConnector(
         entries={
-            "ACC1": make_uniprot_entry(
+            "ec:6.4.1.2": make_uniprot_entry(
                 accession="Q00955",
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
@@ -440,20 +450,21 @@ def test_full_fake_pilot_run_produces_a_fatty_acid_biosynthesis_like_result(
     result = execute_pathway_curation(
         _request(
             request_id="req-full-pilot",
-            seed_entity_texts=("ACC1",),
+            seed_entity_texts=(),
             include_publications=True,
             include_kinetics=True,
             mode=CurationMode.PILOT,
         ),
         session=db_session,
         connectors=PathwayConnectorBundle(
-            kegg=kegg, sgd=sgd, uniprot=uniprot, pubmed=pubmed, sabiork=sabiork
+            kegg=kegg, uniprot=uniprot, pubmed=pubmed, sabiork=sabiork
         ),
     )
 
     assert result.organism_id is not None
     assert len(result.discovered_reaction_ids) == 2
-    assert result.discovered_entity_ids  # organism + gene + protein + compounds
+    assert result.discovered_entity_ids  # organism + autonomously-discovered protein + compounds
+    assert len(result.agent1_knowledge_package.proteins) == 1  # discovered, never seeded
     assert result.discovered_publication_ids
     assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
     assert result.knowledge_gap_ids
@@ -1012,3 +1023,505 @@ def test_include_kinetics_with_no_seeded_protein_produces_not_attempted_frontier
     reasons = {item.reason for item in result.unresolved_frontier}
     assert FrontierReason.KINETICS_REQUESTED_NOT_ATTEMPTED in reasons
     assert FrontierReason.MISSING_KINETICS not in reasons
+
+
+# ==================================================================================================
+# Increment C.1 -- Live Pathway Discovery Repair
+# ==================================================================================================
+
+# --- F1: KEGG pathway->reaction link operation, never a REACTION field --------------------------
+
+
+def test_f1_pathway_record_has_no_reaction_field_and_membership_still_resolves(
+    db_session: Session,
+) -> None:
+    """The central F1 regression test: reproduces the exact real-API shape that broke
+    Pilot 1 Run 1 -- a pathway `/get/` record with no REACTION field at all -- and
+    proves reaction membership, participants, and compounds are still fully resolved
+    via the dedicated link operation."""
+    compounds = {
+        cid: make_kegg_compound(cid, name=f"fake {cid}") for cid in ("C00024", "C00011", "C00048")
+    }
+    kegg = FakeKeggConnector(
+        pathways={"map00061": "fatty acid biosynthesis"},
+        pathway_reactions={"map00061": ("R00742",)},
+        reactions={
+            "R00742": make_kegg_reaction(
+                "R00742", name="fake reaction R00742", equation="C00024 + C00011 <=> C00048"
+            )
+        },
+        compounds=compounds,
+    )
+
+    result = execute_pathway_curation(
+        _request(request_id="req-f1-regression", include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    # Reproduce the exact failure condition: the pathway's own fetched record never
+    # carries a REACTION field.
+    pathway_record = kegg.fetch("map00061")
+    assert pathway_record is not None
+    assert "REACTION" not in pathway_record.fields
+
+    # ... and membership/participants/compounds were still fully resolved regardless.
+    assert len(result.discovered_reaction_ids) == 1
+    reaction_id = result.discovered_reaction_ids[0]
+    participants = [
+        p
+        for p in result.agent1_knowledge_package.reaction_participants
+        if p.reaction_id == reaction_id
+    ]
+    assert len(participants) == 3
+    assert len(result.agent1_knowledge_package.compounds) == 3
+    assert result.agent2_readiness.is_ready is True
+    assert ("link", ("reaction", "map00061")) in kegg.calls
+
+
+def test_f1_empty_reaction_membership_produces_a_blocking_frontier_item(
+    db_session: Session,
+) -> None:
+    """Pilot 1 Run 1's exact silent-failure condition: a pathway resolves, but its
+    reaction membership is empty. This must now be impossible to miss."""
+    kegg = FakeKeggConnector(
+        pathways={"map00061": "fatty acid biosynthesis"},
+        pathway_reactions={"map00061": ()},  # a real pathway, zero linked reactions
+    )
+
+    result = execute_pathway_curation(
+        _request(request_id="req-f1-empty-membership", include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert result.discovered_reaction_ids == ()
+    reasons = {item.reason for item in result.unresolved_frontier}
+    assert FrontierReason.PATHWAY_REACTION_MEMBERSHIP_EMPTY in reasons
+    assert result.completion_status is not CompletionStatus.COMPLETE
+    assert result.agent2_readiness.is_ready is False
+    assert result.organism_id is not None  # organism resolution itself still succeeded
+
+
+def test_f1_link_connector_failure_produces_source_failure_not_silence(
+    db_session: Session,
+) -> None:
+    @dataclass
+    class _RaisingLinkKeggConnector(FakeKeggConnector):
+        def link(self, target_db: str, dbentries: str):
+            raise ConnectorError("KEGG link endpoint is unreachable in this test")
+
+    kegg = _RaisingLinkKeggConnector(pathways={"map00061": "fatty acid biosynthesis"})
+
+    result = execute_pathway_curation(
+        _request(request_id="req-f1-link-failure", include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    reasons = {item.reason for item in result.unresolved_frontier}
+    assert FrontierReason.SOURCE_FAILURE in reasons
+    assert FrontierReason.PATHWAY_REACTION_MEMBERSHIP_EMPTY not in reasons
+    assert result.warnings
+
+
+# --- F4: structured pathway id precedence --------------------------------------------------------
+
+
+def test_f4_structured_pathway_id_is_used_directly_without_text_search(
+    db_session: Session,
+) -> None:
+    kegg = FakeKeggConnector(
+        pathways={"sce00061": "fatty acid biosynthesis - Saccharomyces cerevisiae"},
+        pathway_reactions={"sce00061": ("R00742",)},
+        reactions={"R00742": make_kegg_reaction("R00742", name="fake reaction R00742")},
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f4-structured-id",
+            source_pathway_id="sce00061",
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert len(result.discovered_reaction_ids) == 1
+    # No free-text pathway search was ever issued.
+    assert not any(call[0] == "search" and call[1][1] == "pathway" for call in kegg.calls)
+    assert ("fetch", ("sce00061",)) in kegg.calls
+    assert ("link", ("reaction", "sce00061")) in kegg.calls
+
+
+def test_f4_structured_id_takes_precedence_over_biological_process_text(
+    db_session: Session,
+) -> None:
+    """Both a structured id and free text are supplied; the structured id alone
+    determines which pathway is used -- the text is never searched."""
+    kegg = FakeKeggConnector(
+        pathways={
+            "sce00061": "fatty acid biosynthesis - Saccharomyces cerevisiae",
+            "map01040": "Biosynthesis of unsaturated fatty acids",
+        },
+        pathway_reactions={"sce00061": ("R00742",), "map01040": ("R09999",)},
+        reactions={"R00742": make_kegg_reaction("R00742", name="fake reaction R00742")},
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f4-precedence",
+            biological_process="unsaturated fatty acids",  # would match map01040 if searched
+            source_pathway_id="sce00061",
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert result.discovered_reaction_ids == tuple(result.discovered_reaction_ids)
+    assert len(result.discovered_reaction_ids) == 1
+    assert not any(call[0] == "search" for call in kegg.calls)
+
+
+def test_f4_structured_pathway_id_not_found_is_disclosed(db_session: Session) -> None:
+    kegg = FakeKeggConnector(pathways={}, pathway_reactions={})  # sce00061 does not exist
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f4-not-found",
+            source_pathway_id="sce00061",
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert result.discovered_reaction_ids == ()
+    unresolved = [
+        item
+        for item in result.unresolved_frontier
+        if item.reason is FrontierReason.UNRESOLVED_REACTION_IDENTITY
+        and item.entity_text == "sce00061"
+    ]
+    assert len(unresolved) == 1
+
+
+def test_f4_no_structured_id_falls_back_to_text_discovery(db_session: Session) -> None:
+    kegg = _kegg_with_reactions(("R00742",))
+    result = execute_pathway_curation(
+        _request(request_id="req-f4-no-id-fallback", include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert len(result.discovered_reaction_ids) == 1
+    assert any(call[0] == "search" and call[1][1] == "pathway" for call in kegg.calls)
+
+
+# --- F2: autonomous catalyst discovery from reaction evidence ------------------------------------
+
+
+def test_f2_catalyst_discovered_from_reaction_ec_number_with_no_seeds(
+    db_session: Session,
+) -> None:
+    """The central F2 regression test: seed_entity_texts is empty, yet a catalyst is
+    still discovered and associated from the resolved reaction's own EC number."""
+    kegg = _kegg_with_reactions_and_ec(("R00742",), ec_number="6.4.1.2")
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ec:6.4.1.2": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f2-autonomous-catalyst",
+            seed_entity_texts=(),
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert not any(
+        item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        for item in result.unresolved_frontier
+    )
+
+
+def test_f2_shared_ec_number_ambiguity_never_fabricates_an_association(
+    db_session: Session,
+) -> None:
+    """The required F2 negative case: two distinct real-shaped candidates (an isozyme
+    pair, mirroring yeast's own cytosolic ACC1 vs. mitochondrial HFA1, both
+    confirmed live to share EC 6.4.1.2) share the queried EC number. Neither is
+    seeded. No ReactionEnzyme may ever be fabricated from EC equality alone."""
+    kegg = _kegg_with_reactions_and_ec(("R00742",), ec_number="6.4.1.2")
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ec:6.4.1.2": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("6.4.1.2",),
+            ),
+        }
+    )
+    # A second, distinct candidate that also matches the same discovery query --
+    # FakeUniProtConnector.search treats every entry whose key is a *substring* of
+    # the query as a hit, so a second key that is itself a substring of the first
+    # (e.g. the bare EC number, without the "ec:" prefix) also matches.
+    uniprot.entries["6.4.1.2"] = make_uniprot_entry(
+        accession="P32874",
+        recommended_name="Acetyl-CoA carboxylase, mitochondrial",
+        gene_names=("HFA1",),
+        organism_name="Saccharomyces cerevisiae",
+        ec_numbers=("6.4.1.2",),
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f2-ambiguous-ec",
+            seed_entity_texts=(),
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    unresolved = [
+        item
+        for item in result.unresolved_frontier
+        if item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+    ]
+    assert len(unresolved) == 1
+
+
+def test_f2_no_ec_number_on_reaction_never_attempts_discovery(db_session: Session) -> None:
+    kegg = _kegg_with_reactions(("R00742",))  # no `enzymes=` -> no ec_number
+    uniprot = FakeUniProtConnector(entries={})
+
+    result = execute_pathway_curation(
+        _request(request_id="req-f2-no-ec", seed_entity_texts=(), include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, uniprot=uniprot),
+    )
+
+    assert uniprot.calls == []
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+
+
+def test_f2_seed_entity_texts_still_work_alongside_autonomous_discovery(
+    db_session: Session,
+) -> None:
+    """Step 20: seed_entity_texts remains a supported, optional hint -- not the only
+    way in. A seeded gene and autonomous EC-based discovery can both contribute."""
+    kegg = _kegg_with_reactions_and_ec(("R00742",), ec_number="6.4.1.2")
+    sgd = FakeSgdConnector(
+        loci={
+            "ACC1": make_sgd_locus(
+                sgd_id="S000000002", systematic_name="YNR016C", standard_name="ACC1"
+            )
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f2-seed-plus-autonomous",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    # The seeded protein and the autonomously-discovered candidate are the same real
+    # protein here (Q00955) -- persistence reuses it (MATCHED), never duplicating.
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+
+
+# ==================================================================================================
+# Increment C.1 -- Organism-specific KEGG pathway resolution (final completion)
+# ==================================================================================================
+#
+# Live investigation (KEGG's REST API, read-only, no persistence) established that an
+# organism-specific pathway id's own KGML pathway-diagram document
+# (``GET /get/{pathway_id}/kgml``) declares that organism's own curated reaction
+# membership directly and authoritatively -- confirmed live across three independent
+# organisms (sce00061 -> 41 reactions, hsa00061 -> 45, eco00061 -> 50), every one a
+# strict subset of the corresponding generic reference pathway's own reactions with
+# zero exceptions. ``strategies.discover_reactions_in_pathway`` now tries this first,
+# falling back to the pre-existing ``link("reaction", pathway_id)`` operation only when
+# no KGML document exists for that id (a generic "map"-prefixed reference pathway).
+
+
+def test_f10_organism_specific_pathway_uses_its_own_kgml_reaction_subset(
+    db_session: Session,
+) -> None:
+    """The central regression test for this completion: an organism-specific pathway's
+    KGML diagram declares a genuine *subset* of what a naive "treat the whole generic
+    reference pathway as this organism's own" approach would import -- only the KGML
+    subset is ever discovered/expanded, the rest never silently pulled in."""
+    reference_reaction_ids = ("R00742", "R01626", "R04355", "R09999")
+    organism_supported_ids = ("R00742", "R04355")  # KGML declares only these two
+    kegg = FakeKeggConnector(
+        pathways={"sce00061": "fatty acid biosynthesis - Saccharomyces cerevisiae"},
+        # If the algorithm ever fell back to the full reference set, this is what it
+        # would wrongly return -- present so a regression back to "import everything
+        # link() reports" would be caught immediately.
+        pathway_reactions={"sce00061": reference_reaction_ids},
+        kgml_reactions={"sce00061": organism_supported_ids},
+        reactions={
+            reaction_id: make_kegg_reaction(reaction_id, name=f"fake reaction {reaction_id}")
+            for reaction_id in reference_reaction_ids
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f10-kgml-subset",
+            source_pathway_id="sce00061",
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert len(result.discovered_reaction_ids) == 2
+    resolved_kegg_ids = {call[1][0] for call in kegg.calls if call[0] == "fetch"} & set(
+        reference_reaction_ids
+    )
+    assert resolved_kegg_ids == set(organism_supported_ids)
+    # R01626/R09999 -- reference-only reactions -- were never fetched/expanded at all.
+    assert "R01626" not in resolved_kegg_ids
+    assert "R09999" not in resolved_kegg_ids
+    # link() was never even called: the KGML document alone answered the question.
+    assert ("link", ("reaction", "sce00061")) not in kegg.calls
+
+
+def test_f10_generic_reference_pathway_keeps_original_link_based_behavior(
+    db_session: Session,
+) -> None:
+    """A generic "map"-prefixed pathway has no KGML diagram of its own (confirmed live:
+    404) -- this must fall back to the pre-existing ``link()`` behavior, completely
+    unchanged, never blocked or altered by this completion."""
+    kegg = _kegg_with_reactions(("R00742", "R01626"))  # no kgml_reactions entry at all
+
+    result = execute_pathway_curation(
+        _request(request_id="req-f10-generic-unaffected", include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert len(result.discovered_reaction_ids) == 2
+    assert ("get_kgml", ("map00061",)) in kegg.calls
+    assert ("link", ("reaction", "map00061")) in kegg.calls
+
+
+def test_f10_kgml_present_but_empty_falls_back_to_link(db_session: Session) -> None:
+    """A KGML document that exists but declares zero reactions (e.g. a compound-only
+    diagram) is not treated as "the answer is zero" -- the pre-existing ``link()``
+    mechanism still gets a chance, exactly like "no KGML document at all"."""
+    kegg = FakeKeggConnector(
+        pathways={"sce00061": "fatty acid biosynthesis - Saccharomyces cerevisiae"},
+        pathway_reactions={"sce00061": ("R00742",)},
+        kgml_reactions={"sce00061": ()},  # KGML exists, declares nothing
+        reactions={"R00742": make_kegg_reaction("R00742", name="fake reaction R00742")},
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f10-empty-kgml-fallback",
+            source_pathway_id="sce00061",
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert len(result.discovered_reaction_ids) == 1
+    assert ("link", ("reaction", "sce00061")) in kegg.calls
+
+
+def test_f10_neither_kgml_nor_link_yields_reactions_still_blocks_explicitly(
+    db_session: Session,
+) -> None:
+    """F9 must not be weakened by this completion: a pathway with genuinely zero
+    reaction evidence from either mechanism still produces the same explicit,
+    blocking frontier item as before -- never silently treated as success."""
+    kegg = FakeKeggConnector(
+        pathways={"sce00061": "fatty acid biosynthesis - Saccharomyces cerevisiae"},
+        pathway_reactions={"sce00061": ()},
+        kgml_reactions={"sce00061": ()},
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f10-both-empty",
+            source_pathway_id="sce00061",
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert result.discovered_reaction_ids == ()
+    reasons = {item.reason for item in result.unresolved_frontier}
+    assert FrontierReason.PATHWAY_REACTION_MEMBERSHIP_EMPTY in reasons
+    assert result.agent2_readiness.is_ready is False
+
+
+def test_f10_second_organism_prefix_proves_no_organism_hardcoding(db_session: Session) -> None:
+    """A synthetic, non-yeast organism-style pathway id (``xyz00061``) exercises the
+    exact same code path with the exact same result shape -- proving the algorithm
+    recognizes "does this pathway id have its own KGML diagram," never a specific
+    organism code. No live network is used; the fake's KGML document is fabricated
+    for this made-up prefix."""
+    kegg = FakeKeggConnector(
+        pathways={"xyz00061": "fatty acid biosynthesis - Fakeorganismus xylosus"},
+        pathway_reactions={"xyz00061": ("R00742", "R01626", "R09999")},
+        kgml_reactions={"xyz00061": ("R00742", "R01626")},
+        reactions={
+            reaction_id: make_kegg_reaction(reaction_id, name=f"fake reaction {reaction_id}")
+            for reaction_id in ("R00742", "R01626", "R09999")
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-f10-non-yeast-organism",
+            organism_text="Fakeorganismus xylosus",
+            organism_ncbi_taxonomy_id=999999,
+            source_pathway_id="xyz00061",
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert len(result.discovered_reaction_ids) == 2
+    resolved_kegg_ids = {call[1][0] for call in kegg.calls if call[0] == "fetch"}
+    assert "R09999" not in resolved_kegg_ids

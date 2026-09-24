@@ -33,10 +33,12 @@ from app.pathway_curation.types import (
 #: already resolved by the time either could appear.
 FRONTIER_PRIORITY_ORDER: tuple[FrontierReason, ...] = (
     FrontierReason.UNRESOLVED_REACTION_IDENTITY,
+    FrontierReason.PATHWAY_REACTION_MEMBERSHIP_EMPTY,
     FrontierReason.REACTION_MISSING_PARTICIPANTS,
     FrontierReason.UNRESOLVED_REACTION_PARTICIPANT,
     FrontierReason.MISSING_COMPARTMENT_CONTEXT,
     FrontierReason.UNRESOLVED_CATALYST,
+    FrontierReason.REACTION_CATALYST_UNRESOLVED,
     FrontierReason.REACTION_ENZYME_PERSISTENCE_FAILED,
     FrontierReason.MISSING_ORGANISM_CONTEXT,
     FrontierReason.MISSING_PUBLICATION,
@@ -68,9 +70,11 @@ _PRIORITY_RANK: dict[FrontierReason, int] = {
 _STRUCTURAL_FRONTIER_REASONS = frozenset(
     {
         FrontierReason.UNRESOLVED_REACTION_IDENTITY,
+        FrontierReason.PATHWAY_REACTION_MEMBERSHIP_EMPTY,
         FrontierReason.REACTION_MISSING_PARTICIPANTS,
         FrontierReason.UNRESOLVED_REACTION_PARTICIPANT,
         FrontierReason.UNRESOLVED_CATALYST,
+        FrontierReason.REACTION_CATALYST_UNRESOLVED,
         FrontierReason.REACTION_ENZYME_PERSISTENCE_FAILED,
     }
 )

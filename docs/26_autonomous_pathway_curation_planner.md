@@ -652,41 +652,48 @@ progressed -- never a second, pathway-curation-specific gap detector.
 
 ## 33. Versioning
 
-`PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1"`
-(`app.pathway_curation.types`) is this package's own policy version, a
-single string constant, bumped only when the planning/execution
-*behavior* changes materially -- mirroring the sibling Agent 2
-repository's identical versioning convention, never a semantic-versioning
-subsystem of its own. It is carried on every `PathwayCurationPlan
-.policy_version`.
+`PATHWAY_CURATION_POLICY_VERSION` (`app.pathway_curation.types`) is this
+package's own policy version, a single string constant, bumped only when
+the planning/execution *behavior* changes materially -- mirroring the
+sibling Agent 2 repository's identical versioning convention, never a
+semantic-versioning subsystem of its own. It is carried on every
+`PathwayCurationPlan.policy_version`.
 
-**This revision keeps `"pathway-curation-v1"` unchanged.** The
-acceptance criterion for bumping it is a materially different planning/
-execution *behavior* as observed from this package's own public contract
--- and while this revision adds real capability (participant resolution,
-catalyst association, OED wiring, the readiness assessment), it does so
-entirely by *filling in* previously-declared-but-unimplemented behavior
-(the plan's own fixed backbone, the `FrontierReason`/`PlannerAction`
-vocabularies, and the request/result shapes were already declared to
-support exactly this) rather than changing what the contract itself
-promises. This is still the unreleased Increment C implementation, being
-completed before its first commit -- not a second, released increment;
-`"pathway-curation-v2"` would misrepresent that.
+**The Increment C pre-commit revision kept it at `"pathway-curation-v1"`**
+(filling in previously-declared-but-unimplemented behavior -- participant
+resolution, catalyst association, OED wiring, the readiness assessment --
+without changing what the contract itself promised).
+
+**Increment C.1 bumps it to `"pathway-curation-v1.1"`.** F1 changes what
+reaction-membership discovery actually returns for a real pathway (from
+"whatever a `REACTION` field happened to contain, often nothing" to "every
+reaction KEGG's own link operation reports"); F2 changes what catalyst
+discovery does when no seed is supplied (from "nothing" to "an
+organism-scoped, EC-driven search"); F4 adds a new, precedence-bearing
+request field; F6 changes what `is_ready` can report for the same export
+shape (an empty export was `True`, is now always `False`). Each is a
+materially different, released behavior change observable from this
+package's own public contract, not a fix invisible to a caller -- exactly
+the bumping criterion §33 itself states. Still a dotted, pre-1.0-style
+increment, not a new `v2`: no request/result field was removed or
+repurposed, only added to or corrected, and this remains the same
+unreleased-until-committed Increment C lineage.
 
 **`AGENT1_CONTRACT_VERSION` is unchanged (`"1.2"`) for a different,
 independent reason: `Agent1CuratedKnowledgeView`'s own field shape did not
-change.** This revision populates fields that already existed on it
-(`reaction_participants`, `reaction_enzyme_associations`) -- via the
-existing `get_agent1_knowledge_package`/`get_agent1_curated_knowledge_view`
-export chain, entirely unmodified -- rather than adding a new field to
-either container type. `AGENT1_CONTRACT_VERSION` bumps only when the
-actual Agent 1 -> Agent 2 handoff *schema* changes (`app.agent1.types`'s
-own docstring); populating an existing, previously-empty field with real
-data is not a schema change. `Agent2ReadinessAssessment` itself is a new,
-`app.pathway_curation`-only type, attached only to `PathwayCurationResult`
-(this package's own result type) -- it is not part of, and does not
-require bumping, the `Agent1KnowledgePackage`/`Agent1CuratedKnowledgeView`
-contract at all.
+change, in either the pre-commit revision or C.1.** Both revisions
+populate fields that already existed on it (`reaction_participants`,
+`reaction_enzyme_associations`) -- via the existing `get_agent1_
+knowledge_package`/`get_agent1_curated_knowledge_view` export chain,
+entirely unmodified -- rather than adding a new field to either container
+type. `AGENT1_CONTRACT_VERSION` bumps only when the actual Agent 1 ->
+Agent 2 handoff *schema* changes (`app.agent1.types`'s own docstring);
+populating an existing, previously-empty field with real data is not a
+schema change, and neither is adding `modelable_reaction_count`/
+`NO_MODELABLE_REACTIONS` to `Agent2ReadinessAssessment` (§36/§44) --
+that type is `app.pathway_curation`-only, attached only to
+`PathwayCurationResult` (this package's own result type), never part of
+the `Agent1KnowledgePackage`/`Agent1CuratedKnowledgeView` contract at all.
 
 ## 34. Auditability
 
@@ -746,12 +753,16 @@ biochemical participants and valid structural references.**
 (tuples of `Agent2ReadinessIssue`: a controlled `Agent2ReadinessIssueCode`,
 a `blocking: bool`, a human-readable `message`, and the specific
 `entity_id` involved), and plain counts (`reaction_count`,
+`modelable_reaction_count` -- added in Increment C.1, §44 --
 `participant_count`, `compound_count`, `compartment_count`,
 `reaction_enzyme_count`, `kinetic_measurement_count`,
 `enzyme_state_count`).
 
 **Blocking issue codes** (any one of these makes `is_ready` `False`):
 
+* `NO_MODELABLE_REACTIONS` (Increment C.1, §44) -- zero exported reactions
+  satisfy the modelable-reaction definition below; always checked in
+  addition to, never instead of, every other check here.
 * `REACTION_WITHOUT_PARTICIPANTS` -- a reaction with zero exported
   `ReactionParticipant` rows.
 * `PARTICIPANT_COMPOUND_MISSING` -- a participant's `compound_id` does not
@@ -802,14 +813,17 @@ mutates it (§10's read-only discipline extended to this final step, too).
   generation from free text (as opposed to structural discovery via KEGG/
   SGD/UniProt/PubMed/SABIO-RK/OED) is out of scope. A discovered
   publication is persisted as a `Publication` row; it produces no
-  `Claim`/`Evidence` on its own.
+  `Claim`/`Evidence` on its own. **This is F5, and it remains explicitly
+  deferred by Increment C.1** -- see §45.
 * Enzyme complexes are never discovered or associated (§22) -- no
   connector in this repository can currently establish complex
   composition, and `Agent2ReadinessAssessment` cannot even verify a
-  `complex_id` reference for the same reason (§36).
+  `complex_id` reference for the same reason (§36). Increment C.1 does not
+  change this: it is one of this increment's explicit non-goals (see §45).
 * Regulation and enzyme-state discovery are accepted request fields with
   no executor implementation (§25) -- explicitly disclosed via the
   `REGULATION_REQUESTED_NOT_SUPPORTED` frontier item, never silent.
+  Unchanged by Increment C.1.
 * Reaction participants are resolved from KEGG's own `EQUATION` field
   only (§18-19); no Rhea/MetaCyc equation source is parsed (neither
   connector exists in this repository).
@@ -818,18 +832,34 @@ mutates it (§10's read-only discipline extended to this final step, too).
   per-participant or per-reaction compartment localization, so there is
   no more specific evidence to prefer over it, and none to fall back to
   beneath it.
-* The catalyst evidence hierarchy (§22) is deliberately narrower than a
-  fully general one: it requires an explicit request-level seed, not
-  merely "a real connector found this protein for this organism" --
-  broader organism-specific reaction<->gene mapping connectors (were one
-  ever added) could relax this in a future increment without changing
-  this executor's own conservative default.
-* This increment has not yet been run against the real, live KEGG/SGD/
-  UniProt/PubMed/SABIO-RK/OED connectors for the yeast
-  fatty-acid-biosynthesis pilot described in §1 -- every test here (§38)
-  uses deterministic fake connectors; running the real pilot is an
-  explicitly deferred next step, after this revision is reviewed and
-  committed.
+* The catalyst evidence hierarchy (§22, extended by §42) is still
+  deliberately narrower than a fully general one: a `ReactionEnzyme`
+  association still requires either an explicit request-level seed or a
+  clean, single, organism-scoped EC-number-driven UniProt candidate --
+  never bare EC equality across every organism sharing it. Increment C.1's
+  own EC-based discovery route (§42) reuses UniProt's existing
+  `organism_name`-text-filter query shape unchanged (this package may not
+  modify `app.entity_resolution.adapters`) -- confirmed, live, to admit
+  more than one same-named-species UniProt entry (distinct sequenced
+  strains/isolates) than a strict `organism_id`-based filter would; this
+  makes EC-based discovery occasionally more connector-call-expensive and
+  occasionally more ambiguity-prone than a hypothetical stricter query
+  would be, never less conservative about what it actually persists.
+* This increment (through its pre-commit revision) had not yet been run
+  against the real, live KEGG/SGD/UniProt/PubMed/SABIO-RK/OED connectors
+  before Pilot 1 Run 1 -- that pilot is what discovered F1/F2/F4/F6/F7,
+  all addressed by Increment C.1 (§39-§45). Pilot 1 Run 2, against this
+  revision, is the explicitly deferred next step after review and commit.
+* **(Superseded by §46's completion below, kept here for history.)**
+  Organism-specific reaction-membership resolution (F1) was, until §46,
+  blocked rather than solved: `sce00061` legitimately linked to zero
+  reactions, and this was correctly disclosed (`PATHWAY_REACTION_
+  MEMBERSHIP_EMPTY`) rather than silently treated as `map00061`'s full 68
+  reactions. §46 replaces this bullet with a resolved mechanism; its own
+  residual limitation (KGML pathway-diagram nodes are anchored on a
+  representative KO per diagram position, not always the organism's own
+  most-specific KO from its `GENE` field) is documented there instead of
+  here.
 
 ## 38. Testing
 
@@ -868,7 +898,342 @@ no forbidden modeling/simulation library or definition anywhere in this
 package, no call to `human_review_claim`, no import of a nonexistent
 Agent 2-5 package, no model-shaped field on any contract type).
 
-## 39. Final architectural rule
+**Increment C.1** added: `tests/connectors/test_kegg.py` gained 12 tests
+for `link()`/`parse_link_response` (a valid response, multiple entries,
+literal-duplicate-row preservation, response-order preservation, an empty
+response, a malformed line, a blank identifier, a mismatched relationship
+type returned verbatim, a connector failure, and both empty-argument
+validations). `test_types.py` gained coverage for `strain_text` and
+`source_pathway_id` (valid KEGG-shaped ids, rejection of malformed ones,
+and blank-is-`None` consistent with every other optional string field).
+`test_readiness.py` gained the F6 suite (§44): a completely empty export,
+an organism-only export, an export whose only reactions all lack
+participants, and a case where one modelable reaction among several is
+already sufficient. `test_executor.py` gained a dedicated F1/F2/F4
+regression section: a pathway record with no `REACTION` field whose
+membership still resolves via `link()` (the central F1 test), empty
+reaction membership producing `PATHWAY_REACTION_MEMBERSHIP_EMPTY`, a
+`link()` connector failure producing `SOURCE_FAILURE`, a structured
+pathway id used directly with no free-text search ever issued, a
+structured id taking precedence over a simultaneously-supplied
+`biological_process`, a structured id that does not resolve, the
+free-text fallback when no structured id is supplied, autonomous catalyst
+discovery from a reaction's own EC number with `seed_entity_texts=()`,
+the required negative case (a real isozyme pair sharing one EC number
+never fabricates an association), no discovery attempted when a reaction
+carries no EC number at all, and seed-based and autonomous discovery
+coexisting without duplication. The full fake pilot test was updated to
+use `seed_entity_texts=()`, relying entirely on autonomous discovery, and
+still ends `agent2_readiness.is_ready is True`.
+
+**Increment C.1's organism-specific pathway-resolution completion** (§46)
+added: `tests/connectors/test_kegg.py` gained 8 tests for `get_kgml()`/
+`parse_kgml_reaction_ids` (raw-XML retrieval, 404-is-`None`, a non-404
+failure still raising, empty-`pathway_id` rejection, unique-and-ordered
+extraction, extraction of every id from a multi-id `name` attribute, a
+no-`<reaction>`-elements document parsing to an empty tuple, and malformed
+XML raising `ConnectorParseError`). `test_executor.py` gained an F10
+section: an organism-specific pathway's KGML subset is used and the
+reference-only reactions a naive `map`-equivalence approach would have
+imported are never fetched/expanded; a generic pathway with no KGML
+document keeps the original `link()`-only behavior byte-for-byte; a KGML
+document that exists but is empty still falls back to `link()`; a pathway
+with zero reactions from either mechanism still produces the F9
+`PATHWAY_REACTION_MEMBERSHIP_EMPTY` block; and a synthetic, non-yeast
+organism-prefixed id (`xyz00061`) exercises the identical code path,
+proving no organism code is special-cased.
+
+## 39. Increment C.1 — Live Pathway Discovery Repair
+
+Pilot 1 Run 1 (`artifacts/pilots/yeast_fatty_acid_001/13_pilot_report.md`)
+ran this increment's own pre-commit revision against real KEGG/SGD/
+UniProt/PubMed/SABIO-RK/OED services for the first time and found that
+structural pathway curation never actually began: KEGG pathway discovery
+itself succeeded, but reaction-membership discovery silently returned
+zero reactions, with no frontier item disclosing it, and the run still
+reported `agent2_readiness.is_ready = True` for a completely empty
+export. Four mandatory defects (F1, F2, F4, F6) and one opportunistic
+documentation fix (F7) are corrected below; one (F3) is added as a small,
+clean extension; one (F5) is explicitly and deliberately left deferred.
+Nothing here redesigns Increment C, adds Agent 2 behavior, adds Antimony
+generation, or adds LLM literature extraction.
+
+## 40. F1: KEGG pathway<->reaction link operation
+
+See §13/§18's already-updated text and `app.connectors.kegg`'s own module
+docstring for the full verification detail (a live `GET /get/{pathway}`
+response, for both a generic and an organism-specific pathway, plus a
+third, unrelated pathway to rule out a lipid-pathway-specific quirk, all
+confirmed to carry no `REACTION` field). The fix: `KeggConnector.link()`
+(`GET /link/{target_db}/{dbentries}`) is a new, generic, `search()`-shaped
+connector primitive -- retrieval and parsing only, no curation policy --
+and `strategies.discover_reactions_in_pathway` now calls
+`connector.link("reaction", pathway_id)` exclusively; it no longer reads
+the pathway's own fetched record at all. A pathway that resolves but
+links to zero reactions now always produces a `PATHWAY_REACTION_
+MEMBERSHIP_EMPTY` frontier item (§7), which is also a structural,
+`COMPLETE`-blocking reason (`policy._STRUCTURAL_FRONTIER_REASONS`) and
+therefore also drives `Agent2ReadinessAssessment.is_ready = False` via
+§44's modelable-reaction rule. A `link()` failure is reported as
+`SOURCE_FAILURE`, never confused with a legitimate empty result. The
+pathway's own `/get/` record may still be fetched for metadata
+(`strategies.fetch_kegg_pathway_metadata`) -- used only to confirm an
+explicitly supplied structured pathway id actually resolves (§41), never
+as a reaction-membership source.
+
+## 41. F4: structured pathway ids and precedence
+
+`PathwayCurationRequest.source_pathway_id` is an optional, validated,
+KEGG-shaped pathway id (`^[a-z]{2,5}[0-9]{5}$`, e.g. `sce00061`/
+`map00061`/`hsa00061`/`ko00061` -- deliberately not overfit to `sce`
+alone). When supplied, `executor._resolve_pathway_identity` uses it
+directly: `strategies.fetch_kegg_pathway_metadata` confirms it resolves,
+and `strategies.discover_pathway` (the free-text search) is never called
+at all -- confirmed by dedicated tests asserting no `("search", (...,
+"pathway"))` call appears in the connector's own call log, even when a
+`biological_process` that would otherwise match a *different* pathway is
+also supplied. A structured id that does not resolve on KEGG becomes an
+`UNRESOLVED_REACTION_IDENTITY` frontier item, exactly like an
+unsuccessful free-text search. Leaving `source_pathway_id` unset
+preserves the pre-C.1 free-text behavior exactly (§12) -- `biological_
+process` remains required regardless, and is still used for literature
+queries (§17) and as the plan's own human-readable scope statement
+(§10) even when a structured id drives structural discovery.
+
+## 42. F2: autonomous catalyst discovery from reaction evidence
+
+Before C.1, `app.pathway_curation.executor` had exactly one path to SGD/
+UniProt: `_resolve_seeded_genes_and_proteins`, gated entirely on
+`request.seed_entity_texts`. An empty seed list meant catalyst discovery
+never started at all, regardless of what the resolved reactions
+themselves disclosed. `executor._discover_catalysts_from_reactions` (new)
+removes that bottleneck: for every discovered reaction's own already-
+persisted `ec_number` (KEGG's `ENZYME` annotation, via `reaction_
+identity_from_kegg`, unmodified), it calls `strategies.discover_
+catalyst_candidates_by_ec_number` -- an organism-scoped UniProt search
+keyed by the EC number itself (a query string like `"ec:6.4.1.2"`) rather
+than a caller-supplied gene symbol. This runs whenever UniProt is
+configured and at least one reaction has been discovered, **unconditionally
+on `seed_entity_texts`**.
+
+**Discovery, never invented evidence** (§16 of the Increment C.1
+instructions): `discover_catalyst_candidates_by_ec_number` is a thin reuse
+of the existing `resolve_protein_by_text`/`resolve_protein_via_uniprot`
+-- an EC-number query is simply a different query string, not a new
+resolution algorithm, so a candidate this discovers reaches
+`NormalizationStatus`/persistence through the exact same, unmodified
+code path a seeded gene symbol already does. Multiple distinct candidates
+sharing the queried EC number are never resolved arbitrarily: they reach
+`AMBIGUOUS_IDENTITY` through the same, unmodified `classify_outcome`
+machinery every other discovery path in this package already uses.
+**Confirmed live, while implementing this increment, that this is a real
+case, not a hypothetical one**: EC 6.4.1.2 in *Saccharomyces cerevisiae*
+alone resolves to two distinct, real gene products on UniProt --
+cytosolic `ACC1` (Q00955) and mitochondrial `HFA1` (P32874), a genuine
+isozyme pair. An ambiguous or fully-unresolved EC-based discovery attempt
+becomes a `REACTION_CATALYST_UNRESOLVED` frontier item (§7) -- the
+autonomous-discovery analogue of `UNRESOLVED_CATALYST` (reserved for an
+explicitly seeded text that failed), both in the same structural,
+`COMPLETE`-blocking tier.
+
+A resolved candidate is appended to the same `resolved_protein_ec_
+numbers` list seed-based resolution already populates -- `executor
+._associate_catalysts` (creates `ReactionEnzyme` only for an exact
+EC-to-reaction match, §22, unchanged) and `_discover_kinetics` (§23,
+unchanged) require **no code changes at all** to pick up an
+autonomously-discovered protein; both already iterate that one list
+regardless of which path populated it. `seed_entity_texts`'s semantics
+are therefore now exactly what §20 of the Increment C.1 instructions
+requires: *optional caller-supplied hints that may augment discovery*,
+never *the only proteins Agent 1 is allowed to investigate* -- a seeded
+gene and an autonomously-discovered one may coexist for the same run, and
+when they resolve to the same real protein, persistence reuses it
+(`MATCHED`), never duplicating.
+
+Organism scoping for this discovery route is exactly as precise as the
+pre-existing, unmodified `resolve_protein_via_uniprot` adapter already
+makes it for every other UniProt discovery call in this package (an
+`organism_name` text filter, not a numeric `organism_id` filter) -- see
+§37's disclosed limitation for the precision/cost trade-off this implies,
+never resolved by modifying `app.entity_resolution.adapters` (out of
+this package's own scope boundary).
+
+## 43. F3: optional strain context
+
+`PathwayCurationRequest.strain_text` is a small, additive field: `app.
+normalization.organism.normalize_organism`/`OrganismIdentity`/`strategies
+.resolve_organism` already accepted a `strain` parameter before C.1 -- the
+executor simply always called it with a hard-coded `None`. C.1 threads
+`request.strain_text` through unchanged (`strategies.resolve_organism(...,
+strain=effective_request.strain_text, ...)`); no other code changed, no
+migration was needed (`Organism.strain` already exists), and `"S288C"` is
+never concatenated into `organism_text` or any other field -- organism
+resolution's own existing `(scientific_name, strain)` identity matching
+(§11, unmodified) does the rest.
+
+## 44. F6: readiness is never vacuously true
+
+See §36 (updated in place, not renumbered, since it already existed) for
+the complete `Agent2ReadinessAssessment`/`NO_MODELABLE_REACTIONS`/
+`modelable_reaction_count` contract. In summary: a reaction counts as
+*modelable* only if it exists, has at least one participant, every
+participant's compound resolves, every non-`None` compartment resolves,
+and every role/stoichiometry is valid -- deliberately never requiring a
+resolved catalyst, kinetics, or regulation (§24 of the Increment C.1
+instructions). Zero modelable reactions is always its own additional
+blocking issue, regardless of what else the export does or does not
+contain -- an empty export, an organism-only export, and an export whose
+only reactions all lack usable participants are all now `is_ready =
+False` for this reason alone, closing the exact gap Pilot 1 Run 1 found.
+
+## 45. F5 deferred; F7 corrected; enzyme complexes remain a non-goal
+
+**F5 (publications not in the Agent 1 handoff) is explicitly deferred, not
+solved, by this revision.** `app.agent1.service._select_publications`
+derives the exported publication set exclusively from `Evidence
+.publication_id` values (an Increment 27 design decision, not introduced
+by Increment C or C.1); this package's own `_discover_publications` only
+ever persists a bare `Publication` row and creates no `Claim`/`Evidence`
+(no LLM adapter exists in this repository, and this revision adds none).
+**Increment C/C.1 may therefore discover and persist publications that
+are not exported in the Agent 1 handoff unless connected through the
+existing Claims/Evidence architecture** -- a known, disclosed enrichment/
+handoff limitation, tracked separately, and it does not block structural
+pathway discovery (F1/F2/F4/F6 are all independent of it).
+
+**F7 (a stale `Settings.sabiork_base_url` docstring claim) is corrected.**
+That docstring previously claimed `SabiorkConnector.from_settings` "falls
+back to a live-verified default endpoint when this is unset"; the actual
+code raises `ValueError` when unset, exactly like `kegg_base_url`/
+`sgd_base_url`/`uniprot_base_url`. The docstring is corrected to say so;
+no runtime behavior changed (`app.connectors.sabiork.SabiorkConnector`
+itself was not modified).
+
+**Enzyme complexes remain an explicit non-goal of this revision.** The
+real yeast FAS1/FAS2 fatty-acid-synthase system is exactly the kind of
+multi-subunit complex this package cannot represent as a catalyst today
+(§22/§37) -- discovering FAS1/FAS2 as genes/proteins, and disclosing that
+their catalytic *complex* cannot be represented, is acceptable and
+expected; inventing a single-protein stand-in catalyst to make readiness
+report `True` is never acceptable, and this revision does not do so.
+
+## 46. Organism-specific KEGG pathway resolution (Increment C.1 final completion)
+
+§40 (F1) fixed pathway-reaction discovery in general, but left one gap
+undiscovered until a dedicated, live-KEGG-only investigation was run
+specifically against it: `link("reaction", pathway_id)` -- F1's own
+mechanism -- returns real data for a generic reference pathway
+(`map00061`: 68 reactions) but returns **zero** rows for the corresponding
+organism-specific pathway (`sce00061`). Before this completion, that
+organism-specific case correctly, honestly produced `PATHWAY_REACTION_
+MEMBERSHIP_EMPTY` (F9, §40) -- a truthful "cannot resolve this" outcome,
+never a silent failure, but also never useful for the biological scope a
+caller actually asked for (`sce00061`, not `map00061`).
+
+**The investigation's central question**: does KEGG expose, anywhere in
+its structured (non-HTML, non-OCR) API, an organism-specific pathway's own
+reaction subset -- and can it be obtained deterministically, without
+either (a) treating every one of `map00061`'s 68 reference reactions as
+yeast-specific (confirmed live to be biologically wrong: several are
+discrete-enzyme bacterial/plant fatty-acid-synthase-II steps that yeast's
+own FAS-I megasynthase gene set does not separately encode) or (b)
+inventing a heuristic KEGG does not actually publish.
+
+**What was tried and rejected first.** A gene-level chain --
+`link("sce", "sce00061")` (13 genes, confirmed to exactly match the
+flat-file `GENE` field) → each gene's own `link("enzyme", gene)`/
+`link("ko", gene)` → `link("reaction", "ec:...")`/`link("reaction",
+"ko:...")`, intersected against `map00061`'s own 68 reactions -- was
+built and evaluated live before any code was changed. It recovered only
+41 of 68 (60%) with the remaining 27 genuinely ambiguous (wildcard/
+incomplete EC classifications with no resolvable target; one gene's own
+EC numbers pointing to reactions absent from the reference pathway
+entirely, which would have introduced false positives without the
+reference-intersection step). This chain was **not implemented**: its own
+27-reaction gap sampled as core FAS-cycle chemistry, not clearly-excluded
+bacterial/plant-only steps, meaning a chunk of the "unresolved" set was
+plausibly a false negative of the method, not a correctly-excluded
+non-yeast reaction -- an uncomfortable ambiguity this package's own
+scientific-conservatism principle (§47's final rule) does not accept
+papering over with a disclosed-but-uncertain partial mapping when a
+strictly better mechanism turned out to exist.
+
+**What was found instead: KGML.** Every organism-specific (and KO-level)
+KEGG pathway id has its own KGML pathway-diagram document (`GET /get/
+{pathway_id}/kgml`, KEGG's long-published pathway markup format, retrieved
+via the same unauthenticated REST API as every other operation this
+connector uses). That document's own `<reaction name="rn:...">` elements
+are KEGG's own curated, per-organism reaction nodes for that diagram --
+confirmed live across three independent, unrelated organisms
+(`sce00061` -> 41 reactions, `hsa00061` -> 45, `eco00061` -> 50), every
+single one of which is a strict subset of `map00061`'s 68 reference
+reactions, with zero exceptions in any of the three. A generic
+"map"-prefixed reference pathway has no per-organism diagram of its own
+and consistently 404s at this same endpoint (confirmed live) -- which is
+exactly the signal `get_kgml()` uses to mean "not applicable here," never
+an invented empty result.
+
+**The implementation** (`app.connectors.kegg.KeggConnector.get_kgml`/
+`parse_kgml_reaction_ids`, `app.pathway_curation.strategies
+.discover_reactions_in_pathway`): for any `pathway_id`, try its own KGML
+document first; if one exists and declares at least one reaction, that
+set *is* the answer, used as-is, with no further intersection or
+provenance-tracking step needed -- it is already KEGG's own organism-
+scoped answer, not a candidate this package derived and must justify.
+Only when no KGML document exists (or one exists but is empty) does this
+fall through to the pre-existing `link("reaction", pathway_id)` mechanism
+-- preserving §40's original F1 behavior byte-for-byte for every
+"map"-prefixed pathway id this function already handled correctly. There
+is no organism-code-specific branch anywhere in this implementation: the
+same two calls run for every `pathway_id` regardless of prefix (confirmed
+by a dedicated test using a synthetic, non-yeast organism prefix,
+`xyz00061`, with no live network access). The requested pathway id itself
+is never replaced: `sce00061` is what is fetched, discovered, and audited
+throughout -- `map00061` is never consulted at all in this mechanism, so
+there is no separate "reference pathway id" to track in provenance,
+unlike the rejected gene/EC/KO chain above, which would have needed one.
+
+**Diagnostic cross-check (evaluation only, never hardcoded into
+production logic -- ACC1/HFA1/FAS1/FAS2 appear nowhere in
+`app/connectors/kegg.py` or `app/pathway_curation/`)**: live-verified that
+`sce00061`'s own `GENE` field lists all four (`YNR016C`/`ACC1`,
+`YMR207C`/`HFA1`, both `EC:6.4.1.2 6.3.4.14 2.1.3.15`/`KO:K11262`;
+`YKL182W`/`FAS1`, `YPL231W`/`FAS2`, both `EC:2.3.1.86`/`KO:K00668`/
+`K00667` respectively). In the KGML diagram itself, ACC1/HFA1's own
+reaction (`R00742`) is backed by a `type="gene"` entry directly naming
+`sce:YMR207C sce:YNR016C` -- the most specific evidence KGML offers.
+FAS1/FAS2's iterative elongation cycle is backed by 33 `type="ortholog"`
+entries naming `ko:K00665` ("fatty acid synthase, animal type") rather
+than yeast's own more specific `K00667`/`K00668` -- KEGG's pathway-diagram
+pipeline draws one representative ortholog per diagram position across an
+orthology group, which need not be the exact KO an organism's own `GENE`
+field lists for the analogous activity. This is a genuine, disclosed
+residual limitation of KGML-based membership (§37): the *reaction* is
+still correctly attributed to the organism (both entry types are only
+drawn on an organism-specific diagram because that organism's genome
+mapping includes them), but the *specific KO cited on the diagram node*
+is not always the organism's own most-precise one. Nothing in this
+package reads or depends on which KO a KGML node names -- only the
+reaction id -- so this limitation does not affect correctness of the
+implemented mechanism, only a possible future one that tried to use
+KGML's KO annotations for finer-grained catalyst attribution.
+
+**F9 is unweakened**: a pathway for which neither KGML nor `link()`
+yields any reaction still produces `PATHWAY_REACTION_MEMBERSHIP_EMPTY`,
+still blocks `COMPLETE`, and still drives `Agent2ReadinessAssessment
+.is_ready = False` via §44's modelable-reaction rule -- confirmed by a
+dedicated test. F2 (catalyst discovery) and F5 (Claims/Evidence) are
+untouched; same-EC-number is still never sufficient evidence for a
+`ReactionEnzyme` association (§42), regardless of this section's own,
+separate use of EC/KO numbers during investigation.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` remains
+`"pathway-curation-v1.1"` -- this is the completion of the same
+already-uncommitted C.1 increment §33 introduced, not a new behavioral
+generation. `AGENT1_CONTRACT_VERSION` is unchanged: the Agent 1 -> Agent 2
+handoff schema itself gained no new field.
+
+## 47. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.
@@ -891,3 +1256,10 @@ Agent 2-5 package, no model-shaped field on any contract type).
 > self-assessment of the result; it never means autonomous acceptance of
 > curated knowledge, and it never means Agent 1 building, simulating, or
 > critiquing a model.
+>
+> A structural claim this package makes about a real biological source --
+> "this pathway has these reactions," "this export is ready" -- must be
+> verified against how that source actually behaves today, not against how
+> it was assumed to behave when this package was first written; Pilot 1
+> Run 1 exists precisely because that verification was still owed, and
+> Increment C.1 is what paying it looks like.

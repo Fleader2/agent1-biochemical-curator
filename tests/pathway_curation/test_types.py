@@ -80,6 +80,51 @@ def test_request_accepts_valid_ncbi_taxonomy_id():
     assert request.organism_ncbi_taxonomy_id == 4932
 
 
+# --- F3: strain_text (Increment C.1) ------------------------------------------------------------
+
+
+def test_request_accepts_strain_text():
+    request = _request(strain_text="S288C")
+    assert request.strain_text == "S288C"
+
+
+def test_request_strain_text_defaults_to_none():
+    assert _request().strain_text is None
+
+
+def test_request_strips_whitespace_from_strain_text():
+    assert _request(strain_text="  S288C  ").strain_text == "S288C"
+
+
+# --- F4: source_pathway_id (Increment C.1) ------------------------------------------------------
+
+
+def test_request_accepts_valid_kegg_pathway_ids():
+    assert _request(source_pathway_id="sce00061").source_pathway_id == "sce00061"
+    assert _request(source_pathway_id="map00061").source_pathway_id == "map00061"
+    assert _request(source_pathway_id="hsa00061").source_pathway_id == "hsa00061"
+    assert _request(source_pathway_id="ko00061").source_pathway_id == "ko00061"
+
+
+def test_request_source_pathway_id_defaults_to_none():
+    assert _request().source_pathway_id is None
+
+
+def test_request_rejects_malformed_source_pathway_id():
+    with pytest.raises(ValueError):
+        _request(source_pathway_id="fatty acid biosynthesis")
+    with pytest.raises(ValueError):
+        _request(source_pathway_id="sce")
+    with pytest.raises(ValueError):
+        _request(source_pathway_id="00061")
+
+
+def test_request_blank_source_pathway_id_is_none_not_an_error():
+    """A blank string is treated as "not supplied," consistent with every other
+    optional string field on this dataclass -- never a validation error."""
+    assert _request(source_pathway_id="   ").source_pathway_id is None
+
+
 def test_request_is_frozen():
     request = _request()
     with pytest.raises(dataclasses.FrozenInstanceError):

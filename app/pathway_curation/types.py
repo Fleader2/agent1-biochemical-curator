@@ -24,6 +24,7 @@ Sections:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
@@ -37,7 +38,22 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: execution *behavior* changes materially (see
 #: ``docs/26_autonomous_pathway_curation_planner.md`` §33 for the
 #: versioning convention this mirrors from the sibling Agent 2 repository).
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1"
+#:
+#: Bumped to ``v1.1`` by Agent 1.x Increment C.1: pathway reaction-membership
+#: discovery, catalyst discovery, and the readiness-emptiness rule all
+#: changed materially (see ``docs/26_...md``'s C.1 section) -- a released
+#: behavior change, not merely a bug fix invisible to this version's own
+#: callers. Still a pre-1.0-style dotted increment, not a new ``v2``: no
+#: request/result field was removed or repurposed, only added to or
+#: corrected.
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.1"
+
+
+#: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase
+#: letters -- "map"/"ko"/"rn" generic databases, or an organism code like
+#: "sce"/"hsa"/"eco"/"ath") followed by a 5-digit pathway number. Deliberately
+#: not overfit to "sce" alone (Increment C.1, F4/Step 12).
+_KEGG_PATHWAY_ID_PATTERN = re.compile(r"^[a-z]{2,5}[0-9]{5}$")
 
 
 def _require_non_empty_str(value: str, *, field_name: str) -> str:
@@ -150,6 +166,14 @@ class FrontierReason(StrEnum):
     """
 
     UNRESOLVED_REACTION_IDENTITY = "UNRESOLVED_REACTION_IDENTITY"
+    #: A pathway was successfully resolved (by structured id or by free-text search), but
+    #: KEGG's own pathway<->reaction link operation returned zero reaction ids for it --
+    #: a real, legitimate "this pathway currently has no linked reactions" outcome,
+    #: distinct from ``UNRESOLVED_REACTION_IDENTITY`` (the *pathway itself* was never
+    #: found) and from ``SOURCE_FAILURE`` (the link call itself failed). Added in
+    #: Increment C.1 (F1/F9): Pilot 1 Run 1's central failure was that this exact
+    #: condition previously produced no frontier item at all.
+    PATHWAY_REACTION_MEMBERSHIP_EMPTY = "PATHWAY_REACTION_MEMBERSHIP_EMPTY"
     #: A reaction resolved structurally (it exists, it has a name/identifier) but ended up
     #: with zero exported participants -- e.g. its equation could not be parsed at all, or
     #: every one of its participant tokens failed to resolve. Added in the Increment C
@@ -164,6 +188,14 @@ class FrontierReason(StrEnum):
     #: reported ``FAILED``/``REQUIRES_REVIEW``. Added in the Increment C pre-commit
     #: revision.
     REACTION_ENZYME_PERSISTENCE_FAILED = "REACTION_ENZYME_PERSISTENCE_FAILED"
+    #: A resolved reaction carries a structured catalyst-discovery clue (an EC number,
+    #: KEGG's own ``ENZYME`` annotation) and autonomous candidate discovery (Increment
+    #: C.1, F2) was attempted from it, but no candidate reached enough organism-specific,
+    #: structured evidence to safely persist a ``ReactionEnzyme`` association -- the
+    #: catalyst-discovery analogue of ``UNRESOLVED_CATALYST`` (which is reserved for an
+    #: explicitly caller-*seeded* text that failed to resolve). Never produced merely
+    #: because no clue existed at all -- only when a real clue led nowhere conclusive.
+    REACTION_CATALYST_UNRESOLVED = "REACTION_CATALYST_UNRESOLVED"
     MISSING_ORGANISM_CONTEXT = "MISSING_ORGANISM_CONTEXT"
     MISSING_COMPARTMENT_CONTEXT = "MISSING_COMPARTMENT_CONTEXT"
     MISSING_PUBLICATION = "MISSING_PUBLICATION"
@@ -254,6 +286,38 @@ class PathwayCurationRequest:
     the existing schema permits (``ReactionParticipant.compartment_id`` is
     nullable) -- this package never defaults an unresolved compartment to
     ``"cytosol"`` or any other value.
+
+    ``source_pathway_id`` (Increment C.1, F4) is an optional, explicit,
+    structured pathway identifier (e.g. ``"sce00061"``, ``"map00061"``) --
+    the only pathway source this executor resolves against is KEGG today,
+    so this is documented as a KEGG pathway id rather than paired with a
+    separate ``source`` field (a source-neutral field would be unresolvable
+    overhead with only one real source behind it; see
+    ``docs/26_...md``'s C.1 section for the "smallest clear design"
+    reasoning). When supplied, it takes deterministic precedence over
+    ``biological_process`` for *structural* pathway resolution -- no
+    free-text KEGG pathway search is ever attempted
+    (``strategies.discover_pathway`` is simply not called). ``biological_process``
+    remains required regardless (human-readable scope, and still used as-is
+    for literature queries, §17) and is used for structural discovery only
+    when ``source_pathway_id`` is left ``None``. Validated at construction
+    time against KEGG's own stable identifier shape (organism/database code
+    letters followed by a 5-digit pathway number, e.g. ``sce00061``/
+    ``map00061``/``ko00061``/``hsa00061`` -- never overfit to ``sce`` alone)
+    -- a malformed value raises here, at request-construction time, rather
+    than surfacing as a confusing connector-level failure later.
+
+    ``strain_text`` (Increment C.1, F3) is optional, free-text strain
+    context (e.g. ``"S288C"``), threaded through unchanged to
+    ``strategies.resolve_organism``'s own pre-existing ``strain`` parameter
+    (which already existed and already did nothing before C.1, because the
+    executor previously always called it with a hard-coded ``None``
+    regardless of what a caller might have wanted -- see that module's
+    ``OrganismIdentity``/``normalize_organism``, both entirely unmodified by
+    this field). Never concatenated into ``organism_text`` or any other
+    field -- organism resolution's own existing strain-aware identity
+    matching (``(scientific_name, strain)``) is reused exactly as already
+    implemented for every other caller of ``normalize_organism``.
     """
 
     request_id: str
@@ -262,8 +326,10 @@ class PathwayCurationRequest:
 
     organism_id: UUID | None = None
     organism_ncbi_taxonomy_id: int | None = None
+    strain_text: str | None = None
     scope_description: str | None = None
     default_compartment_text: str | None = None
+    source_pathway_id: str | None = None
     seed_entity_texts: tuple[str, ...] = ()
     include_entity_kinds: tuple[EntityKind, ...] = ()
 
@@ -307,6 +373,9 @@ class PathwayCurationRequest:
                 f"got {self.organism_ncbi_taxonomy_id!r}"
             )
         object.__setattr__(
+            self, "strain_text", _clean_optional_str(self.strain_text, field_name="strain_text")
+        )
+        object.__setattr__(
             self,
             "scope_description",
             _clean_optional_str(self.scope_description, field_name="scope_description"),
@@ -318,6 +387,18 @@ class PathwayCurationRequest:
                 self.default_compartment_text, field_name="default_compartment_text"
             ),
         )
+        cleaned_pathway_id = _clean_optional_str(
+            self.source_pathway_id, field_name="source_pathway_id"
+        )
+        if cleaned_pathway_id is not None and not _KEGG_PATHWAY_ID_PATTERN.match(
+            cleaned_pathway_id
+        ):
+            raise ValueError(
+                "source_pathway_id must look like a KEGG pathway id (2-5 lowercase "
+                f"letters followed by 5 digits, e.g. 'sce00061'/'map00061'), got "
+                f"{cleaned_pathway_id!r}"
+            )
+        object.__setattr__(self, "source_pathway_id", cleaned_pathway_id)
         object.__setattr__(
             self,
             "seed_entity_texts",

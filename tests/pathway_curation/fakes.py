@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from app.connectors.kegg import (
     KeggCompoundRecord,
     KeggFlatFileRecord,
+    KeggLinkEntry,
     KeggReactionRecord,
     KeggSearchHit,
 )
@@ -29,12 +30,29 @@ from app.connectors.uniprot import UniProtEntryRecord, UniProtProteinRecord, Uni
 
 @dataclass
 class FakeKeggConnector:
-    """Deterministic fake for ``app.entity_resolution.adapters.KeggSearchAndFetch``."""
+    """Deterministic fake for ``app.pathway_curation.strategies.KeggPathwayCurationConnector``
+    (``search``/``fetch``/``normalize``, plus ``link`` -- Increment C.1).
+
+    Shaped after the real live KEGG API's actual behavior, confirmed during Increment
+    C.1's own implementation: a pathway's own ``fetch()`` record carries **no**
+    ``REACTION`` field (only ``NAME``/``ENZYME``-shaped metadata, mirroring a real
+    KEGG pathway ``/get/`` response) -- ``pathway_reactions`` is exposed exclusively
+    through ``link()``, exactly like the real pathway<->reaction ``link`` operation.
+    """
 
     pathways: dict[str, str] = field(default_factory=dict)
     pathway_reactions: dict[str, tuple[str, ...]] = field(default_factory=dict)
     reactions: dict[str, KeggReactionRecord] = field(default_factory=dict)
     compounds: dict[str, KeggCompoundRecord] = field(default_factory=dict)
+    kgml_reactions: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    """Increment C.1 (organism-specific pathway-resolution completion): pathway ids
+    keyed here have a fake KGML diagram declaring exactly these reaction ids --
+    ``discover_reactions_in_pathway`` tries this before ``pathway_reactions``/``link``.
+    A pathway id absent from this dict has no fake KGML document at all (mirrors a
+    live 404, i.e. a generic "map"-prefixed pathway), so ``get_kgml`` returns
+    ``None`` and callers fall through to ``link()`` exactly as before this dict
+    existed -- every pre-existing test that never sets this field is unaffected.
+    """
     calls: list[tuple[str, tuple]] = field(default_factory=list)
 
     def search(self, query: str, *, database: str) -> list[KeggSearchHit]:
@@ -67,11 +85,12 @@ class FakeKeggConnector:
         if external_id in self.compounds:
             return self.compounds[external_id].raw
         if external_id in self.pathway_reactions:
-            reaction_lines = tuple(
-                f"{rid}  fake reaction {rid}" for rid in self.pathway_reactions[external_id]
-            )
+            # A real KEGG pathway record: metadata only, never a REACTION field.
+            description = self.pathways.get(external_id, external_id)
             return KeggFlatFileRecord(
-                entry_id=external_id, entry_type="pathway", fields={"REACTION": reaction_lines}
+                entry_id=external_id,
+                entry_type="pathway",
+                fields={"NAME": (description,)},
             )
         return None
 
@@ -86,6 +105,32 @@ class FakeKeggConnector:
             if record.raw is raw:
                 return record
         return raw
+
+    def link(self, target_db: str, dbentries: str) -> list[KeggLinkEntry]:
+        self.calls.append(("link", (target_db, dbentries)))
+        if target_db != "reaction":
+            return []
+        reaction_ids = self.pathway_reactions.get(dbentries, ())
+        return [
+            KeggLinkEntry(source_id=dbentries, target_id=reaction_id)
+            for reaction_id in reaction_ids
+        ]
+
+    def get_kgml(self, pathway_id: str) -> str | None:
+        """Fake KGML retrieval (Increment C.1 organism-specific completion): a real,
+        parseable-by-the-real-parser XML document listing exactly ``kgml_reactions``'
+        reaction ids for this pathway id, or ``None`` (mirroring a live 404) when this
+        pathway id has no entry there at all -- never a separate hand-rolled parse
+        path, so tests exercise ``parse_kgml_reaction_ids`` for real.
+        """
+        self.calls.append(("get_kgml", (pathway_id,)))
+        if pathway_id not in self.kgml_reactions:
+            return None
+        reaction_elements = "".join(
+            f'<reaction id="{index}" name="rn:{reaction_id}" type="irreversible"/>'
+            for index, reaction_id in enumerate(self.kgml_reactions[pathway_id], start=1)
+        )
+        return f'<pathway name="path:{pathway_id}">{reaction_elements}</pathway>'
 
 
 def make_kegg_reaction(

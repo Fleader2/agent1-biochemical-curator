@@ -241,10 +241,11 @@ def test_reaction_with_no_participants_is_not_ready():
     assessment = validate_agent2_readiness(view, package)
 
     assert assessment.is_ready is False
-    assert len(assessment.blocking_issues) == 1
-    assert (
-        assessment.blocking_issues[0].code is Agent2ReadinessIssueCode.REACTION_WITHOUT_PARTICIPANTS
-    )
+    codes = {issue.code for issue in assessment.blocking_issues}
+    assert Agent2ReadinessIssueCode.REACTION_WITHOUT_PARTICIPANTS in codes
+    # The one reaction has no participants, so it is also not modelable -- F6 (C.1).
+    assert Agent2ReadinessIssueCode.NO_MODELABLE_REACTIONS in codes
+    assert assessment.modelable_reaction_count == 0
 
 
 def test_participant_with_dangling_compound_reference_is_not_ready():
@@ -389,9 +390,20 @@ def test_missing_participant_compartment_is_disclosed_but_ready():
 
 
 def test_dangling_kinetic_reaction_reference_is_disclosed_but_ready():
+    """A dangling kinetic reference is nonblocking -- but readiness also requires at
+    least one modelable reaction (F6, C.1), so this test supplies one alongside the
+    dangling measurement rather than an otherwise-empty export."""
+    reaction = _reaction()
+    compound = _compound()
+    participant = _participant(reaction_id=reaction.id, compound_id=compound.id)
     measurement = _curated_kinetic_measurement(reaction_id=uuid4())
-    view = _view(kinetic_measurements=(measurement,))
-    package = _package()
+    view = _view(
+        reactions=(reaction,),
+        compounds=(compound,),
+        reaction_participants=(participant,),
+        kinetic_measurements=(measurement,),
+    )
+    package = _package(reactions=(reaction,), compounds=(compound,))
 
     assessment = validate_agent2_readiness(view, package)
 
@@ -414,11 +426,96 @@ def test_missing_kinetics_altogether_is_ready():
 
 
 def test_resolved_enzyme_state_is_counted_and_ready():
+    """A resolved enzyme state is nonblocking -- but readiness also requires at least
+    one modelable reaction (F6, C.1), so this test supplies one alongside it."""
+    reaction = _reaction()
+    compound = _compound()
+    participant = _participant(reaction_id=reaction.id, compound_id=compound.id)
     state = _curated_enzyme_state()
-    view = _view(enzyme_states=(state,))
-    package = _package()
+    view = _view(
+        reactions=(reaction,),
+        compounds=(compound,),
+        reaction_participants=(participant,),
+        enzyme_states=(state,),
+    )
+    package = _package(reactions=(reaction,), compounds=(compound,))
 
     assessment = validate_agent2_readiness(view, package)
 
     assert assessment.is_ready is True
     assert assessment.enzyme_state_count == 1
+
+
+# --- F6 (Increment C.1): readiness is never vacuously true --------------------------------------
+
+
+def test_completely_empty_export_is_not_ready():
+    """Pilot 1 Run 1's exact failure mode: a totally empty export must never report
+    ``is_ready=True`` merely because nothing found was broken."""
+    view = _view()
+    package = _package()
+
+    assessment = validate_agent2_readiness(view, package)
+
+    assert assessment.is_ready is False
+    assert assessment.modelable_reaction_count == 0
+    codes = {issue.code for issue in assessment.blocking_issues}
+    assert codes == {Agent2ReadinessIssueCode.NO_MODELABLE_REACTIONS}
+
+
+def test_organism_only_export_is_not_ready():
+    """An export with only organism-scoped context and no reactions at all (exactly
+    Pilot 1 Run 1's actual result: one Organism row, zero reactions) is not ready."""
+    view = _view(organism_id=uuid4())
+    package = _package(organism_id=view.organism_id, organisms=())
+
+    assessment = validate_agent2_readiness(view, package)
+
+    assert assessment.is_ready is False
+    assert assessment.modelable_reaction_count == 0
+    codes = {issue.code for issue in assessment.blocking_issues}
+    assert Agent2ReadinessIssueCode.NO_MODELABLE_REACTIONS in codes
+
+
+def test_all_reactions_without_participants_is_not_ready():
+    reaction_a = _reaction()
+    reaction_b = _reaction()
+    view = _view(reactions=(reaction_a, reaction_b))
+    package = _package(reactions=(reaction_a, reaction_b))
+
+    assessment = validate_agent2_readiness(view, package)
+
+    assert assessment.is_ready is False
+    assert assessment.modelable_reaction_count == 0
+    codes = {issue.code for issue in assessment.blocking_issues}
+    assert Agent2ReadinessIssueCode.NO_MODELABLE_REACTIONS in codes
+    assert Agent2ReadinessIssueCode.REACTION_WITHOUT_PARTICIPANTS in codes
+
+
+def test_one_modelable_reaction_among_several_is_enough_to_be_ready():
+    """At least one structurally valid reaction is sufficient for readiness, even
+    alongside another reaction that is not modelable -- F6 requires *a* modelable
+    reaction, never *every* reaction to be modelable."""
+    good_reaction = _reaction()
+    good_compound = _compound()
+    good_participant = _participant(reaction_id=good_reaction.id, compound_id=good_compound.id)
+    broken_reaction = _reaction()  # no participants at all
+
+    view = _view(
+        reactions=(good_reaction, broken_reaction),
+        compounds=(good_compound,),
+        reaction_participants=(good_participant,),
+    )
+    package = _package(reactions=(good_reaction, broken_reaction), compounds=(good_compound,))
+
+    assessment = validate_agent2_readiness(view, package)
+
+    # The broken reaction still makes the overall export not ready (its own
+    # REACTION_WITHOUT_PARTICIPANTS issue is still blocking) -- F6 only prevents the
+    # *vacuous* all-empty case from reporting ready, it does not relax the existing
+    # per-reaction structural-integrity checks.
+    assert assessment.is_ready is False
+    assert assessment.modelable_reaction_count == 1
+    codes = {issue.code for issue in assessment.blocking_issues}
+    assert Agent2ReadinessIssueCode.REACTION_WITHOUT_PARTICIPANTS in codes
+    assert Agent2ReadinessIssueCode.NO_MODELABLE_REACTIONS not in codes

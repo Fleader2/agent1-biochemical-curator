@@ -27,7 +27,6 @@ from app.agent1.service import get_agent1_knowledge_package
 from app.claim_generation.types import EntityKind
 from app.connectors.exceptions import ConnectorError
 from app.entity_resolution.adapters import (
-    KeggSearchAndFetch,
     PubMedSearchAndFetch,
     SgdSearchAndFetch,
     UniProtSearchAndFetch,
@@ -81,7 +80,7 @@ class PathwayConnectorBundle:
     the two kinetics sources that resolver has no use for.
     """
 
-    kegg: KeggSearchAndFetch | None = None
+    kegg: strategies.KeggPathwayCurationConnector | None = None
     sgd: SgdSearchAndFetch | None = None
     uniprot: UniProtSearchAndFetch | None = None
     pubmed: PubMedSearchAndFetch | None = None
@@ -113,7 +112,7 @@ def execute_pathway_curation(
     # --- Organism resolution (Step 11: always first, never a connector call) -----------------
     organism_outcome = strategies.resolve_organism(
         scientific_name=effective_request.organism_text,
-        strain=None,
+        strain=effective_request.strain_text,
         ncbi_taxonomy_id=effective_request.organism_ncbi_taxonomy_id,
         lookup=organism_lookup,
         session=session,
@@ -208,6 +207,19 @@ def execute_pathway_curation(
         if pending_reaction_ids or (iteration_number == 1 and pathway_discovered):
             steps_executed.append("resolve-reactions")
 
+        if connectors.uniprot is not None and state.discovered_reaction_ids:
+            _discover_catalysts_from_reactions(
+                connectors=connectors,
+                organism_id=organism_id,
+                organism_text=effective_request.organism_text,
+                protein_lookup=protein_lookup,
+                session=session,
+                state=state,
+                discovered_reaction_ids=state.discovered_reaction_ids,
+                resolved_protein_ec_numbers=resolved_protein_ec_numbers,
+            )
+            steps_executed.append("discover-catalysts-from-reactions")
+
         if resolved_protein_ec_numbers and state.discovered_reaction_ids:
             _associate_catalysts(
                 session=session,
@@ -301,6 +313,25 @@ def _discover_pathway_and_reactions(
     state: CurationRunState,
     pending_reaction_ids: list[str],
 ) -> None:
+    """Resolve one pathway and its reaction membership (Increment C.1 rewrite).
+
+    **F4 precedence** (audited via ``queries_executed``/frontier, Step 13/20 of the
+    Increment C.1 instructions): ``request.source_pathway_id``, when supplied, is
+    used directly -- no free-text KEGG pathway search is ever attempted in that case.
+    Only when it is ``None`` does this fall back to the pre-existing free-text
+    ``biological_process`` search.
+
+    **F1 correction**: reaction membership always comes from
+    ``strategies.discover_reactions_in_pathway`` (KEGG's own pathway<->reaction
+    ``link`` operation, and -- Increment C.1's organism-specific pathway-resolution
+    completion -- that pathway id's own KGML diagram when one exists) -- never from
+    parsing the pathway's own ``/get/`` record, which does not reliably carry a
+    ``REACTION`` field on live KEGG.
+
+    **F9 correction**: a pathway that resolves but links to zero reactions now always
+    produces a ``PATHWAY_REACTION_MEMBERSHIP_EMPTY`` frontier item -- Pilot 1 Run 1's
+    exact silent-failure condition can no longer occur.
+    """
     if connectors.kegg is None:
         state.add_frontier(
             CurationFrontierItem(
@@ -318,11 +349,158 @@ def _discover_pathway_and_reactions(
         )
         return
 
+    pathway_id = _resolve_pathway_identity(request, connectors=connectors, state=state)
+    if pathway_id is None:
+        return  # a frontier item explaining why was already recorded
+
+    link_identity = query_identity(
+        connector=SourceType.KEGG, action="discover_reactions", pathway_id=pathway_id
+    )
+    if state.has_run_query(link_identity):
+        return
+    try:
+        reaction_ids = strategies.discover_reactions_in_pathway(connectors.kegg, pathway_id)
+    except ConnectorError as exc:
+        state.warn(f"KEGG pathway reaction discovery failed for {pathway_id}: {exc}")
+        state.add_frontier(
+            CurationFrontierItem(
+                frontier_id=build_frontier_id(
+                    entity_kind=EntityKind.UNKNOWN,
+                    reason=FrontierReason.SOURCE_FAILURE,
+                    anchor=pathway_id,
+                ),
+                entity_kind=EntityKind.UNKNOWN,
+                reason=FrontierReason.SOURCE_FAILURE,
+                priority=1,
+                entity_text=pathway_id,
+                attempted_sources=(SourceType.KEGG,),
+                notes=str(exc),
+            )
+        )
+        state.record_connector_call()
+        state.record_query(
+            link_identity, display_text=f"KEGG pathway reaction discovery: {pathway_id}"
+        )
+        return
+    state.record_connector_call()
+    state.record_query(link_identity, display_text=f"KEGG pathway reaction discovery: {pathway_id}")
+
+    if not reaction_ids:
+        state.add_frontier(
+            CurationFrontierItem(
+                frontier_id=build_frontier_id(
+                    entity_kind=EntityKind.UNKNOWN,
+                    reason=FrontierReason.PATHWAY_REACTION_MEMBERSHIP_EMPTY,
+                    anchor=pathway_id,
+                ),
+                entity_kind=EntityKind.UNKNOWN,
+                reason=FrontierReason.PATHWAY_REACTION_MEMBERSHIP_EMPTY,
+                priority=1,
+                entity_text=pathway_id,
+                attempted_sources=(SourceType.KEGG,),
+                notes=(
+                    f"pathway {pathway_id!r} resolved, but neither its own KGML diagram nor "
+                    "KEGG's pathway->reaction link operation yielded any reaction ids -- a "
+                    "legitimate empty-membership outcome, never a connector failure, and never "
+                    "silently treated as success"
+                ),
+            )
+        )
+        return
+
+    excluded = set(request.exclusions)
+    for reaction_id in reaction_ids:
+        if reaction_id in excluded:
+            continue
+        pending_reaction_ids.append(reaction_id)
+
+
+def _resolve_pathway_identity(
+    request: PathwayCurationRequest,
+    *,
+    connectors: PathwayConnectorBundle,
+    state: CurationRunState,
+) -> str | None:
+    """F4: an explicit ``request.source_pathway_id`` always takes deterministic
+    precedence over free-text discovery -- returns it directly (after confirming it
+    actually resolves on KEGG) without ever calling ``strategies.discover_pathway``.
+    Falls back to the pre-existing free-text search only when no structured id was
+    supplied. Returns ``None`` when neither path resolves a pathway; the caller can
+    assume a frontier item explaining why has already been recorded in that case.
+    """
+    if request.source_pathway_id is not None:
+        return _resolve_structured_pathway_id(request, connectors=connectors, state=state)
+    return _discover_pathway_by_text(request, connectors=connectors, state=state)
+
+
+def _resolve_structured_pathway_id(
+    request: PathwayCurationRequest,
+    *,
+    connectors: PathwayConnectorBundle,
+    state: CurationRunState,
+) -> str | None:
+    pathway_id = request.source_pathway_id
+    assert pathway_id is not None  # guaranteed by the caller
+    fetch_identity = query_identity(
+        connector=SourceType.KEGG, action="fetch_pathway_metadata", pathway_id=pathway_id
+    )
+    try:
+        record = strategies.fetch_kegg_pathway_metadata(connectors.kegg, pathway_id)
+    except ConnectorError as exc:
+        state.warn(f"KEGG pathway fetch failed for structured id {pathway_id}: {exc}")
+        state.add_frontier(
+            CurationFrontierItem(
+                frontier_id=build_frontier_id(
+                    entity_kind=EntityKind.UNKNOWN,
+                    reason=FrontierReason.SOURCE_FAILURE,
+                    anchor=pathway_id,
+                ),
+                entity_kind=EntityKind.UNKNOWN,
+                reason=FrontierReason.SOURCE_FAILURE,
+                priority=1,
+                entity_text=pathway_id,
+                attempted_sources=(SourceType.KEGG,),
+                notes=str(exc),
+            )
+        )
+        state.record_connector_call()
+        state.record_query(fetch_identity, display_text=f"KEGG pathway fetch: {pathway_id}")
+        return None
+    state.record_connector_call()
+    state.record_query(fetch_identity, display_text=f"KEGG pathway fetch: {pathway_id}")
+
+    if record is None:
+        state.add_frontier(
+            CurationFrontierItem(
+                frontier_id=build_frontier_id(
+                    entity_kind=EntityKind.UNKNOWN,
+                    reason=FrontierReason.UNRESOLVED_REACTION_IDENTITY,
+                    anchor=pathway_id,
+                ),
+                entity_kind=EntityKind.UNKNOWN,
+                reason=FrontierReason.UNRESOLVED_REACTION_IDENTITY,
+                priority=1,
+                entity_text=pathway_id,
+                attempted_sources=(SourceType.KEGG,),
+                notes=(
+                    f"structured pathway id {pathway_id!r} (request.source_pathway_id) was "
+                    "not found on KEGG"
+                ),
+            )
+        )
+        return None
+    return pathway_id
+
+
+def _discover_pathway_by_text(
+    request: PathwayCurationRequest,
+    *,
+    connectors: PathwayConnectorBundle,
+    state: CurationRunState,
+) -> str | None:
     identity = query_identity(
         connector=SourceType.KEGG, action="discover_pathway", query=request.biological_process
     )
-    if state.has_run_query(identity):
-        return
     try:
         pathway_ids = strategies.discover_pathway(connectors.kegg, request.biological_process)
     except ConnectorError as exc:
@@ -342,12 +520,15 @@ def _discover_pathway_and_reactions(
                 notes=str(exc),
             )
         )
-        return
-    finally:
         state.record_connector_call()
         state.record_query(
             identity, display_text=f"KEGG pathway search: {request.biological_process!r}"
         )
+        return None
+    state.record_connector_call()
+    state.record_query(
+        identity, display_text=f"KEGG pathway search: {request.biological_process!r}"
+    )
 
     if not pathway_ids:
         state.add_frontier(
@@ -365,23 +546,8 @@ def _discover_pathway_and_reactions(
                 notes="no KEGG pathway matched this biological_process",
             )
         )
-        return
-
-    pathway_id = pathway_ids[0]
-    reaction_identity = query_identity(
-        connector=SourceType.KEGG, action="discover_reactions", pathway_id=pathway_id
-    )
-    if state.has_run_query(reaction_identity):
-        return
-    reaction_ids = strategies.discover_reactions_in_pathway(connectors.kegg, pathway_id)
-    state.record_connector_call()
-    state.record_query(reaction_identity, display_text=f"KEGG pathway reactions: {pathway_id}")
-
-    excluded = set(request.exclusions)
-    for reaction_id in reaction_ids:
-        if reaction_id in excluded:
-            continue
-        pending_reaction_ids.append(reaction_id)
+        return None
+    return pathway_ids[0]
 
 
 def _resolve_pending_reactions(
@@ -451,8 +617,7 @@ def _resolve_pending_reactions(
                     entity_text=kegg_reaction_id,
                     attempted_sources=(SourceType.KEGG,),
                     notes=(
-                        "KEGG reaction id not found (fetch returned None) or not a "
-                        "reaction record"
+                        "KEGG reaction id not found (fetch returned None) or not a reaction record"
                     ),
                 )
             )
@@ -700,6 +865,110 @@ def _resolve_one_participant_compound(
         )
     )
     return None
+
+
+def _discover_catalysts_from_reactions(
+    *,
+    connectors: PathwayConnectorBundle,
+    organism_id: UUID,
+    organism_text: str,
+    protein_lookup,
+    session: Session,
+    state: CurationRunState,
+    discovered_reaction_ids: list[UUID],
+    resolved_protein_ec_numbers: list[tuple[UUID, str]],
+) -> None:
+    """Autonomous catalyst-candidate discovery from already-resolved reaction evidence
+    (Increment C.1, F2) -- runs whenever UniProt is configured and at least one
+    reaction has been discovered, **regardless of whether ``request.seed_entity_texts``
+    was ever supplied**. This is the correction for Pilot 1 Run 1's finding that
+    catalyst/gene/protein discovery previously had no path independent of an explicit
+    seed list.
+
+    For every discovered reaction's own already-persisted ``ec_number`` (KEGG's
+    ``ENZYME`` annotation, via ``reaction_identity_from_kegg`` -- never guessed), this
+    searches UniProt, organism-scoped, for candidate proteins
+    (``strategies.discover_catalyst_candidates_by_ec_number``). A resolved candidate is
+    appended to ``resolved_protein_ec_numbers`` exactly like a seed-resolved one --
+    ``_associate_catalysts``/``_discover_kinetics`` require no changes at all to pick
+    it up, since both already iterate that same list. An EC number that resolves to
+    more than one distinct candidate (a real isozyme pair, confirmed live during this
+    increment's own implementation -- e.g. yeast's cytosolic ACC1 vs. mitochondrial
+    HFA1, both genuinely EC 6.4.1.2) is never resolved arbitrarily: it becomes a
+    ``REACTION_CATALYST_UNRESOLVED`` frontier item, exactly like an EC number with no
+    candidate at all -- discovery, never invented evidence (Increment C.1
+    instructions, Step 16).
+    """
+    from app.models.reaction import Reaction as ReactionModel
+
+    seen_ec_numbers: set[str] = set()
+    for reaction_id in discovered_reaction_ids:
+        reaction_row = session.get(ReactionModel, reaction_id)
+        if reaction_row is None or not reaction_row.ec_number:
+            continue
+        ec_number = reaction_row.ec_number
+        if ec_number in seen_ec_numbers:
+            continue
+        seen_ec_numbers.add(ec_number)
+
+        query_id = query_identity(
+            connector=SourceType.UNIPROT,
+            action="discover_catalyst_by_ec",
+            ec_number=ec_number,
+            organism_id=str(organism_id),
+        )
+        if state.has_run_query(query_id):
+            continue
+
+        frontier_id = build_frontier_id(
+            entity_kind=EntityKind.PROTEIN,
+            reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+            anchor=f"{reaction_id}:{ec_number}",
+        )
+        try:
+            outcome = strategies.discover_catalyst_candidates_by_ec_number(
+                connectors.uniprot,
+                ec_number,
+                organism_id=organism_id,
+                organism_context_text=organism_text,
+                lookup=protein_lookup,
+                session=session,
+            )
+        except ConnectorError as exc:
+            state.warn(f"UniProt catalyst discovery failed for EC {ec_number}: {exc}")
+            state.add_frontier(
+                CurationFrontierItem(
+                    frontier_id=frontier_id,
+                    entity_kind=EntityKind.PROTEIN,
+                    reason=FrontierReason.SOURCE_FAILURE,
+                    priority=3,
+                    entity_text=ec_number,
+                    attempted_sources=(SourceType.UNIPROT,),
+                    notes=str(exc),
+                )
+            )
+            state.record_connector_call()
+            state.record_query(query_id, display_text=f"UniProt catalyst discovery: EC {ec_number}")
+            continue
+        state.record_connector_call()
+        state.record_query(query_id, display_text=f"UniProt catalyst discovery: EC {ec_number}")
+
+        if outcome.entity_id is not None:
+            state.record_entity(outcome.entity_id)
+            resolved_protein_ec_numbers.append((outcome.entity_id, ec_number))
+            state.resolve_frontier(frontier_id)
+        else:
+            state.add_frontier(
+                CurationFrontierItem(
+                    frontier_id=frontier_id,
+                    entity_kind=EntityKind.PROTEIN,
+                    reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+                    priority=3,
+                    entity_text=ec_number,
+                    attempted_sources=(SourceType.UNIPROT,),
+                    notes=outcome.notes,
+                )
+            )
 
 
 def _associate_catalysts(

@@ -74,9 +74,17 @@ class Settings(BaseSettings):
     sabiork_base_url: str | None = None
     """SABIO-RK Solr query API base URL (Agent 1.x Increment A). No credential
     is required by SABIO-RK's public API; no default is supplied here, matching
-    ``kegg_base_url``/``sgd_base_url``/``uniprot_base_url`` -- unlike those,
-    ``app.connectors.sabiork.SabiorkConnector.from_settings`` falls back to a
-    live-verified default endpoint when this is unset (see that module)."""
+    ``kegg_base_url``/``sgd_base_url``/``uniprot_base_url`` --
+    ``app.connectors.sabiork.SabiorkConnector.from_settings`` raises
+    ``ValueError`` when this is unset, exactly like those three (**corrected in
+    Agent 1.x Increment C.1**: this docstring previously, incorrectly, claimed
+    ``from_settings`` fell back to a live-verified default endpoint when unset
+    -- verified directly against that module's actual code while investigating
+    Pilot 1 Run 1, and it does not; that module does define its own
+    module-level ``_DEFAULT_BASE_URL`` constant, but only for a caller
+    constructing ``SabiorkConnector`` directly, bypassing ``from_settings``/
+    this setting entirely -- never as an automatic fallback within
+    ``from_settings`` itself)."""
 
     oed_base_url: str | None = None
     """Open Enzyme Database REST API base URL (Agent 1.x Increment A). No
