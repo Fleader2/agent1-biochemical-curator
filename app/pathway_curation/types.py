@@ -71,7 +71,23 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: result for all 13 gene-anchored proteins, the root cause this increment
 #: fixes) -- no request/result field was removed or repurposed, only a
 #: pre-existing data-flow gap closed.
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.4"
+#:
+#: Bumped to ``v1.5`` by Agent 1.x Increment C.5: ``strategies.discover_
+#: kinetics_sabiork`` now isolates one malformed SABIO-RK record among several
+#: real hits (skipped and disclosed via a warning, never fatal), rather than
+#: letting that one record's own unrecognized structure abort the entire
+#: pathway-curation run -- a materially different, observable result for the
+#: same real input (confirmed live: Real Integration Pilot 1 Run 6's primary
+#: run aborting entirely on EC 2.3.1.86/FAS1-FAS2's 7 real SABIO-RK records;
+#: the identical input now yields a persisted kinetic measurement instead).
+#: The underlying parsing defect this exposed (``app.connectors.sabiork
+#: .parse_kinetic_law_json`` assuming a unit-bearing field is always a
+#: ``{"name": ...}`` object) is fixed at the connector layer, not here; this
+#: bump reflects only this package's own new record-level isolation, added to
+#: ``discover_kinetics_sabiork``'s return shape (``SabiorkKineticDiscoveryResult``)
+#: -- no request/result field on this package's own public contracts was
+#: removed or repurposed.
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.5"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase

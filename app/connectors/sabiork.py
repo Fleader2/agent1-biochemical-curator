@@ -58,6 +58,35 @@ treated as measured kinetic parameters (``"Variable"``-role entries are
 assay conditions such as a tested substrate concentration, not a reported
 kinetic constant, and are not converted into ``SabioKineticParameter``
 records here).
+
+**Increment C.5 -- robust live-record parsing.** Real Integration Pilot 1
+Run 6 (Agent 1.x Increment C.4, gene-anchored kinetic enrichment) found
+that ``parse_kinetic_law_json`` crashed with an uncaught ``AttributeError``
+on every one of the 7 real, live SABIO-RK entries for EC 2.3.1.86
+(*S. cerevisiae* fatty-acyl-CoA synthase, FAS1/FAS2): it assumed
+``experimental_conditions.envvar_temperature.unit`` is always a
+``{"name": "..."}`` object, but every one of those 7 real entries reports
+it as a bare string instead. A live, read-only, full-field inspection of
+those same 7 entries (never persisted, kept outside this repository) found
+one further, silent (non-crashing) instance of the identical assumption:
+``general.strain``/``general.tissue`` are themselves always
+``{"id": ..., "name": ...}``-shaped objects, never bare strings -- the
+pre-C.5 code stringified the *whole dict* into ``strain``/``tissue``
+instead of extracting the reported name. ``_named_or_scalar`` (below)
+handles both representations uniformly, for every field confirmed to vary
+this way, and treats a field that matches neither representation as absent
+(``None``) rather than as an error -- never fabricating a value, and never
+letting an unrecognized-but-harmless shape become a crash. Any input
+structure this parser still cannot safely interpret (i.e. something beyond
+every schema variant confirmed live) is now raised as ``ConnectorParseError``
+-- an existing, already-understood connector-failure type this repository's
+kinetics-discovery layer already isolates per record -- rather than as a
+bare, uncaught interpreter exception that aborts the entire pathway-curation
+run. See ``app.pathway_curation.strategies.discover_kinetics_sabiork`` for
+the corresponding per-record isolation this increment adds on the
+kinetics-discovery side (one malformed record among several real hits for
+the same EC number is skipped and disclosed, never allowed to discard the
+other, valid records the same search already found).
 """
 
 from __future__ import annotations
@@ -178,13 +207,54 @@ def _as_str(value: Any) -> str | None:
     return text or None
 
 
+def _named_or_scalar(value: Any, *, key: str = "name") -> str | None:
+    """A SABIO-RK field reported either as ``{"<key>": "..."}`` or as a bare
+    scalar directly -- confirmed live, Increment C.5: every one of the 7
+    real EC 2.3.1.86 entries (S. cerevisiae fatty-acyl-CoA synthase,
+    FAS1/FAS2) reports ``experimental_conditions.envvar_temperature.unit``
+    as a bare string (``"°C"``), never the ``{"name": "..."}`` shape every
+    ``kineticlaw.parameter[].unit``/``parameter_type`` in those same 7
+    records happens to use -- confirming this is a real, live, per-field
+    polymorphism, not a hypothetical one, and that no single field's
+    observed shape may be assumed to hold for every other field.
+
+    The same 7 records also reveal a second, silent (non-crashing) instance
+    of this same class of assumption: ``general.strain``/``general.tissue``
+    are themselves always ``{"id": ..., "name": ...}``-shaped dicts (e.g.
+    ``{"id": 13, "name": "v.R"}``), never bare strings -- ``_as_str`` applied
+    directly to the whole dict (the pre-C.5 code) would have silently
+    stringified the entire dict (e.g. ``"{'id': 13, 'name': 'v.R'}"``)
+    instead of extracting ``"v.R"``. This one helper fixes both: it never
+    guesses which shape a caller's field will use, and never fabricates a
+    value a field does not actually carry -- a dict without ``key``, or any
+    other unrecognized shape entirely (e.g. a list), is treated exactly like
+    a missing field (``None``), never an error and never a stringified blob.
+    """
+    if isinstance(value, dict):
+        return _as_str(value.get(key))
+    if isinstance(value, str | int | float):
+        return _as_str(value)
+    return None
+
+
 def parse_kinetic_law_json(entry_id: str, raw_json_text: str) -> SabioKineticRecord:
     """Parse one entry's ``Json`` field text into a typed ``SabioKineticRecord``.
 
-    Raises ``ConnectorParseError`` for anything that is not valid JSON or
-    is missing the top-level sections this connector expects
-    (``kineticlaw``, ``general``, ``reaction``) -- a genuinely malformed or
-    unrecognized payload shape, never silently reinterpreted.
+    Raises ``ConnectorParseError`` for anything that is not valid JSON, is
+    missing the top-level sections this connector expects (``kineticlaw``,
+    ``general``, ``reaction``), or -- Increment C.5 -- has some other
+    structure this parser cannot safely interpret even after accounting for
+    every schema variant confirmed live (``_named_or_scalar``): a genuinely
+    malformed or unrecognized payload shape, never silently reinterpreted
+    and never allowed to escape as a bare, uncaught ``AttributeError``/
+    ``TypeError``/``KeyError``/``IndexError`` the way Real Integration Pilot
+    1 Run 6 found for the pre-C.5 ``unit`` handling -- see the module
+    docstring's "Increment C.5" note. Only these four exception types are
+    reclassified: each can only arise here from a JSON value not being the
+    shape this function's own navigation assumes (calling ``.get`` on a
+    non-dict, indexing past a list's length, ...), never from a genuine
+    programming error in this function's own control flow, so recatching
+    them here does not hide a real defect.
     """
     try:
         payload = json.loads(raw_json_text)
@@ -197,6 +267,19 @@ def parse_kinetic_law_json(entry_id: str, raw_json_text: str) -> SabioKineticRec
             f"malformed SABIO-RK entry {entry_id}: Json field is not an object"
         )
 
+    try:
+        return _parse_kinetic_law_payload(entry_id, payload)
+    except (AttributeError, TypeError, KeyError, IndexError) as exc:
+        raise ConnectorParseError(
+            f"malformed SABIO-RK entry {entry_id}: unexpected structure while parsing "
+            f"a recognized section: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _parse_kinetic_law_payload(entry_id: str, payload: dict[str, Any]) -> SabioKineticRecord:
+    """The actual field-extraction body of ``parse_kinetic_law_json``, kept separate
+    so that its own caller can draw one clear boundary around "structure this
+    parser could not safely interpret" (see that function's docstring)."""
     kineticlaw = payload.get("kineticlaw") or {}
     general = payload.get("general") or {}
     reaction = payload.get("reaction") or {}
@@ -210,16 +293,14 @@ def parse_kinetic_law_json(entry_id: str, raw_json_text: str) -> SabioKineticRec
             continue
         if param.get("role") != _CONSTANT_ROLE:
             continue
-        parameter_type = param.get("parameter_type") or {}
-        unit = param.get("unit") or {}
         species = param.get("species") or {}
         parameters.append(
             SabioKineticParameter(
                 name=_as_str(param.get("name")),
-                parameter_type=_as_str(parameter_type.get("name")),
+                parameter_type=_named_or_scalar(param.get("parameter_type")),
                 value=_as_str(param.get("start_value")),
-                unit=_as_str(unit.get("name")),
-                species_label=_as_str(species.get("species_key")),
+                unit=_named_or_scalar(param.get("unit")),
+                species_label=_named_or_scalar(species, key="species_key"),
                 comment=_as_str(param.get("comment")),
             )
         )
@@ -233,7 +314,6 @@ def parse_kinetic_law_json(entry_id: str, raw_json_text: str) -> SabioKineticRec
     )
     ph_section = conditions.get("envvar_ph") or {}
     temperature_section = conditions.get("envvar_temperature") or {}
-    temperature_unit = temperature_section.get("unit") or {}
 
     return SabioKineticRecord(
         entry_id=entry_id,
@@ -244,14 +324,14 @@ def parse_kinetic_law_json(entry_id: str, raw_json_text: str) -> SabioKineticRec
         uniprot_ids=tuple(uid for uid in uniprot_ids if uid),
         is_wildtype=bool(enzyme["wildtype"]) if "wildtype" in enzyme else None,
         is_recombinant=bool(enzyme["is_recombinant"]) if "is_recombinant" in enzyme else None,
-        organism=_as_str(organism.get("name")),
+        organism=_named_or_scalar(organism),
         ncbi_taxonomy_id=_as_str(organism.get("ncbi_taxonomy_id")),
-        strain=_as_str(general.get("strain")),
-        tissue=_as_str(general.get("tissue")),
+        strain=_named_or_scalar(general.get("strain")),
+        tissue=_named_or_scalar(general.get("tissue")),
         buffer=_as_str(conditions.get("buffer")),
         ph=_as_str(ph_section.get("start_value")),
         temperature=_as_str(temperature_section.get("start_value")),
-        temperature_unit=_as_str(temperature_unit.get("name")),
+        temperature_unit=_named_or_scalar(temperature_section.get("unit")),
         pubmed_id=_as_str(publication.get("pubmed_id")),
         publication_title=_as_str(publication.get("title")),
         raw=payload,

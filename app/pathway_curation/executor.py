@@ -2001,6 +2001,16 @@ def _discover_kinetics(
     warning, never raised. A completely unconfigured connector (either or both fields left
     ``None`` on ``PathwayConnectorBundle``) is likewise never an error -- it simply cannot
     contribute, and this function still runs whichever source(s) *are* configured.
+
+    **Increment C.5**: ``strategies.discover_kinetics_sabiork`` now also reports, alongside
+    its successfully-parsed identities, any individual SABIO-RK record it had to skip
+    because that one record's own structure could not be safely interpreted -- each is
+    disclosed via its own warning here, exactly like a whole-call ``ConnectorError``
+    already was, but without discarding the other, valid records the same search call
+    found (Real Integration Pilot 1 Run 6's own primary-run crash: a single malformed
+    record among 7 real hits for one EC number previously escaped as a bare
+    ``AttributeError``, aborting not just this function but the entire pathway-curation
+    run).
     """
     if connectors.sabiork is None and connectors.oed is None:
         state.add_frontier(
@@ -2037,7 +2047,7 @@ def _discover_kinetics(
             if not state.has_run_query(identity):
                 attempted_sources.append(SourceType.SABIORK)
                 try:
-                    identities = strategies.discover_kinetics_sabiork(
+                    sabiork_result = strategies.discover_kinetics_sabiork(
                         connectors.sabiork,
                         ec_number,
                         organism=organism_text,
@@ -2047,6 +2057,17 @@ def _discover_kinetics(
                 except ConnectorError as exc:
                     state.warn(f"SABIO-RK kinetics discovery failed for EC {ec_number}: {exc}")
                     identities = ()
+                else:
+                    identities = sabiork_result.identities
+                    # Increment C.5: a record-local parse failure is disclosed, never
+                    # silently dropped, and never allowed to block the other records
+                    # (already reflected in `identities`) the same search call found.
+                    for skipped in sabiork_result.skipped_records:
+                        state.warn(
+                            f"SABIO-RK entry {skipped.entry_id} for EC {ec_number} could "
+                            f"not be safely parsed and was skipped -- other records from "
+                            f"the same search were still processed: {skipped.reason}"
+                        )
                 state.record_connector_call()
                 state.record_query(identity, display_text=f"SABIO-RK search: EC {ec_number}")
                 found_any = found_any or bool(identities)

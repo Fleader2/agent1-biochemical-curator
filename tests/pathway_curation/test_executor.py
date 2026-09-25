@@ -3493,3 +3493,291 @@ def test_c4_kinetics_disabled_direct_catalyst_behavior_is_unchanged(db_session: 
         item.reason in (FrontierReason.MISSING_KINETICS,)
         for item in result.unresolved_frontier
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Increment C.5 -- Robust SABIO-RK live-record parsing
+# ---------------------------------------------------------------------------------------------
+#
+# Real Integration Pilot 1 Run 6's primary run aborted with an uncaught AttributeError
+# while parsing a real, live SABIO-RK record for EC 2.3.1.86 (FAS1/FAS2) -- a single
+# malformed/unrecognized record among several real hits discarded not just that one
+# record, but the entire pathway-curation run's already-completed structural/catalyst
+# work. These tests exercise strategies.discover_kinetics_sabiork directly (a strategies
+# function, tested offline exactly like select_canonical_gene_anchored_protein already is
+# above) and, for the full integration path, the real app.connectors.sabiork.SabiorkConnector
+# (backed by a mocked HTTP transport, never live network) rather than the higher-level
+# FakeSabiorkConnector -- which returns pre-built SabioKineticRecord objects directly and
+# so never exercises parse_kinetic_law_json at all.
+
+
+class _OneBadHitSabiorkConnector:
+    """A minimal, hand-written fake matching SabiorkConnector's search()/fetch()/normalize()
+    shape (Increment C.5): three real search hits, the middle one's fetch() raising
+    ConnectorParseError exactly like a genuinely malformed live record would, the other
+    two returning real, valid records."""
+
+    def __init__(self, valid_records: dict[str, object]) -> None:
+        self._valid_records = valid_records
+        self.fetch_calls: list[str] = []
+
+    def search(self, query: str, *, organism: str | None = None):
+        from app.connectors.sabiork import SabioSearchHit
+
+        return [
+            SabioSearchHit(entry_id="good-1", ec_numbers=(query,), raw={}),
+            SabioSearchHit(entry_id="bad-2", ec_numbers=(query,), raw={}),
+            SabioSearchHit(entry_id="good-3", ec_numbers=(query,), raw={}),
+        ]
+
+    def fetch(self, entry_id: str):
+        from app.connectors.exceptions import ConnectorParseError
+
+        self.fetch_calls.append(entry_id)
+        if entry_id == "bad-2":
+            raise ConnectorParseError(
+                "malformed SABIO-RK entry bad-2: unexpected structure while parsing a "
+                "recognized section: AttributeError: 'str' object has no attribute 'get'"
+            )
+        return self._valid_records[entry_id]
+
+    def normalize(self, record):
+        return record.parameters
+
+
+def test_c5_one_malformed_record_among_valid_ones_is_isolated_not_fatal() -> None:
+    """The core C.5 regression, at strategies.discover_kinetics_sabiork's own level:
+    record 1 valid -> preserved; record 2 malformed -> disclosed/skipped, never raised;
+    record 3 valid -> preserved. Before Increment C.5, this exact shape (a
+    ConnectorParseError -- or, pre-connector-fix, a bare AttributeError -- from the
+    *second* of several hits) would have discarded record 1's own already-parsed
+    identity too, since the exception escaped the whole per-hit loop uncaught."""
+    from app.pathway_curation import strategies
+    from app.pathway_curation.strategies import SabiorkKineticDiscoveryResult, SkippedSabiorkRecord
+
+    good_record_1 = make_sabio_record(
+        entry_id="good-1", ec_number="2.3.1.41", parameter_type="Km", value="0.5", unit="mM"
+    )
+    good_record_3 = make_sabio_record(
+        entry_id="good-3", ec_number="2.3.1.41", parameter_type="kcat", value="12.0", unit="1/s"
+    )
+    connector = _OneBadHitSabiorkConnector({"good-1": good_record_1, "good-3": good_record_3})
+
+    result = strategies.discover_kinetics_sabiork(connector, "2.3.1.41", organism=None)
+
+    assert isinstance(result, SabiorkKineticDiscoveryResult)
+    assert connector.fetch_calls == ["good-1", "bad-2", "good-3"]  # all three attempted
+    assert len(result.identities) == 2  # both valid records preserved
+    parameter_types = {identity.parameter_type.value for identity in result.identities}
+    assert parameter_types == {"KM", "KCAT"}
+    assert len(result.skipped_records) == 1
+    skipped = result.skipped_records[0]
+    assert isinstance(skipped, SkippedSabiorkRecord)
+    assert skipped.entry_id == "bad-2"
+    assert "unexpected structure" in skipped.reason
+
+
+def test_c5_search_or_first_fetch_failure_still_propagates_uncaught() -> None:
+    """A genuine call-level failure (nothing parsed yet) is a different concern from a
+    record-level one and must still propagate as before -- Increment C.5 narrows
+    isolation to individual records, it does not weaken whole-call failure semantics."""
+    from app.connectors.exceptions import ConnectorHTTPError
+    from app.pathway_curation import strategies
+
+    class _AlwaysFailingSearchConnector:
+        def search(self, query: str, *, organism: str | None = None):
+            raise ConnectorHTTPError(500, "SABIO-RK unavailable")
+
+        def fetch(self, entry_id: str):  # pragma: no cover -- never reached
+            raise AssertionError("fetch() must not be called if search() itself failed")
+
+        def normalize(self, record):  # pragma: no cover -- never reached
+            return record.parameters
+
+    with pytest.raises(ConnectorHTTPError):
+        strategies.discover_kinetics_sabiork(
+            _AlwaysFailingSearchConnector(), "2.3.1.41", organism=None
+        )
+
+
+def test_c5_executor_discloses_skipped_record_and_still_persists_the_valid_ones(
+    db_session: Session,
+) -> None:
+    """End-to-end through execute_pathway_curation's own _discover_kinetics: a
+    protein whose SABIO-RK search returns one malformed record among valid ones
+    still ends up with its valid measurement(s) persisted, and the skip is
+    disclosed as a warning, never silently dropped and never fatal to the run."""
+
+    class _PatchedSabiork(_OneBadHitSabiorkConnector):
+        pass
+
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd = FakeSgdConnector(
+        loci={"ACC1": make_sgd_locus(sgd_id="S1", systematic_name="YNR016C", standard_name="ACC1")}
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    good_record_1 = make_sabio_record(
+        entry_id="good-1", ec_number="2.3.1.41", parameter_type="Km", value="0.5", unit="mM"
+    )
+    good_record_3 = make_sabio_record(
+        entry_id="good-3", ec_number="2.3.1.41", parameter_type="kcat", value="12.0", unit="1/s"
+    )
+    sabiork = _PatchedSabiork({"good-1": good_record_1, "good-3": good_record_3})
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-c5-executor-isolation",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 2
+    assert any("bad-2" in w and "skipped" in w for w in result.warnings)
+
+
+def test_c5_real_schema_variant_reaches_kinetic_measurement_via_real_sabiork_connector(
+    db_session: Session,
+) -> None:
+    """C.4/C.5 integration test: a gene-anchored protein (no seed, direct-KGML path,
+    Increment C.3/C.4) reaches kinetic enrichment through the REAL
+    app.connectors.sabiork.SabiorkConnector -- backed by a mocked HTTP transport
+    serving the exact live-confirmed schema variant that crashed Pilot 1 Run 6
+    (envvar_temperature.unit as a bare string) -- all the way to a persisted
+    KineticMeasurement that reaches both Agent1KnowledgePackage and
+    Agent1CuratedKnowledgeView. The higher-level FakeSabiorkConnector used everywhere
+    else in this file bypasses parse_kinetic_law_json entirely, so it could not
+    exercise this increment's own fix -- this test deliberately uses the real
+    connector class instead."""
+    import json
+
+    import httpx
+
+    from app.connectors.http import ConnectorHttpClient
+    from app.connectors.sabiork import SabiorkConnector
+
+    real_shaped_entry = {
+        "kineticlaw": {
+            "parameter": [
+                {
+                    "name": None,
+                    "role": "Constant",
+                    "parameter_type": {"id": 8, "name": "Km"},
+                    "unit": {"id": 3, "name": "µM"},
+                    "start_value": 18.0,
+                    "species": {"species_key": "n | Malonyl-CoA | Substrate"},
+                }
+            ]
+        },
+        "general": {
+            "organism": {"name": "Saccharomyces cerevisiae", "ncbi_taxonomy_id": 4932},
+            "strain": {"id": 13, "name": "v.R"},
+            "tissue": {},
+        },
+        "enzyme_description": {
+            "ec_number": "2.3.1.41",
+            "enzyme_name": "fake CEM1 homolog",
+            "wildtype": "wildtype",
+            "is_recombinant": False,
+            "proteins": [{"uniprot_id": "P39525"}],
+        },
+        "experimental_conditions": {
+            "buffer": "fake buffer",
+            "envvar_ph": {"start_value": 6.5},
+            "envvar_temperature": {"start_value": 25.0, "unit": "°C"},
+        },
+        "reaction": {"equation": "A + B <=> C"},
+        "publication": {"pubmed_id": "7044669", "title": "fake paper"},
+    }
+
+    class _RecordingHandler:
+        def __init__(self, responses: list[httpx.Response]) -> None:
+            self._responses = responses
+            self.requests: list[httpx.Request] = []
+
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            index = min(len(self.requests) - 1, len(self._responses) - 1)
+            return self._responses[index]
+
+    def _solr_response(docs: list[dict]) -> httpx.Response:
+        return httpx.Response(200, json={"response": {"numFound": len(docs), "docs": docs}})
+
+    handler = _RecordingHandler(
+        [
+            _solr_response([{"EntryID": ["18229"], "ECNumber": ["2.3.1.41"]}]),  # search()
+            _solr_response(
+                [{"EntryID": ["18229"], "Json": [json.dumps(real_shaped_entry)]}]
+            ),  # fetch()
+        ]
+    )
+    sabiork = SabiorkConnector(
+        ConnectorHttpClient(httpx.Client(transport=httpx.MockTransport(handler))),
+        base_url="https://example.invalid/sabiork",
+    )
+
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c5-real-connector-integration",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    resolved_protein_id = result.agent1_knowledge_package.proteins[0].id
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 1
+    measurement = measurements[0]
+    assert measurement.protein_id == resolved_protein_id
+    assert measurement.parameter_type == "KM"
+    assert measurement.reported_parameter_type == "Km"
+    assert measurement.parameter_value == Decimal("18.0")
+    assert measurement.unit == "µM"
+
+    view_measurements = result.curated_knowledge_view.kinetic_measurements
+    assert len(view_measurements) == 1
+    assert view_measurements[0].protein_id == resolved_protein_id
+    assert not any(
+        item.reason is FrontierReason.KINETICS_REQUESTED_NOT_ATTEMPTED
+        for item in result.unresolved_frontier
+    )

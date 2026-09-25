@@ -28,7 +28,18 @@ Connector I/O failures (``app.connectors.exceptions.ConnectorError``) are
 deliberately not caught here -- ``executor.py`` is what converts them
 into a ``SOURCE_FAILURE`` frontier item, mirroring
 ``app.entity_resolution.resolver``'s own "how do we call this connector"
-vs. "how do we report that it failed" separation.
+vs. "how do we report that it failed" separation. **One narrow exception**
+(Increment C.5): ``discover_kinetics_sabiork`` catches ``ConnectorParseError``
+-- and only that one, already-specific subtype, never a bare
+``ConnectorError``/``Exception`` -- around each individual SABIO-RK record a
+single search call returns, so that one record's own malformed structure
+never discards the other, valid records the same call already found. A
+search or fetch failing outright (``ConnectorHTTPError``/
+``ConnectorNetworkError``, or any ``ConnectorParseError`` raised before any
+record has been examined) still propagates uncaught, exactly as before --
+this is call-granularity isolation `_discover_kinetics` already has;
+Increment C.5 only adds the same isolation one level down, at
+record-granularity, which nothing in the existing architecture provided.
 """
 
 from __future__ import annotations
@@ -41,6 +52,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.claim_generation.types import EntityKind
+from app.connectors.exceptions import ConnectorParseError
 from app.connectors.kegg import (
     KeggCompoundRecord,
     KeggFlatFileRecord,
@@ -117,6 +129,8 @@ __all__ = [
     "KeggPathwayCurationConnector",
     "KgmlCatalystContext",
     "ResolutionOutcome",
+    "SabiorkKineticDiscoveryResult",
+    "SkippedSabiorkRecord",
     "associate_catalyst",
     "classify_and_persist_protein_candidates",
     "classify_gene_anchored_candidate",
@@ -1391,6 +1405,34 @@ def resolve_publication_by_pmid(
 # --- Kinetics (SABIO-RK / Open Enzyme Database) --------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class SkippedSabiorkRecord:
+    """One SABIO-RK entry (Increment C.5) whose ``Json`` payload could not be
+    safely interpreted by ``app.connectors.sabiork.parse_kinetic_law_json`` --
+    every schema variant confirmed live has already been accounted for there
+    (``_named_or_scalar``), so reaching this means a genuinely different,
+    unrecognized structure. Skipped, never fabricated, and never allowed to
+    discard the other, valid records the same search call also found."""
+
+    entry_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SabiorkKineticDiscoveryResult:
+    """``discover_kinetics_sabiork``'s own result (Increment C.5): every
+    successfully-parsed identity, plus every record skipped because its
+    structure could not be safely interpreted. A genuine connector/network
+    failure (``ConnectorHTTPError``/``ConnectorNetworkError``, or a
+    ``ConnectorParseError`` raised before any record was examined) is a
+    different concern entirely and still propagates as an exception,
+    unchanged -- this result type only ever describes a *partially*
+    successful call, never a failed one."""
+
+    identities: tuple[KineticMeasurementIdentity, ...]
+    skipped_records: tuple[SkippedSabiorkRecord, ...]
+
+
 def discover_kinetics_sabiork(
     connector,
     ec_number: str,
@@ -1398,7 +1440,7 @@ def discover_kinetics_sabiork(
     organism: str | None,
     protein_id: UUID | None = None,
     organism_id: UUID | None = None,
-) -> tuple[KineticMeasurementIdentity, ...]:
+) -> SabiorkKineticDiscoveryResult:
     """Search SABIO-RK for ``ec_number`` and build one ``KineticMeasurementIdentity`` per
     reported parameter (never persisted here -- the caller/executor persists each one, since
     ``persist_kinetic_measurement`` has no ``lookup``/normalize step to run first, unlike every
@@ -1409,11 +1451,28 @@ def discover_kinetics_sabiork(
     is actually linked to the catalytic context/organism that motivated this search -- an
     unlinked measurement would be structurally correct but invisible to
     ``app.agent1.service.get_agent1_knowledge_package``'s own organism-scoping rule.
+
+    **Increment C.5**: one search commonly returns several real hits (confirmed live: 7 for
+    EC 2.3.1.86/FAS1-FAS2), and ``connector.fetch()`` for any single one of them can raise
+    ``ConnectorParseError`` for a record whose structure this connector still cannot safely
+    interpret (see ``app.connectors.sabiork``'s own module docstring). That one record is
+    skipped -- recorded in ``skipped_records``, never fabricated -- and every other hit in
+    the same call is still examined; before this increment, that exception (or, before the
+    connector's own fix, a bare ``AttributeError``) escaped this loop entirely, discarding
+    every record the same call had already found, including ones already successfully
+    parsed. A failure before any record is reached at all (``search()`` itself, or the very
+    first ``fetch()``, raising) is a different, call-level concern and still propagates
+    uncaught, exactly as before Increment C.5.
     """
     hits = connector.search(ec_number, organism=organism)
     identities: list[KineticMeasurementIdentity] = []
+    skipped_records: list[SkippedSabiorkRecord] = []
     for hit in hits:
-        record = connector.fetch(hit.entry_id)
+        try:
+            record = connector.fetch(hit.entry_id)
+        except ConnectorParseError as exc:
+            skipped_records.append(SkippedSabiorkRecord(entry_id=hit.entry_id, reason=str(exc)))
+            continue
         if record is None:
             continue
         for parameter in connector.normalize(record):
@@ -1422,7 +1481,9 @@ def discover_kinetics_sabiork(
             )
             if identity is not None:
                 identities.append(identity)
-    return tuple(identities)
+    return SabiorkKineticDiscoveryResult(
+        identities=tuple(identities), skipped_records=tuple(skipped_records)
+    )
 
 
 def discover_kinetics_oed(

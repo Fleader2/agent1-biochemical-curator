@@ -1011,6 +1011,19 @@ two reactions, a disclosed no-result outcome, idempotent repeated
 execution, provenance preservation, and a kinetics-disabled regression
 guard.
 
+**Increment C.5's robust SABIO-RK live-record parsing** (§50) added a
+12-test section to `tests/connectors/test_sabiork.py` and 4 tests to
+`test_executor.py` — see §50's own "Testing" paragraph for the full list;
+in outline: every confirmed live schema variant (temperature-unit and
+strain/tissue as object vs. bare scalar vs. null vs. missing) parsing
+correctly; a genuinely malformed section correctly raising
+`ConnectorParseError`; no fabricated value ever appearing; deterministic
+parsing; a real-record-shaped fixture proving actual kinetic information
+(not just the absence of a crash) survives; `discover_kinetics_sabiork`'s
+own per-record isolation (one malformed record among valid ones, both
+preserved); a whole-call failure still propagating unweakened; and a full
+C.4/C.5 integration test through the real `SabiorkConnector`.
+
 ## 39. Increment C.1 — Live Pathway Discovery Repair
 
 Pilot 1 Run 1 (`artifacts/pilots/yeast_fatty_acid_001/13_pilot_report.md`)
@@ -1651,7 +1664,120 @@ preserved through to the package; and a regression test confirming
 `include_kinetics=False` leaves C.2/C.3's own catalyst-resolution behavior
 completely unaffected by this increment's change.
 
-## 50. Final architectural rule
+## 50. Increment C.5 — Robust SABIO-RK live-record parsing
+
+Real Integration Pilot 1 Run 6 (§49's own gene-anchored kinetic enrichment,
+run against real, live SABIO-RK data for the first time) confirmed C.4
+works exactly as designed — all 13 gene-anchored proteins reached kinetics
+discovery — but the primary run then aborted entirely with an uncaught
+`AttributeError` while parsing SABIO-RK's own real response for EC 2.3.1.86
+(FAS1/FAS2's fatty-acyl-CoA synthase activity, this pathway's own most
+heavily-studied enzyme): `app.connectors.sabiork.parse_kinetic_law_json`
+assumed `experimental_conditions.envvar_temperature.unit` is always a
+`{"name": "..."}` object; every one of SABIO-RK's 7 real, live entries for
+that EC reports it as a bare string instead. That exception is not a
+`ConnectorError`, so nothing in the existing kinetics-discovery layer
+caught it, and the entire pathway-curation run — including all of its
+already-completed, unrelated structural/catalyst work — was discarded.
+
+**Live inspection first, before any fix.** A separate, read-only,
+full-field inspection of the same 7 real entries (never persisted, kept
+outside this repository) found the confirmed `unit`-as-string variant
+holds for every one of the 7 — never the `{"name": ...}` shape SABIO-RK's
+own `kineticlaw.parameter[].unit`/`parameter_type` happen to use in the
+same 7 records, confirming this is a genuine, real, per-field
+polymorphism, not a hypothetical one. The same inspection found one
+further, *silent* (non-crashing) instance of the identical assumption:
+`general.strain`/`general.tissue` are themselves always
+`{"id": ..., "name": ...}`-shaped objects — the pre-C.5 code stringified
+the *whole dict* into `strain`/`tissue` (e.g. `"{'id': 13, 'name': 'v.R'}"`)
+instead of extracting the reported name `"v.R"`, a real data-corruption
+bug that never crashed and so was never visible from Pilot 1 Run 6's own
+traceback alone.
+
+**One reusable helper, not scattered patches**
+(`app.connectors.sabiork._named_or_scalar`): a field reported either as
+`{"<key>": "..."}` or as a bare scalar directly. Never fabricates: a dict
+without the given key, or any other unrecognized shape, is treated exactly
+like a missing field (`None`), never an error and never a stringified
+blob. Applied uniformly to every field confirmed (or plausible, by the same
+live inspection) to vary this way: `envvar_temperature.unit`,
+`kineticlaw.parameter[].parameter_type`/`unit`/`species.species_key`,
+`general.organism.name`, `general.strain`, `general.tissue`.
+
+**A defensive boundary for anything still unrecognized**:
+`parse_kinetic_law_json`'s own field-extraction body is now wrapped so that
+any `AttributeError`/`TypeError`/`KeyError`/`IndexError` it raises — each
+can only arise here from a JSON value not being the shape this function's
+own navigation assumes, never from a genuine programming error in this
+function's own control flow — is reclassified as `ConnectorParseError`, an
+existing, already-understood connector-failure type, rather than escaping
+as a bare interpreter exception.
+
+**Record-level fault isolation, one level below where it already
+existed.** `_discover_kinetics` already caught `ConnectorError` around each
+whole `discover_kinetics_sabiork` call (one call per protein/EC pair) —
+call-level isolation that already existed, unrelated to this increment.
+What did not exist: isolation *within* one call, across the several real
+hits one search commonly returns (7, for EC 2.3.1.86). `discover_kinetics_
+sabiork` now catches `ConnectorParseError` — and only that one, already-
+specific subtype, never a bare `Exception` — around each individual
+record's `fetch()`, skipping and disclosing that one record
+(`SkippedSabiorkRecord`, part of its new `SabiorkKineticDiscoveryResult`
+return shape) while continuing to examine the rest. A failure before any
+record is reached at all (`search()` itself, or the first `fetch()`,
+raising) is a different, call-level concern and still propagates uncaught,
+exactly as before. `_discover_kinetics` unpacks this new result and warns
+once per skipped record — the same, already-established audit mechanism
+every other non-fatal issue in this package already uses.
+
+**Explicitly not touched**: `discover_kinetics_oed` (OED's own, separate,
+already-disclosed apparent non-EC-filtering behavior, §49); reaction-id
+propagation into `KineticMeasurement` (still `NULL` for every path, §49);
+`persist_kinetic_measurement`'s `(source, source_id)` deduplication policy;
+reaction reversibility; C.1–C.4's own catalyst/protein-resolution policy;
+Agent 2.
+
+**One related, adjacent, disclosed-not-fixed observation**: SABIO-RK
+reports `enzyme_description.wildtype` as the literal string `"wildtype"`,
+not a JSON boolean — the existing `bool(enzyme["wildtype"])` happens to
+evaluate correctly for this one observed value (any non-empty string is
+truthy), but no real counter-example (a non-wildtype record) was ever
+observed to confirm or refute what SABIO-RK reports in that case. Left
+unfixed: fixing it would mean guessing at unconfirmed external vocabulary,
+exactly what this increment's own anti-fabrication principle prohibits.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to
+`"pathway-curation-v1.5"` — a materially different, observable result for
+the same real input (Run 6's own primary-run abort; the identical input
+now yields a persisted measurement). `AGENT1_CONTRACT_VERSION` is
+unchanged: `kinetic_measurements` is a pre-existing field on both
+`Agent1KnowledgePackage`/`Agent1CuratedKnowledgeView`, unaffected by this
+increment's own contract shape (`SabiorkKineticDiscoveryResult` is new,
+but is a `strategies.py`-internal return type, never part of the Agent 1
+→ Agent 2 handoff).
+
+**Testing**: `tests/connectors/test_sabiork.py` gained a 12-test C.5
+section (temperature-unit as object/string/null/missing; strain/tissue as
+named-object vs. bare string; a genuinely malformed `kineticlaw` section
+correctly raising `ConnectorParseError`; no fabricated value/unit when
+genuinely absent; deterministic parsing; and one test built from a
+hand-transcribed real EC 2.3.1.86 record, proving every field —
+parameters, species labels, the real FAS1/FAS2 complex-stoichiometry
+notation, organism, strain, temperature, publication — survives parsing
+intact, not merely that it no longer crashes). `tests/pathway_curation
+/test_executor.py` gained 4 tests: `discover_kinetics_sabiork`'s own
+per-record isolation (one malformed record among two valid ones, both
+preserved); a whole-call failure (nothing parsed yet) still propagating
+uncaught, unweakened; an end-to-end executor-level test confirming a
+skipped record is disclosed as a warning while the run's valid
+measurements still persist; and a full C.4/C.5 integration test driving
+the real `SabiorkConnector` (backed by a mocked HTTP transport, never live
+network) through the exact schema variant that caused Run 6's crash, all
+the way to a measurement in both `Agent1KnowledgePackage` and
+`Agent1CuratedKnowledgeView`.
+
+## 51. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.
