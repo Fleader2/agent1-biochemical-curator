@@ -2971,3 +2971,525 @@ def test_c3_gene_anchored_protein_reused_via_by_gene_id_no_second_uniprot_call(
         first_result.agent1_knowledge_package.proteins[0].id
         == second_result.agent1_knowledge_package.proteins[0].id
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Increment C.4 -- Gene-anchored kinetic enrichment
+# ---------------------------------------------------------------------------------------------
+#
+# Real Integration Pilot 2 Run 1 confirmed that all 13 gene-anchored proteins
+# Increment C.3 resolves for a real ``sce00061`` run reached zero kinetic
+# measurements: ``_resolve_direct_catalysts_from_kgml`` never appended to
+# ``resolved_protein_ec_numbers``, so ``_discover_kinetics`` (which iterates
+# exactly that list) never even attempted a SABIO-RK/OED query for any of
+# them. These tests drive the real, unmodified ``_discover_kinetics``/
+# ``persist_kinetic_measurement`` machinery -- through deterministic fake
+# connectors, never network I/O -- against a gene-anchored protein resolved
+# via the direct-KGML path (never a seed, never the EC fallback), the one
+# path that was previously never eligible at all.
+
+
+def test_c4_gene_anchored_protein_reaches_kinetic_enrichment(db_session: Session) -> None:
+    """The central C.4 regression: a protein resolved only through the direct-KGML,
+    gene-anchored path (no ``seed_entity_texts``) now produces a persisted kinetic
+    measurement, linked to that exact protein, and that measurement reaches both
+    ``Agent1KnowledgePackage`` and ``Agent1CuratedKnowledgeView`` -- confirming F5
+    (Claims/Evidence export) is not a blocker for kinetics, which bypasses it
+    entirely (``_select_kinetic_measurements`` scopes by ``organism_id``/
+    ``reaction_id`` directly, never by ``Evidence.publication_id``)."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="2.3.1.41",
+                parameter_type="kcat",
+                value="12.0",
+                unit="1/s",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c4-gene-anchored-kinetics",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    resolved_protein_id = result.agent1_knowledge_package.proteins[0].id
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 1
+    assert measurements[0].protein_id == resolved_protein_id
+    assert measurements[0].organism_id == result.organism_id
+
+    # Reaches the actual Agent 1 -> Agent 2 handoff view, not merely the package.
+    view_measurements = result.curated_knowledge_view.kinetic_measurements
+    assert len(view_measurements) == 1
+    assert view_measurements[0].protein_id == resolved_protein_id
+
+    assert not any(
+        item.reason is FrontierReason.KINETICS_REQUESTED_NOT_ATTEMPTED
+        for item in result.unresolved_frontier
+    )
+
+
+def test_c4_ec_propagated_is_the_resolved_proteins_own_curated_ec_number(
+    db_session: Session,
+) -> None:
+    """The EC number kinetics is queried with is read back from the just-persisted,
+    gene-anchored ``Protein`` row itself (``_ec_numbers_for_protein``) -- never the
+    reaction's own (possibly multi-valued, possibly differently-formatted) KEGG
+    ``ec_number`` annotation. Here the reaction's own KEGG annotation deliberately
+    differs from the protein's UniProt-reported one, so a query using the wrong
+    source would be immediately visible."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        ),
+        ec_by_reaction={"R00742": ("2.3.1.41", "2.3.1.86")},
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="2.3.1.41",
+                parameter_type="kcat",
+                value="12.0",
+                unit="1/s",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c4-ec-propagation",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
+    search_queries = [call[1][0] for call in sabiork.calls if call[0] == "search"]
+    assert search_queries == ["2.3.1.41"]
+    assert "2.3.1.41 2.3.1.86" not in search_queries
+
+
+def test_c4_two_genes_sharing_one_ec_each_queried_independently(
+    db_session: Session,
+) -> None:
+    """The ACC1/HFA1-shaped regression, extended to kinetics: two distinct
+    gene-anchored proteins that happen to share one EC number are never collapsed
+    into one query -- ``_discover_kinetics``'s own per-protein query identity
+    (``protein_id`` is part of it, not just ``ec_number``) means each protein's
+    own kinetics search executes independently, exactly once each, never skipped
+    merely because a sibling protein already queried the identical EC.
+
+    A genuine, pre-existing, disclosed architectural characteristic (unrelated to
+    which protein resolution path found either protein, and not something this
+    narrow increment changes): if the underlying source's own two independent
+    per-protein searches happen to return the *same external record*
+    (SABIO-RK/OED's own EC-scoped, not protein-scoped, search semantics -- real
+    for both), ``persist_kinetic_measurement``'s own ``(source, source_id)``
+    idempotency (Increment A's documented policy) reuses the one existing row
+    rather than creating a second, so only the first protein to query ends up
+    linked -- never a fabricated second measurement, and never a query silently
+    skipped, but also never two independent rows for what the source itself
+    reports as one identical external record."""
+    kegg = _c2_kegg(
+        reaction_ids=("R00742", "R00900"),
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YNR016C",), reaction_ids=("R00742",)),
+            FakeKgmlEntrySpec(entry_type="gene", names=("YMR207C",), reaction_ids=("R00900",)),
+        ),
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YNR016C": make_sgd_locus(
+                sgd_id="S1", systematic_name="YNR016C", standard_name="ACC1"
+            ),
+            "YMR207C": make_sgd_locus(
+                sgd_id="S2", systematic_name="YMR207C", standard_name="HFA1"
+            ),
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="fake ACC1",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            ),
+            "HFA1": make_uniprot_entry(
+                accession="P32874",
+                recommended_name="fake HFA1",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            ),
+        }
+    )
+    # SABIO-RK's own search is EC-scoped, not protein-scoped -- one shared fake
+    # record under the shared EC number is what a real search would also return
+    # identically to both independent per-protein queries.
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO-SHARED": make_sabio_record(
+                entry_id="SABIO-SHARED",
+                ec_number="6.4.1.2",
+                parameter_type="kcat",
+                value="1.0",
+                unit="1/s",
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c4-shared-ec",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 2
+    protein_ids = {p.id for p in result.agent1_knowledge_package.proteins}
+
+    # Both proteins were queried independently -- never skipped due to sharing an
+    # EC with a sibling protein.
+    search_calls = [call for call in sabiork.calls if call[0] == "search"]
+    assert len(search_calls) == 2
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    # Persistence-layer (source, source_id) idempotency reuses the one shared
+    # external record rather than duplicating it -- exactly one row survives,
+    # linked to whichever protein's independent query persisted it first.
+    assert len(measurements) == 1
+    assert measurements[0].protein_id in protein_ids
+
+
+def test_c4_shared_gene_across_two_reactions_queries_kinetics_exactly_once(
+    db_session: Session,
+) -> None:
+    """Determinism/order-independence: one gene named by two reactions' own KGML
+    evidence (yeast's real iterative FAS cycle shape) is resolved once
+    (``direct_catalyst_cache``) and appended to ``resolved_protein_ec_numbers``
+    once per reaction it is attached to -- but ``_discover_kinetics`` still issues
+    exactly one SABIO-RK query for it, never one per reaction, via its own
+    ``set()``/``state.has_run_query`` deduplication."""
+    kegg = _c2_kegg(
+        reaction_ids=("R00742", "R00900"),
+        catalyst_entries=(
+            FakeKgmlEntrySpec(
+                entry_type="gene", names=("YER061C",), reaction_ids=("R00742", "R00900")
+            ),
+        ),
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="2.3.1.41",
+                parameter_type="kcat",
+                value="12.0",
+                unit="1/s",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c4-shared-gene-dedup",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 2
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
+    assert len([call for call in sabiork.calls if call[0] == "search"]) == 1
+
+
+def test_c4_no_kinetic_source_result_is_disclosed_never_fabricated(db_session: Session) -> None:
+    """A gene-anchored protein whose EC number no configured kinetic source has any
+    record for produces zero measurements and an explicit, disclosed
+    ``MISSING_KINETICS`` frontier item -- never a fabricated or estimated value."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(records={})  # no record for any EC
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c4-no-kinetics-found",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    assert result.agent1_knowledge_package.kinetic_measurements == ()
+    missing = [
+        item
+        for item in result.unresolved_frontier
+        if item.reason is FrontierReason.MISSING_KINETICS and item.entity_text == "2.3.1.41"
+    ]
+    assert len(missing) == 1
+
+
+def test_c4_repeated_execution_does_not_duplicate_kinetic_measurements(
+    db_session: Session,
+) -> None:
+    """Idempotency: running the identical request twice against the same database
+    reuses the existing ``KineticMeasurement`` row (``persist_kinetic_measurement``'s
+    own ``(source, source_id)`` uniqueness) rather than creating a second one."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="2.3.1.41",
+                parameter_type="kcat",
+                value="12.0",
+                unit="1/s",
+            )
+        }
+    )
+    request = _c2_request(
+        request_id="req-c4-idempotency", seed_entity_texts=(), include_publications=False,
+        include_kinetics=True,
+    )
+    connectors = PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork)
+
+    first = execute_pathway_curation(request, session=db_session, connectors=connectors)
+    db_session.flush()
+    second = execute_pathway_curation(request, session=db_session, connectors=connectors)
+
+    assert len(first.agent1_knowledge_package.kinetic_measurements) == 1
+    assert len(second.agent1_knowledge_package.kinetic_measurements) == 1
+    assert (
+        first.agent1_knowledge_package.kinetic_measurements[0].id
+        == second.agent1_knowledge_package.kinetic_measurements[0].id
+    )
+
+
+def test_c4_kinetic_measurement_provenance_preserved(db_session: Session) -> None:
+    """The persisted measurement's own source/source-id provenance (which source
+    record it came from) survives to the Agent 1 handoff, alongside the protein
+    and organism identity that justified the search in the first place."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="2.3.1.41",
+                parameter_type="kcat",
+                value="12.0",
+                unit="1/s",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c4-provenance",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    measurement = result.agent1_knowledge_package.kinetic_measurements[0]
+    assert measurement.source is SourceType.SABIORK
+    assert measurement.source_id == "SABIO1:kcat"
+    assert measurement.protein_id == result.agent1_knowledge_package.proteins[0].id
+    assert measurement.organism_id == result.organism_id
+    # Pre-existing architectural characteristic, unchanged by C.4 (disclosed, not
+    # fixed -- kinetics discovery is keyed by (protein, EC), never by reaction, in
+    # every path: seeded, EC-fallback, and this direct-KGML one alike):
+    assert measurement.reaction_id is None
+
+
+def test_c4_kinetics_disabled_direct_catalyst_behavior_is_unchanged(db_session: Session) -> None:
+    """Regression safety net: with ``include_kinetics`` left at its default
+    (``False``) and no kinetics connector configured at all, populating
+    ``resolved_protein_ec_numbers`` from the direct-KGML path has zero observable
+    effect on C.2/C.3's own catalyst-resolution behavior -- same protein count,
+    same association count, no kinetics-related frontier item of any kind."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c4-kinetics-disabled", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert len(result.agent1_knowledge_package.proteins) == 1
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert result.agent1_knowledge_package.kinetic_measurements == ()
+    assert not any(
+        item.reason in (FrontierReason.MISSING_KINETICS,)
+        for item in result.unresolved_frontier
+    )

@@ -59,7 +59,19 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: 4's zero-protein outcome for all 13 KGML genes; the same 13 genes each
 #: now resolve to exactly one confirmed, canonical protein) (see
 #: ``docs/26_...md`` §48).
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.3"
+#:
+#: Bumped to ``v1.4`` by Agent 1.x Increment C.4: a gene-anchored protein
+#: resolved via the direct-KGML path (``executor._resolve_direct_catalysts_
+#: from_kgml``) now also has its own already-curated EC number(s) appended to
+#: ``resolved_protein_ec_numbers``, exactly like a seeded or EC-fallback-
+#: resolved protein already did -- making it eligible for the existing
+#: kinetics-enrichment step (``executor._discover_kinetics``) for the first
+#: time. A materially different, observable result for the same input
+#: (confirmed live: Real Integration Pilot 2 Run 1's zero-kinetic-measurement
+#: result for all 13 gene-anchored proteins, the root cause this increment
+#: fixes) -- no request/result field was removed or repurposed, only a
+#: pre-existing data-flow gap closed.
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.4"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase

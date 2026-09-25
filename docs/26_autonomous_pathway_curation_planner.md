@@ -1000,6 +1000,17 @@ sharing one EC remain two distinct Proteins); the FAS1/FAS2-like regression
 itself succeeds); and gene-anchored reuse via `ProteinLookup.by_gene_id`
 across two independent runs, with zero UniProt calls on the second.
 
+**Increment C.4's gene-anchored kinetic enrichment** (§49) added a 9-test
+section to `test_executor.py` — see §49's own "Testing" paragraph for the
+full list; in outline: the central regression (a gene-anchored protein
+reaching kinetics, confirmed in both the package and the curated view), EC
+propagation from the protein's own curated record, two same-EC proteins
+queried independently with the shared-external-record persistence
+characteristic confirmed explicitly, per-gene query deduplication across
+two reactions, a disclosed no-result outcome, idempotent repeated
+execution, provenance preservation, and a kinetics-disabled regression
+guard.
+
 ## 39. Increment C.1 — Live Pathway Discovery Repair
 
 Pilot 1 Run 1 (`artifacts/pilots/yeast_fatty_acid_001/13_pilot_report.md`)
@@ -1504,7 +1515,143 @@ same input (Run 4's zero proteins; the identical 13 genes now each resolve
 live). `AGENT1_CONTRACT_VERSION` is unchanged: `Protein`/`ReactionEnzyme` are
 pre-existing fields on the existing export chain, not new ones.
 
-## 49. Final architectural rule
+## 49. Increment C.4 — Gene-anchored kinetic enrichment
+
+Real Integration Pilot 2 Run 1 (the first live Agent 1 -> Agent 2 structural
+integration test, against a real `sce00061` export with all 13 genes/proteins
+resolved via §48's own gene-anchored path) confirmed a materially different
+kind of gap from any §37/§45 already disclosed: all 39 Agent 2 parameters
+were `PLACEHOLDER`/no value, because the real Agent 1 handoff contained
+**zero** `kinetic_measurements` for any of the 38 curated reactions —
+despite `include_kinetics=True` and a configured SABIO-RK connector.
+
+**Root cause, confirmed directly from source before any code changed**:
+`_discover_kinetics` (§42) iterates exactly one list, `resolved_protein_ec_
+numbers`, built by appending `(protein_id, ec_number)` pairs from two
+existing paths — `_resolve_seeded_genes_and_proteins` (an explicit
+`seed_entity_texts` protein) and `_discover_catalysts_from_reactions` (the
+EC-based fallback, §42/§47). **`_resolve_direct_catalysts_from_kgml`
+(§47's own stronger, gene-anchored evidence path) never appended to this
+list at all** — every one of `sce00061`'s 13 real proteins resolves through
+exactly this third path (direct KGML gene evidence, §47/§48), so none of
+them was ever eligible for kinetics, regardless of how thoroughly §48's own
+protein resolution succeeded. This is a genuine data-flow gap in this
+package's own sequencing, not a connector failure, not a SABIO-RK data gap,
+and not caused by anything Increment C.3 changed in *how* a protein
+resolves — only in *what happens after* it does.
+
+**The fix, deliberately the smallest one that closes the gap**:
+`_resolve_direct_catalysts_from_kgml` now also appends to `resolved_protein_
+ec_numbers`, reusing the exact same, already-existing, read-only helper the
+seeded-gene path already uses (`_ec_numbers_for_protein` — a plain
+`session.get` read of the just-resolved `Protein` row's own `ec_number`
+column, never a guess, never a second connector call). The append happens
+as soon as a gene's protein is resolved (mirroring `_resolve_seeded_genes_
+and_proteins`'s identical trigger point), independent of whether the
+reaction<->protein `ReactionEnzyme` association immediately below it also
+succeeds — an already-curated EC number is the protein's own attribute, not
+contingent on any one specific reaction link persisting. No other function
+changed: `_discover_kinetics`, `persist_kinetic_measurement`,
+`strategies.discover_kinetics_sabiork`/`discover_kinetics_oed`, and the
+Agent 1 export chain (`get_agent1_knowledge_package`/`get_agent1_curated_
+knowledge_view`) are all reused completely unmodified.
+
+**Multiple EC numbers were considered and found not to apply here.**
+`Reaction.ec_number` (KEGG's own `ENZYME` field) can genuinely be
+multi-valued, which is exactly what §47's `split_ec_numbers`/
+`is_fully_classified_ec` exist to handle for catalyst *discovery*. `Protein
+.ec_number`, however, is structurally never multi-valued —
+`app.normalization.protein.protein_identity_from_uniprot` only ever copies
+UniProt's own EC list into this single column when it contains **exactly
+one** value, leaving it `None` otherwise (`ec_number = record.ec_numbers[0]
+if len(record.ec_numbers) == 1 else None` — a pre-existing, deliberate
+policy, unrelated to this increment). `_ec_numbers_for_protein` therefore
+never returns more than one EC number for any protein, gene-anchored or
+not, and no EC-splitting logic was added to the kinetics path — there is
+nothing to split.
+
+**F5 (§45) is confirmed not to block kinetics.** F5 is specifically about
+publications: `app.agent1.service._select_publications` derives the
+exported publication set from `Evidence.publication_id`, and this
+package's own `_discover_publications` creates no `Claim`/`Evidence`.
+Kinetics measurements take an entirely different, already-existing export
+route: `app.agent1.service._select_kinetic_measurements` scopes
+`KineticMeasurement` rows directly by `organism_id` (or, for an
+organism-less row, by `reaction_id` membership) — never through
+Claims/Evidence at all — and `app.agent1.export._curated_kinetic_
+measurement` reshapes every scoped row into the handoff faithfully,
+unconditionally. A kinetic measurement this increment's fix newly makes
+reachable therefore requires no further export-layer work of any kind;
+confirmed directly (not merely inferred) by a dedicated test asserting the
+measurement appears in both `Agent1KnowledgePackage.kinetic_measurements`
+and `Agent1CuratedKnowledgeView.kinetic_measurements`.
+
+**A genuine, disclosed, pre-existing architectural limitation, unchanged by
+this increment**: no kinetics call site anywhere in this package (seeded,
+EC-fallback, or this direct-KGML path alike) ever threads a `reaction_id`
+into `KineticMeasurementIdentity` — `strategies.discover_kinetics_sabiork`/
+`discover_kinetics_oed` accept only `protein_id`/`organism_id`, and
+`resolved_protein_ec_numbers`'s own shape (`tuple[UUID, str]`, protein and
+EC only) carries no reaction context at all. `KineticMeasurement.reaction_
+id` is a real, already-supported column (and `CuratedKineticMeasurement
+.reaction_id` a real, already-supported field, confirmed by direct
+inspection of `app.agent1.export._curated_kinetic_measurement`), but every
+persisted measurement leaves it `NULL` today; the biological context a
+measurement's protein participated in is instead only reconstructable
+indirectly, via that protein's own already-persisted `ReactionEnzyme`
+row(s). Threading `reaction_id` through would touch the shared tuple shape
+and call sites all three catalyst-resolution paths rely on — a broader
+redesign of kinetics discovery's own data flow, not the narrow, targeted
+repair this increment was scoped to, and explicitly out of scope (§8 of the
+Increment C.4 instructions: "do not redesign kinetic-law selection").
+Disclosed here rather than worked around.
+
+**A second, related, genuinely pre-existing risk, also disclosed rather
+than fixed**: `persist_kinetic_measurement`'s idempotency key is `(source,
+source_id)` only, never `(source, source_id, protein_id)` (Increment A's
+own documented policy, §24 of `docs/24_kinetic_data_curation_and_handoff
+.md`). SABIO-RK/OED's own search is EC-scoped, not protein-scoped — so two
+distinct proteins sharing one EC number (the ACC1/HFA1 shape) that happen
+to have a source return the *identical external record* for both
+independent queries will only ever get one persisted `KineticMeasurement`
+row between them, linked to whichever protein's query persisted it first;
+the second protein's own, independently-executed query is never skipped
+(confirmed by a dedicated test asserting two independent `search` calls
+still occur), but its own result is reused rather than duplicated at the
+persistence layer. This is a general characteristic of the kinetics
+architecture that predates C.3/C.4 entirely (it would apply identically to
+two seeded or EC-fallback-resolved proteins sharing an EC and a source
+record) — not introduced, and not worsened, by this increment; a real
+fix would require broadening `persist_kinetic_measurement`'s own dedup key,
+out of this increment's narrow scope.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to
+`"pathway-curation-v1.4"` — a materially different, observable result for
+the same input (Pilot 2 Run 1's zero kinetic measurements for all 13
+gene-anchored proteins; the identical input now produces measurements
+whenever a configured kinetic source has one). `AGENT1_CONTRACT_VERSION`
+is unchanged: `kinetic_measurements` is a pre-existing field on both
+`Agent1KnowledgePackage` and `Agent1CuratedKnowledgeView`, populated here
+via the same, unmodified export chain — no new field, no repurposed one.
+
+**Testing** (`tests/pathway_curation/test_executor.py`, a 9-test C.4
+section): a gene-anchored protein (no seed, no EC fallback) reaching
+kinetic enrichment and its measurement appearing in both the package and
+the curated view (confirming F5 does not block it); the EC number queried
+is read from the protein's own curated record, not the reaction's
+(deliberately mismatched in the fixture to make a wrong-source query
+immediately visible); two genes sharing one EC each queried independently
+(never skipped) with the shared-external-record persistence characteristic
+above confirmed explicitly; one gene named by two reactions producing
+exactly one deduplicated kinetics query, never two; a source with no
+record for the EC producing a disclosed `MISSING_KINETICS` frontier item,
+never a fabricated value; idempotent repeated execution (no duplicate
+`KineticMeasurement` row); measurement provenance (`source`/`source_id`)
+preserved through to the package; and a regression test confirming
+`include_kinetics=False` leaves C.2/C.3's own catalyst-resolution behavior
+completely unaffected by this increment's change.
+
+## 50. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

@@ -246,6 +246,7 @@ def execute_pathway_curation(
                 discovered_reaction_ids=state.discovered_reaction_ids,
                 direct_catalyst_cache=direct_catalyst_cache,
                 handled_kegg_reaction_ids=handled_kegg_reaction_ids,
+                resolved_protein_ec_numbers=resolved_protein_ec_numbers,
             )
             steps_executed.append("discover-direct-catalysts-from-kgml")
 
@@ -682,6 +683,7 @@ def _resolve_direct_catalysts_from_kgml(
     discovered_reaction_ids: list[UUID],
     direct_catalyst_cache: dict[str, UUID | None],
     handled_kegg_reaction_ids: set[str],
+    resolved_protein_ec_numbers: list[tuple[UUID, str]],
 ) -> None:
     """Resolve catalysts for already-discovered reactions from their own pathway's
     direct organism-specific KGML gene evidence (Increment C.2) -- **before** any
@@ -702,6 +704,22 @@ def _resolve_direct_catalysts_from_kgml(
     isozymes vs. obligate complex subunits) is disclosed as unresolved catalyst
     context here and also added to ``handled_kegg_reaction_ids`` -- this package
     never creates an ``EnzymeComplex`` and never guesses (Step 21).
+
+    **Increment C.4**: every gene-anchored ``Protein`` successfully resolved here
+    also has its own already-curated ``ec_number`` (if any -- read via the same
+    ``_ec_numbers_for_protein`` helper the seeded-gene and EC-fallback paths already
+    use) appended to ``resolved_protein_ec_numbers``, mutated in place exactly like
+    those two paths. Before this increment, a gene-anchored protein resolved only
+    through this direct-KGML path never reached ``resolved_protein_ec_numbers`` at
+    all, so ``_discover_kinetics`` (which iterates exactly that list) never
+    attempted kinetics enrichment for it -- the root cause of Real Integration
+    Pilot 2 Run 1's confirmed zero-kinetic-measurement result for all 13
+    gene-anchored proteins, none of which had any seed-text or EC-fallback route
+    into that list. This append happens as soon as a gene's protein is resolved
+    (mirroring ``_resolve_seeded_genes_and_proteins``'s identical trigger point),
+    independent of whether the reaction<->protein ``ReactionEnzyme`` association
+    below also succeeds -- an already-curated EC number is the protein's own
+    attribute, not contingent on any one specific reaction link persisting.
     """
     from app.models.reaction import Reaction as ReactionModel
 
@@ -803,6 +821,13 @@ def _resolve_direct_catalysts_from_kgml(
                 kegg_reaction_id=kegg_reaction_id,
                 kegg_gene_id=kegg_gene_id,
             )
+
+            # Increment C.4: make this gene-anchored protein's own already-curated EC
+            # number(s) eligible for kinetics enrichment, exactly like a seeded or
+            # EC-fallback-resolved protein already is -- see this function's own
+            # docstring for why this was previously never reached for this path.
+            for ec_number in _ec_numbers_for_protein(session, protein_id):
+                resolved_protein_ec_numbers.append((protein_id, ec_number))
 
             assoc_query_identity = query_identity(
                 connector=SourceType.OTHER,
