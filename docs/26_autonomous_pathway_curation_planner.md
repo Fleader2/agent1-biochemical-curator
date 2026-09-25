@@ -980,6 +980,26 @@ processing; an unresolvable direct gene disclosed rather than silently
 replaced by an EC-matched substitute; and an EC contradiction disclosed via
 a warning while the direct-evidence association still persists.
 
+**Increment C.3's gene-anchored protein identity resolution** (§48) added a
+13-test section to `test_executor.py`: one gene resolving to one UniProt
+record; several equivalent same-gene-product records collapsing to one
+Protein via a unique reviewed/canonical accession, the rest becoming
+cross-references; a cross-species false hit (wrong exact taxonomy id)
+excluded without producing ambiguity; a same-organism unrelated-gene false
+hit (`CONFLICTING_GENE_PRODUCT`) excluded the same way; insufficient
+evidence disclosed, never a guess; the genuine architectural boundary (2+
+confirmed records, no unique reviewed one) disclosed rather than worked
+around; order-independence of canonical-accession selection (a pure,
+offline test of the selection function, no network, no database); the
+same boundary case returning `None` regardless of candidate order;
+idempotent persistence (repeated execution, no duplicate Protein or
+cross-reference rows); the ACC1/HFA1-like regression (two distinct genes
+sharing one EC remain two distinct Proteins); the FAS1/FAS2-like regression
+(two explicitly-named genes at one reaction produce two independent
+`ReactionEnzyme` rows, now succeeding end-to-end since protein resolution
+itself succeeds); and gene-anchored reuse via `ProteinLookup.by_gene_id`
+across two independent runs, with zero UniProt calls on the second.
+
 ## 39. Increment C.1 — Live Pathway Discovery Repair
 
 Pilot 1 Run 1 (`artifacts/pilots/yeast_fatty_acid_001/13_pilot_report.md`)
@@ -1391,7 +1411,100 @@ through the existing, unmodified `Agent1KnowledgePackage`/
 `Agent1CuratedKnowledgeView` export chain -- more rows populate an existing
 field, not a new one.
 
-## 48. Final architectural rule
+## 48. Increment C.3 — Gene-anchored protein identity resolution
+
+Real Integration Pilot 1 Run 4 (§47's own mechanism, run against a real, live
+`sce00061`) resolved all 13 KGML-declared genes but **zero** of their proteins,
+so **zero** `ReactionEnzyme` associations were created — a materially
+different failure from Run 3's own EC-based ambiguity, root-caused live before
+any code changed: every gene-symbol UniProt query (``"ACC1 AND organism_name:
+\"Saccharomyces cerevisiae\""``) returned multiple candidates from three
+distinct causes — (1) cross-species leakage (*Saccharomyces pastorianus*,
+taxid 27292, matched by `organism_name`'s own free-text, non-exact semantics),
+(2) unrelated same-organism genes matched by the query's own unscoped text
+search (`FAS1` matched 24 of 25 hits for *other* real *S. cerevisiae* genes),
+and (3) multiple real, distinct-strain accessions for the correct gene (`HFA1`
+→ 5 accessions). Every candidate was then treated as an independent claim by
+the existing, unmodified, correctly-conservative candidate-classification
+machinery — right for that machinery's own assumption, wrong once the caller
+already knows, from a stronger source, which specific gene product is being
+asked about.
+
+**The central principle**: database-record multiplicity is not
+biological-identity multiplicity. Once a Gene is confidently resolved (§47's
+own direct-evidence path), it becomes the anchor for resolving its protein —
+never assuming one UniProt accession equals one biological protein.
+
+**Two changes, both additive, neither touching `app.normalization.protein`,
+`app.persistence.protein`, or `app.entity_resolution.adapters`:**
+
+1. **A more precise query.** `UniProtConnector.search` already supported an
+   exact numeric taxonomy filter (`organism_id:{taxid}`) that
+   `resolve_protein_via_uniprot` never used — confirmed live to already
+   collapse 11 of 13 genes to a single hit on its own (`ACC1`: 3 → 1; `HFA1`:
+   7 → 1), eliminating causes 1 and 3 before a single candidate is even
+   classified. `strategies.resolve_gene_anchored_protein` passes the already-
+   resolved Organism's own `ncbi_taxonomy_id` through to this existing
+   parameter.
+2. **Gene-anchored candidate classification**
+   (`strategies.classify_gene_anchored_candidate`), using two already-
+   structured UniProt fields never previously read for this purpose:
+   `organism_taxonomy_id` (exact) and `gene_names` (the record's own explicit
+   symbol list). A record is `CONFIRMED_SAME_GENE_PRODUCT` (right organism,
+   expected symbol present), `CONFLICTING_GENE_PRODUCT` (right organism, a
+   *different* symbol positively present — fixes cause 2, e.g. the `FAS1` ->
+   `SRP102` false hit), or `INSUFFICIENT_EVIDENCE` (wrong organism, or no
+   gene-name data at all). Only confirmed records ever contribute; conflicting
+   records are excluded outright, never treated as a second, competing
+   identity.
+
+**Multiplicity among confirmed records never creates two Protein rows.**
+`strategies.select_canonical_gene_anchored_protein` deterministically prefers
+a uniquely `reviewed=True` (UniProt's own Swiss-Prot/TrEMBL distinction,
+never invented here) record when one exists among several confirmed ones;
+every other confirmed accession, plus each record's own UniProt-reported
+`secondary_accessions`, is preserved as an additional
+`SourceCrossReference` on the one Protein created — reusing
+`app.persistence.provenance.attach_source_cross_reference` exactly as every
+other entity's own re-resolution already does, no new persistence mechanism.
+
+**A genuine architectural boundary, discovered and disclosed, not worked
+around**: `app.normalization.protein.normalize_protein` only ever returns
+`NEW` when a `uniprot_id` is present — a name-only, gene-anchored-but-no-
+canonical-accession identity has no path to create a Protein through the
+existing pipeline (it can only reach `AMBIGUOUS`, on a same-organism name
+collision, or `UNRESOLVED`). Rather than weaken that documented Level-1-
+identifier requirement, this case (2+ confirmed records, none or more than
+one `reviewed`) is disclosed as insufficient evidence, never a fabricated
+Protein and never an arbitrary accession choice. Confirmed live: this
+boundary does not actually bite for any of `sce00061`'s real 13 genes once
+the exact-taxonomy-id query filter is applied — every one resolves to
+exactly one confirmed candidate.
+
+**C.2's own rules are all unchanged**: direct KGML gene evidence still
+precedes EC search entirely; a failed direct-evidence attempt still never
+falls through to an EC-matched substitute; multiple explicitly-named genes at
+one KGML entry remain independent candidate gene products (ACC1/HFA1,
+FAS1/FAS2 each still resolve to two independent Proteins, now with each one's
+own `ReactionEnzyme`, since protein resolution itself now succeeds); no
+`EnzymeComplex` is ever created; EC equality alone still never by itself
+establishes a `ReactionEnzyme`.
+
+**`ProteinLookup.by_gene_id`** (`SqlAlchemyProteinLookup`, not part of the
+shared `app.normalization.protein.ProteinLookup` protocol — that protocol's
+own docstring already documents why `gene_id` never participates in generic
+Protein identity) lets `executor._resolve_one_direct_catalyst_protein` reuse
+an already-anchored Protein with zero UniProt calls, across reactions within
+one run and across separate runs entirely — the same idempotency guarantee
+every other entity in this package already has.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to
+`"pathway-curation-v1.3"` — a materially different, observable result for the
+same input (Run 4's zero proteins; the identical 13 genes now each resolve
+live). `AGENT1_CONTRACT_VERSION` is unchanged: `Protein`/`ReactionEnzyme` are
+pre-existing fields on the existing export chain, not new ones.
+
+## 49. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

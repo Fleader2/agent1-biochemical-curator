@@ -134,6 +134,14 @@ def execute_pathway_curation(
     organism_id = organism_outcome.entity_id
     state.record_entity(organism_id)
 
+    # Increment C.3: the resolved Organism's own exact NCBI taxonomy id (never the
+    # request's own free-text organism_text) anchors gene-anchored protein
+    # resolution's UniProt query -- see strategies.resolve_gene_anchored_protein.
+    from app.models.organism import Organism as OrganismModel
+
+    organism_row = session.get(OrganismModel, organism_id)
+    organism_taxonomy_id = organism_row.ncbi_taxonomy_id if organism_row is not None else None
+
     # --- Compartment scope assumption (Increment C pre-commit revision, Step 13: an explicit,
     # caller-asserted scope assumption, never an inference this package makes on its own) -----
     reference_compartment_id: UUID | None = None
@@ -229,6 +237,7 @@ def execute_pathway_curation(
                 connectors=connectors,
                 organism_id=organism_id,
                 organism_text=effective_request.organism_text,
+                organism_taxonomy_id=organism_taxonomy_id,
                 gene_lookup=gene_lookup,
                 protein_lookup=protein_lookup,
                 reaction_enzyme_lookup=reaction_enzyme_lookup,
@@ -664,6 +673,7 @@ def _resolve_direct_catalysts_from_kgml(
     connectors: PathwayConnectorBundle,
     organism_id: UUID,
     organism_text: str,
+    organism_taxonomy_id: int | None,
     gene_lookup,
     protein_lookup,
     reaction_enzyme_lookup,
@@ -752,6 +762,7 @@ def _resolve_direct_catalysts_from_kgml(
                 kegg_gene_id=kegg_gene_id,
                 organism_id=organism_id,
                 organism_text=organism_text,
+                organism_taxonomy_id=organism_taxonomy_id,
                 gene_lookup=gene_lookup,
                 protein_lookup=protein_lookup,
                 session=session,
@@ -838,6 +849,7 @@ def _resolve_one_direct_catalyst_protein(
     kegg_gene_id: str,
     organism_id: UUID,
     organism_text: str,
+    organism_taxonomy_id: int | None,
     gene_lookup,
     protein_lookup,
     session: Session,
@@ -853,12 +865,23 @@ def _resolve_one_direct_catalyst_protein(
     pattern).
 
     Gene resolution uses the bare KEGG gene id as the SGD query text directly
-    (``strategies.resolve_gene_by_kegg_gene_id``); protein resolution then uses that
-    *resolved Gene's own* ``symbol`` (falling back to its ``systematic_name`` when no
-    symbol was recorded) -- never the bare KEGG gene id again -- as the UniProt query
-    text, since a systematic ORF/locus name is not reliably a UniProt gene-name
-    query term the way a real gene symbol is (Increment C.2, Step 18: "use existing
-    deterministic Gene->Protein relationships").
+    (``strategies.resolve_gene_by_kegg_gene_id``). **Increment C.3**: protein
+    resolution is gene-anchored (``strategies.resolve_gene_anchored_protein``), not
+    a bare free-text UniProt search classified purely by accession --
+    ``protein_lookup.by_gene_id`` is checked *first* (a pathway-curation-specific
+    reuse/idempotency capability, not part of the shared, generic
+    ``app.normalization.protein.ProteinLookup`` protocol -- see
+    ``SqlAlchemyProteinLookup.by_gene_id``'s own docstring for why): a Protein
+    already anchored to this exact Gene, from an earlier reaction in this run or a
+    prior run entirely, is reused immediately, with zero further connector calls.
+    Only when none exists yet does this call UniProt at all, using the *resolved
+    Gene's own* ``symbol`` (falling back to its ``systematic_name``) as the search
+    key, then classifying every raw hit against the Gene itself
+    (``strategies.classify_gene_anchored_candidate``) rather than trusting the
+    search's own accession-level ambiguity machinery -- this is the fix for Real
+    Integration Pilot 1 Run 4's confirmed zero-protein result (see
+    ``strategies.classify_gene_anchored_candidate``'s own docstring for the full,
+    three-cause failure mechanism this replaces).
     """
     if kegg_gene_id in direct_catalyst_cache:
         return direct_catalyst_cache[kegg_gene_id]
@@ -902,6 +925,21 @@ def _resolve_one_direct_catalyst_protein(
     state.record_entity(gene_outcome.entity_id)
     gene_id = gene_outcome.entity_id
 
+    # Increment C.3: a Protein already anchored to this exact Gene (an earlier
+    # reaction this run, or a prior run entirely) is reused with no UniProt call.
+    existing_proteins = protein_lookup.by_gene_id(gene_id)
+    if len(existing_proteins) == 1:
+        direct_catalyst_cache[kegg_gene_id] = existing_proteins[0].id
+        return existing_proteins[0].id
+    if len(existing_proteins) > 1:
+        state.warn(
+            f"gene {kegg_gene_id} (Gene {gene_id}) already has {len(existing_proteins)} "
+            "distinct Protein rows anchored to it -- never guessing which one is "
+            "correct; direct catalyst resolution left unresolved for this gene"
+        )
+        direct_catalyst_cache[kegg_gene_id] = None
+        return None
+
     gene_row = session.get(GeneModel, gene_id)
     protein_query_text = kegg_gene_id
     if gene_row is not None and (gene_row.symbol or gene_row.systematic_name):
@@ -909,16 +947,17 @@ def _resolve_one_direct_catalyst_protein(
 
     protein_query_identity = query_identity(
         connector=SourceType.UNIPROT,
-        action="resolve_protein_direct_kgml",
+        action="resolve_protein_direct_kgml_gene_anchored",
         query=protein_query_text,
         organism_id=str(organism_id),
     )
     try:
-        protein_outcome = strategies.resolve_protein_by_text(
+        protein_outcome = strategies.resolve_gene_anchored_protein(
             connectors.uniprot,
-            protein_query_text,
+            gene_id=gene_id,
+            gene_symbol=protein_query_text,
             organism_id=organism_id,
-            organism_context_text=organism_text,
+            organism_taxonomy_id=organism_taxonomy_id,
             lookup=protein_lookup,
             session=session,
         )
@@ -930,17 +969,22 @@ def _resolve_one_direct_catalyst_protein(
         state.record_connector_call()
         state.record_query(
             protein_query_identity,
-            display_text=f"UniProt protein search (direct KGML): {protein_query_text}",
+            display_text=f"UniProt protein search (gene-anchored): {protein_query_text}",
         )
         direct_catalyst_cache[kegg_gene_id] = None
         return None
     state.record_connector_call()
     state.record_query(
         protein_query_identity,
-        display_text=f"UniProt protein search (direct KGML): {protein_query_text}",
+        display_text=f"UniProt protein search (gene-anchored): {protein_query_text}",
     )
 
     if protein_outcome.entity_id is None:
+        if protein_outcome.notes:
+            state.warn(
+                f"gene-anchored protein resolution for {kegg_gene_id} "
+                f"({protein_query_text}): {protein_outcome.notes}"
+            )
         direct_catalyst_cache[kegg_gene_id] = None
         return None
     state.record_entity(protein_outcome.entity_id)

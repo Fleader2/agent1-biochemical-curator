@@ -78,6 +78,8 @@ from app.normalization.kinetic_measurement import (
 from app.normalization.organism import OrganismIdentity, OrganismLookup, normalize_organism
 from app.normalization.protein import (
     ProteinLookup,
+    normalize_protein,
+    protein_identity_from_uniprot,
 )
 from app.normalization.publication import (
     PublicationLookup,
@@ -101,21 +103,27 @@ from app.persistence.compound import persist_compound
 from app.persistence.gene import persist_gene
 from app.persistence.organism import persist_organism
 from app.persistence.protein import persist_protein
+from app.persistence.provenance import attach_source_cross_reference
 from app.persistence.publication import persist_publication
 from app.persistence.reaction import persist_reaction
 from app.persistence.reaction_enzyme import persist_reaction_enzyme
 from app.persistence.types import PersistenceAction
 
 __all__ = [
+    "GENE_ANCHORED_CONFIRMED",
+    "GENE_ANCHORED_CONFLICTING",
+    "GENE_ANCHORED_INSUFFICIENT",
     "DirectCatalystEvidence",
     "KeggPathwayCurationConnector",
     "KgmlCatalystContext",
     "ResolutionOutcome",
     "associate_catalyst",
     "classify_and_persist_protein_candidates",
+    "classify_gene_anchored_candidate",
     "discover_catalyst_candidates_by_ec_number",
     "discover_catalyst_candidates_for_one_ec",
     "discover_catalyst_context",
+    "discover_gene_anchored_protein_candidates",
     "discover_kinetics_oed",
     "discover_kinetics_sabiork",
     "discover_pathway",
@@ -125,6 +133,7 @@ __all__ = [
     "fetch_kegg_reaction_record",
     "is_fully_classified_ec",
     "resolve_compound_by_text",
+    "resolve_gene_anchored_protein",
     "resolve_gene_by_kegg_gene_id",
     "resolve_gene_by_text",
     "resolve_organism",
@@ -134,6 +143,7 @@ __all__ = [
     "resolve_reaction_by_kegg_id",
     "resolve_reaction_by_text",
     "resolve_reference_compartment_by_name",
+    "select_canonical_gene_anchored_protein",
     "split_ec_numbers",
 ]
 
@@ -901,6 +911,265 @@ def resolve_protein_by_text(
             session=session,
         ),
     )
+
+
+GENE_ANCHORED_CONFIRMED = "CONFIRMED_SAME_GENE_PRODUCT"
+GENE_ANCHORED_CONFLICTING = "CONFLICTING_GENE_PRODUCT"
+GENE_ANCHORED_INSUFFICIENT = "INSUFFICIENT_EVIDENCE"
+
+
+def classify_gene_anchored_candidate(
+    record,
+    *,
+    expected_gene_symbol: str,
+    expected_organism_taxonomy_id: int | None,
+) -> str:
+    """Classify one raw UniProt record against an already-resolved Agent 1 Gene
+    (Increment C.3) -- the central fix for Real Integration Pilot 1 Run 4's
+    zero-protein result.
+
+    **The verified Run 4 failure mechanism**: every gene-symbol UniProt query
+    (``"ACC1 AND organism_name:\\"Saccharomyces cerevisiae\\""``) returned multiple
+    candidates from three distinct, confirmed-live causes -- (1) a different,
+    related species matched by ``organism_name``'s own free-text (not exact-taxon)
+    semantics (e.g. *Saccharomyces pastorianus*, taxid 27292, for an ``"ACC1"``
+    query intended for *S. cerevisiae*, taxid 559292); (2) unrelated same-organism
+    genes matched by the query's own unscoped free-text search (``"FAS1"`` matched
+    24 of 25 hits that were real *S. cerevisiae* proteins for *different* genes
+    entirely, e.g. ``SRP102``, ``ATP7``); (3) multiple real, distinct-strain UniProt
+    accessions for the *same* gene (``"HFA1"`` returned 5 accessions, all genuinely
+    named ``HFA1`` in *S. cerevisiae*). Every prior candidate was then treated as an
+    independent, potentially-distinct ``NEW`` biological identity by the existing,
+    unmodified, correctly-conservative ``_classify_candidates`` machinery -- which
+    is the right behavior for *that* machinery's own assumption (each candidate is
+    an independent claim about identity), but wrong when the caller already knows,
+    from a stronger source (KEGG/KGML's own direct reaction->gene evidence, plus
+    SGD's own successful Gene resolution), which *specific* gene product every
+    candidate is actually being asked about.
+
+    This function uses exactly two already-available, already-structured UniProt
+    fields -- ``organism_taxonomy_id`` (an exact numeric taxonomy identifier, never
+    a free-text species-name match) and ``gene_names`` (the record's own explicit
+    gene-symbol list) -- to answer a narrower, better-posed question: "is this
+    specific record the same biological gene product as the Gene Agent 1 already
+    resolved?" A record whose organism does not exactly match is
+    ``INSUFFICIENT_EVIDENCE`` (fixes cause 1). A record in the right organism whose
+    own ``gene_names`` positively lists something other than the expected symbol
+    (and never the expected symbol) is ``CONFLICTING_GENE_PRODUCT`` (fixes cause
+    2) -- a real, disclosed, non-fabricated distinction: UniProt's own record says
+    this is a different gene, this is not an invented heuristic. A record in the
+    right organism whose ``gene_names`` **does** include the expected symbol is
+    ``CONFIRMED_SAME_GENE_PRODUCT`` -- and, per this increment's own central
+    principle, *multiple* such confirmed records are database-record multiplicity,
+    not biological-identity ambiguity (fixes cause 3 without merging anything that
+    was never established to be the same in the first place).
+
+    No fuzzy matching: ``expected_gene_symbol`` is compared for exact membership in
+    ``record.gene_names`` (a tuple UniProt itself already parsed into discrete
+    tokens) -- no case-folding, no substring matching, matching
+    ``app.normalization.protein``'s own "No fuzzy matching, ever" discipline.
+    """
+    if (
+        expected_organism_taxonomy_id is not None
+        and record.organism_taxonomy_id != expected_organism_taxonomy_id
+    ):
+        return GENE_ANCHORED_INSUFFICIENT
+    if expected_gene_symbol in record.gene_names:
+        return GENE_ANCHORED_CONFIRMED
+    if record.gene_names:
+        return GENE_ANCHORED_CONFLICTING
+    return GENE_ANCHORED_INSUFFICIENT
+
+
+def discover_gene_anchored_protein_candidates(
+    connector: UniProtSearchAndFetch,
+    gene_symbol: str,
+    *,
+    organism_taxonomy_id: int | None,
+):
+    """Search UniProt for ``gene_symbol`` and fetch+normalize every hit -- raw
+    records only, no classification, no persistence (Increment C.3).
+
+    Passes ``organism_taxonomy_id`` straight through to
+    ``UniProtConnector.search``'s own existing, already-implemented exact-taxon
+    query filter (``organism_id:{taxid}``, UniProt's own structured numeric field
+    -- never a free-text species-name match) when the caller supplies one --
+    confirmed live to already eliminate most cross-species leakage and
+    distinct-strain multiplicity *before* any candidate is even fetched (Increment
+    C.3 investigation: an ``organism_taxonomy_id``-filtered ``"HFA1"`` query
+    returns exactly 1 hit, versus 7 for the same query using only a free-text
+    organism-name filter). When ``organism_taxonomy_id`` is ``None`` (the caller's
+    organism was never resolved with one), the search proceeds unfiltered by
+    organism, exactly like ``resolve_protein_via_uniprot``'s own existing
+    behavior -- ``classify_gene_anchored_candidate`` is then the only organism
+    check remaining, and degrades to "insufficient evidence" rather than silently
+    trusting an unscoped result.
+    """
+    hits = connector.search(gene_symbol, organism_taxonomy_id=organism_taxonomy_id)
+    records = []
+    for hit in hits:
+        entry = connector.fetch(hit.primary_accession)
+        if entry is None:
+            continue
+        records.append(connector.normalize(entry))
+    return tuple(records)
+
+
+def select_canonical_gene_anchored_protein(confirmed: tuple):
+    """Deterministically select one canonical/preferred UniProt record among
+    already-confirmed same-gene-product candidates (Increment C.3, Step 5) --
+    **never** by array/response order.
+
+    Returns the sole candidate when there is only one. Among 2+ confirmed
+    candidates, returns the sole ``reviewed=True`` (UniProt's own
+    manually-curated Swiss-Prot distinction, not invented here) one, when there
+    is exactly one. Returns ``None`` -- deliberately, not a guess -- when no such
+    deterministic preference exists (zero or multiple reviewed candidates among
+    several unreviewed ones): the caller then persists the resolved Gene's own
+    biological-gene-product identity without picking a canonical
+    ``Protein.uniprot_id``, preserving every confirmed accession as an equal-weight
+    cross-reference instead of fabricating a preference the evidence does not
+    support.
+    """
+    if len(confirmed) == 1:
+        return confirmed[0]
+    reviewed = [record for record in confirmed if record.reviewed is True]
+    if len(reviewed) == 1:
+        return reviewed[0]
+    return None
+
+
+def resolve_gene_anchored_protein(
+    connector: UniProtSearchAndFetch,
+    *,
+    gene_id: UUID,
+    gene_symbol: str,
+    organism_id: UUID,
+    organism_taxonomy_id: int | None,
+    lookup: ProteinLookup,
+    session: Session,
+) -> ResolutionOutcome:
+    """Resolve one already-resolved Gene's own encoded protein via gene-anchored
+    UniProt evidence (Increment C.3) -- the direct replacement, inside
+    ``executor._resolve_one_direct_catalyst_protein``, for a bare gene-symbol
+    free-text search classified purely by accession-level ``_classify_candidates``.
+
+    **Never assumes one UniProt accession = one biological protein** (this
+    increment's own central principle). Every raw UniProt hit for ``gene_symbol``
+    is classified against the already-resolved Gene (``classify_gene_anchored_
+    candidate``); only ``CONFIRMED_SAME_GENE_PRODUCT`` records ever contribute to
+    the result -- ``CONFLICTING_GENE_PRODUCT`` records are excluded from
+    consideration entirely (they are evidence the broad search over-matched, never
+    evidence of a second, real, competing biological identity for this same
+    Gene), and zero confirmed records is reported as ``INSUFFICIENT_EVIDENCE``,
+    never a guess.
+
+    When 2+ records are confirmed, ``select_canonical_gene_anchored_protein``
+    deterministically picks a preferred accession (or ``None``) -- either way, a
+    **single** ``Protein`` is normalized/persisted for this Gene (multiplicity
+    among confirmed records never produces multiple Protein rows), and every
+    other confirmed accession (plus each accession's own UniProt-reported
+    ``secondary_accessions``) is preserved as an additional, equal-weight
+    ``SourceCrossReference`` -- database-record multiplicity recorded as exactly
+    that, never discarded and never promoted into a second biological identity.
+    """
+    records = discover_gene_anchored_protein_candidates(
+        connector, gene_symbol, organism_taxonomy_id=organism_taxonomy_id
+    )
+    confirmed = []
+    conflicting = []
+    for record in records:
+        classification = classify_gene_anchored_candidate(
+            record,
+            expected_gene_symbol=gene_symbol,
+            expected_organism_taxonomy_id=organism_taxonomy_id,
+        )
+        if classification == GENE_ANCHORED_CONFIRMED:
+            confirmed.append(record)
+        elif classification == GENE_ANCHORED_CONFLICTING:
+            conflicting.append(record)
+
+    if not confirmed:
+        return ResolutionOutcome(
+            entity_kind=EntityKind.PROTEIN,
+            query=gene_symbol,
+            frontier_reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+            source=SourceType.UNIPROT,
+            notes=(
+                f"no UniProt record for {gene_symbol!r} could be confirmed as the same "
+                f"biological gene product as the already-resolved Gene ({len(records)} "
+                f"raw hit(s) examined, {len(conflicting)} positively identified as a "
+                "different gene in the same organism, the rest wrong-organism or "
+                "gene-name-less) -- insufficient evidence, never a guess"
+            ),
+        )
+
+    confirmed = tuple(confirmed)
+    canonical = select_canonical_gene_anchored_protein(confirmed)
+    if canonical is None:
+        # Architectural boundary, discovered during Increment C.3, not worked
+        # around: app.normalization.protein.normalize_protein only ever returns
+        # NEW when a uniprot_id is present (Level 1 identity) -- a name-only
+        # identity (which is what a gene-anchored, no-canonical-accession claim
+        # would be) can never create a Protein through the existing pipeline; it
+        # can only ever reach AMBIGUOUS (same-organism name collision) or
+        # UNRESOLVED. Rather than weaken that documented Level-1-identifier
+        # requirement (a real, deliberate, pre-existing identity-safety rule),
+        # this is disclosed as insufficient evidence -- never a fabricated
+        # Protein and never an arbitrary accession choice merely to satisfy the
+        # schema (Increment C.3 instructions, Step 5: "stop and report the
+        # contradiction rather than inventing an ad-hoc workaround").
+        return ResolutionOutcome(
+            entity_kind=EntityKind.PROTEIN,
+            query=gene_symbol,
+            frontier_reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+            source=SourceType.UNIPROT,
+            notes=(
+                f"{len(confirmed)} UniProt records confirmed as the same biological "
+                f"gene product as {gene_symbol!r}, but none is uniquely reviewed/"
+                "canonical and none can be arbitrarily preferred -- and "
+                "app.normalization.protein.normalize_protein has no path to create a "
+                "Protein from gene-anchored identity alone (it requires a uniprot_id) "
+                "-- a real architectural limitation, disclosed rather than worked "
+                "around; consider a documented, evidence-based tie-break (e.g. "
+                "sequence length, cross-reference count) in a future increment"
+            ),
+        )
+
+    identity = dataclasses.replace(protein_identity_from_uniprot(canonical), gene_id=gene_id)
+
+    result = normalize_protein(identity, organism_id=organism_id, lookup=lookup)
+    outcome = _outcome_for_result(
+        entity_kind=EntityKind.PROTEIN,
+        query=gene_symbol,
+        source=identity.source,
+        result=result,
+        unresolved_reason=FrontierReason.REACTION_CATALYST_UNRESOLVED,
+        persist=lambda: persist_protein(identity, result, organism_id=organism_id, session=session),
+    )
+
+    if outcome.entity_id is not None:
+        for record in confirmed:
+            if canonical is not None and record is canonical:
+                continue
+            attach_source_cross_reference(
+                session,
+                entity_type="protein",
+                entity_id=outcome.entity_id,
+                source=SourceType.UNIPROT,
+                external_id=record.primary_accession,
+            )
+        for record in confirmed:
+            for secondary_accession in record.secondary_accessions:
+                attach_source_cross_reference(
+                    session,
+                    entity_type="protein",
+                    entity_id=outcome.entity_id,
+                    source=SourceType.UNIPROT,
+                    external_id=secondary_accession,
+                )
+
+    return outcome
 
 
 def split_ec_numbers(raw_ec_field: str) -> tuple[str, ...]:

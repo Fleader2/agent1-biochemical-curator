@@ -232,6 +232,20 @@ class SqlAlchemyProteinLookup:
             select(Protein).where(Protein.organism_id == organism_id, Protein.name == name)
         )
 
+    def by_gene_id(self, gene_id: UUID) -> Sequence[ProteinCandidate]:
+        """Increment C.3 (gene-anchored protein identity resolution) only -- **not**
+        part of the shared ``app.normalization.protein.ProteinLookup`` protocol, whose
+        own module docstring documents *why* ``gene_id`` deliberately never
+        participates in generic Protein identity ("Gene<->Protein relationship
+        policy"). This method exists solely so ``app.pathway_curation.executor`` can
+        ask "does a Protein already exist for this specific, already-resolved Gene"
+        before ever searching UniProt again -- a pathway-curation-specific
+        reuse/idempotency check, not a generic identity rule, exactly mirroring how
+        ``KeggPathwayCurationConnector`` (``app.pathway_curation.strategies``)
+        extends a shared protocol with capabilities entity resolution has no use for.
+        """
+        return self._candidates(select(Protein).where(Protein.gene_id == gene_id))
+
 
 class SqlAlchemyCompoundLookup:
     """Real ``CompoundLookup`` implementation over ``app.models.compound.Compound``."""

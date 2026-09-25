@@ -13,11 +13,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.connectors.exceptions import ConnectorError
+from app.connectors.uniprot import UniProtProteinRecord
 from app.models.enums import ReactionParticipantRole, SourceType
 from app.models.protein import Protein
+from app.models.source_cross_reference import SourceCrossReference
 from app.pathway_curation.errors import InvalidCurationRequestError
 from app.pathway_curation.executor import PathwayConnectorBundle, execute_pathway_curation
 from app.pathway_curation.types import (
@@ -252,6 +255,7 @@ def test_kinetics_enrichment_persists_a_measurement_linked_to_the_resolved_prote
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -432,6 +436,7 @@ def test_full_fake_pilot_run_produces_a_fatty_acid_biosynthesis_like_result(
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -780,6 +785,7 @@ def test_catalyst_association_is_conservative_about_shared_ec_numbers(db_session
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -859,6 +865,7 @@ def test_repeated_execution_does_not_duplicate_anything(db_session: Session) -> 
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -923,6 +930,7 @@ def test_oed_wiring_persists_a_kinetic_measurement_when_sabiork_is_absent(
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -961,6 +969,7 @@ def test_sabiork_failure_does_not_block_oed_kinetics(db_session: Session) -> Non
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -1236,6 +1245,7 @@ def test_f2_catalyst_discovered_from_reaction_ec_number_with_no_seeds(
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -1274,6 +1284,7 @@ def test_f2_shared_ec_number_ambiguity_never_fabricates_an_association(
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             ),
         }
@@ -1287,6 +1298,7 @@ def test_f2_shared_ec_number_ambiguity_never_fabricates_an_association(
         recommended_name="Acetyl-CoA carboxylase, mitochondrial",
         gene_names=("HFA1",),
         organism_name="Saccharomyces cerevisiae",
+        organism_taxonomy_id=YEAST_TAXONOMY_ID,
         ec_numbers=("6.4.1.2",),
     )
 
@@ -1343,6 +1355,7 @@ def test_f2_seed_entity_texts_still_work_alongside_autonomous_discovery(
                 recommended_name="Acetyl-CoA carboxylase",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -1590,6 +1603,7 @@ def test_c2_one_direct_gene_resolves_to_reaction_enzyme(db_session: Session) -> 
                 recommended_name="fake CEM1",
                 gene_names=("CEM1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             )
         }
     )
@@ -1645,6 +1659,7 @@ def test_c2_multiple_independent_direct_genes_both_persisted(db_session: Session
                 recommended_name="fake HFA1",
                 gene_names=("HFA1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             ),
             "ACC1": make_uniprot_entry(
@@ -1652,6 +1667,7 @@ def test_c2_multiple_independent_direct_genes_both_persisted(db_session: Session
                 recommended_name="fake ACC1",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             ),
         }
@@ -1770,6 +1786,7 @@ def test_c2_ec_only_reaction_still_never_fabricates_an_association(db_session: S
                 recommended_name="fake ACC1",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -1779,6 +1796,7 @@ def test_c2_ec_only_reaction_still_never_fabricates_an_association(db_session: S
         recommended_name="fake HFA1",
         gene_names=("HFA1",),
         organism_name="Saccharomyces cerevisiae",
+        organism_taxonomy_id=YEAST_TAXONOMY_ID,
         ec_numbers=("6.4.1.2",),
     )
 
@@ -1823,6 +1841,7 @@ def test_c2_direct_evidence_is_not_diluted_by_broad_ec_candidates(db_session: Se
                 recommended_name="fake CEM1",
                 gene_names=("CEM1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             ),
         }
     )
@@ -1833,6 +1852,7 @@ def test_c2_direct_evidence_is_not_diluted_by_broad_ec_candidates(db_session: Se
         recommended_name="fake P2",
         gene_names=("P2GENE",),
         organism_name="Saccharomyces cerevisiae",
+        organism_taxonomy_id=YEAST_TAXONOMY_ID,
     )
 
     result = execute_pathway_curation(
@@ -1862,6 +1882,7 @@ def test_c2_multiple_valid_ecs_query_each_independently(db_session: Session) -> 
                 recommended_name="fake A",
                 gene_names=("GENEA",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             )
         }
     )
@@ -1902,6 +1923,7 @@ def test_c2_one_ec_resolves_one_does_not(db_session: Session) -> None:
                 recommended_name="fake A",
                 gene_names=("GENEA",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             )
         }
     )
@@ -1925,6 +1947,7 @@ def test_c2_both_ecs_returning_same_protein_are_deduplicated(db_session: Session
         recommended_name="fake shared",
         gene_names=("SHARED",),
         organism_name="Saccharomyces cerevisiae",
+        organism_taxonomy_id=YEAST_TAXONOMY_ID,
     )
     uniprot = FakeUniProtConnector(entries={"1.1.1.1": shared, "2.2.2.2": shared})
 
@@ -1949,12 +1972,14 @@ def test_c2_conflicting_ec_candidate_sets_preserve_ambiguity(db_session: Session
                 recommended_name="fake A",
                 gene_names=("GENEA",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             ),
             "2.2.2.2": make_uniprot_entry(
                 accession="PB",
                 recommended_name="fake B",
                 gene_names=("GENEB",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             ),
         }
     )
@@ -2007,6 +2032,7 @@ def test_c2_partial_wildcard_alongside_a_real_ec_still_queries_the_real_one(
                 recommended_name="fake A",
                 gene_names=("GENEA",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             )
         }
     )
@@ -2044,6 +2070,7 @@ def test_c2_direct_catalyst_resolution_requires_no_seed(db_session: Session) -> 
                 recommended_name="fake CEM1",
                 gene_names=("CEM1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             )
         }
     )
@@ -2080,6 +2107,7 @@ def test_c2_repeated_execution_does_not_duplicate_direct_catalysts(db_session: S
                 recommended_name="fake CEM1",
                 gene_names=("CEM1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             )
         }
     )
@@ -2122,6 +2150,7 @@ def test_c2_direct_catalyst_provenance_traceable_via_queries_executed(db_session
                 recommended_name="fake CEM1",
                 gene_names=("CEM1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
             )
         }
     )
@@ -2203,6 +2232,7 @@ def test_c2_unresolvable_direct_gene_is_disclosed_never_replaced_by_ec_match(
                 recommended_name="fake ACC1",
                 gene_names=("ACC1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("6.4.1.2",),
             )
         }
@@ -2256,6 +2286,7 @@ def test_c2_ec_contradiction_is_disclosed_but_association_still_persists(
                 recommended_name="fake CEM1",
                 gene_names=("CEM1",),
                 organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
                 ec_numbers=("9.9.9.9",),
             )
         }
@@ -2271,3 +2302,672 @@ def test_c2_ec_contradiction_is_disclosed_but_association_still_persists(
 
     assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
     assert any("share no value" in warning for warning in result.warnings)
+
+
+# ==================================================================================================
+# Increment C.3 -- Gene-anchored protein identity resolution
+# ==================================================================================================
+
+
+def _cross_references_for(session, protein_id):
+    return (
+        session.execute(
+            select(SourceCrossReference).where(
+                SourceCrossReference.entity_type == "protein",
+                SourceCrossReference.entity_id == protein_id,
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def test_c3_one_gene_one_uniprot_record(db_session: Session) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-one-record", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 1
+    assert proteins[0].uniprot_id == "P39525"
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+
+
+def test_c3_one_gene_several_equivalent_uniprot_records_become_one_protein(
+    db_session: Session,
+) -> None:
+    """The central Run-4 regression: several real, same-organism, same-gene-name
+    UniProt accessions (distinct strain records, exactly like the live HFA1 case)
+    are database-record multiplicity, not biological-identity ambiguity. Here one
+    is reviewed (Swiss-Prot), giving a deterministic canonical accession -- one
+    Protein is created, the unreviewed one becomes a cross-reference, never an
+    unresolved ambiguity."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YMR207C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YMR207C": make_sgd_locus(sgd_id="S1", systematic_name="YMR207C", standard_name="HFA1")
+        }
+    )
+    # Two distinct dict keys, both substrings of the query "HFA1" (mirrors the
+    # existing FakeUniProtConnector substring-match convention), simulating two
+    # real, distinct-strain accessions for the same confirmed gene product.
+    uniprot = FakeUniProtConnector(
+        entries={
+            "HFA1": make_uniprot_entry(
+                accession="P32874",
+                recommended_name="fake HFA1 canonical strain",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB reviewed (Swiss-Prot)",
+            ),
+            "FA1": make_uniprot_entry(
+                accession="A0A0STRAINB",
+                recommended_name="fake HFA1 strain B",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB unreviewed (TrEMBL)",
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-multi-equivalent", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 1  # never two Protein rows for one confirmed gene product
+    assert proteins[0].uniprot_id == "P32874"
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    # The unreviewed equivalent accession is preserved as a cross-reference, not
+    # discarded and not promoted into a second biological identity.
+    cross_refs = _cross_references_for(db_session, proteins[0].id)
+    external_ids = {ref.external_id for ref in cross_refs}
+    assert "A0A0STRAINB" in external_ids
+
+
+def test_c3_multiple_confirmed_with_no_reviewed_distinction_is_disclosed_not_fabricated(
+    db_session: Session,
+) -> None:
+    """Architectural boundary discovered during Increment C.3 (Step 5): when 2+
+    UniProt records are confirmed as the same gene product but none is uniquely
+    reviewed/canonical, ``app.normalization.protein.normalize_protein`` has no path
+    to create a Protein from name-only (gene-anchored) identity alone -- this is
+    disclosed as insufficient evidence, never a fabricated Protein and never an
+    arbitrary accession choice."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YMR207C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YMR207C": make_sgd_locus(sgd_id="S1", systematic_name="YMR207C", standard_name="HFA1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "HFA1": make_uniprot_entry(
+                accession="P32874",
+                recommended_name="fake HFA1 strain A",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB unreviewed (TrEMBL)",
+            ),
+            "FA1": make_uniprot_entry(
+                accession="A0A0STRAINB",
+                recommended_name="fake HFA1 strain B",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB unreviewed (TrEMBL)",
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-no-reviewed-distinction",
+            seed_entity_texts=(),
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.proteins == ()
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    assert any(
+        "architectural" in warning.lower() or "confirmed" in warning for warning in result.warnings
+    ) or any("confirmed" in (item.notes or "") for item in result.unresolved_frontier)
+
+
+def test_c3_reviewed_record_becomes_canonical_others_become_cross_references(
+    db_session: Session,
+) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YNR016C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YNR016C": make_sgd_locus(sgd_id="S1", systematic_name="YNR016C", standard_name="ACC1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="fake ACC1 canonical",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB reviewed (Swiss-Prot)",
+            ),
+            "CC1": make_uniprot_entry(
+                accession="A0A0AUTO",
+                recommended_name="fake ACC1 automated",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB unreviewed (TrEMBL)",
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-reviewed-canonical", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 1
+    assert proteins[0].uniprot_id == "Q00955"  # the reviewed one, never the first-seen one
+    cross_refs = _cross_references_for(db_session, proteins[0].id)
+    assert any(ref.external_id == "A0A0AUTO" for ref in cross_refs)
+
+
+def test_c3_cross_species_false_hit_is_excluded_not_ambiguity(db_session: Session) -> None:
+    """A same-named-species hit (wrong exact taxonomy id -- mirrors the live
+    Saccharomyces pastorianus finding) is excluded entirely, never counted toward
+    ambiguity, never blocking resolution of the real, correct candidate."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+            "EM1": make_uniprot_entry(
+                accession="A0A6C1WRONGSPECIES",
+                recommended_name="fake CEM1 wrong species",
+                gene_names=("CEM1_1",),
+                organism_name="Saccharomyces pastorianus",
+                organism_taxonomy_id=27292,  # a real, distinct, related species' own taxid
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-cross-species", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 1
+    assert proteins[0].uniprot_id == "P39525"
+    assert not any(
+        item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        for item in result.unresolved_frontier
+    )
+
+
+def test_c3_same_organism_unrelated_gene_false_hit_is_excluded(db_session: Session) -> None:
+    """A same-organism hit for a genuinely different, unrelated gene (mirrors the
+    live FAS1 -> SRP102/ATP7 finding) is classified CONFLICTING_GENE_PRODUCT and
+    excluded -- never counted toward ambiguity, never blocking the real match."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YKL182W",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YKL182W": make_sgd_locus(sgd_id="S1", systematic_name="YKL182W", standard_name="FAS1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "FAS1": make_uniprot_entry(
+                accession="P07149",
+                recommended_name="fake FAS1",
+                gene_names=("FAS1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+            "AS1": make_uniprot_entry(
+                accession="P36057",
+                recommended_name="fake SRP102 (unrelated, matched by loose text search)",
+                gene_names=("SRP102",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-unrelated-gene", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 1
+    assert proteins[0].uniprot_id == "P07149"
+    assert not any(
+        ref.external_id == "P36057" for ref in _cross_references_for(db_session, proteins[0].id)
+    )
+
+
+def test_c3_insufficient_evidence_is_disclosed_never_a_guess(db_session: Session) -> None:
+    """Only conflicting/wrong-organism hits exist -- zero confirmed candidates --
+    disclosed as unresolved, never a guess, never a fallback to a wrong record."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YOR221C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YOR221C": make_sgd_locus(sgd_id="S1", systematic_name="YOR221C", standard_name="MCT1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "MCT1": make_uniprot_entry(
+                accession="WRONGORG",
+                recommended_name="fake wrong-organism hit",
+                gene_names=("MCT1",),
+                organism_name="Saccharomyces paradoxus",
+                organism_taxonomy_id=27291,
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-insufficient-evidence",
+            seed_entity_texts=(),
+            include_publications=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    assert result.agent1_knowledge_package.proteins == ()
+    assert result.agent1_knowledge_package.reaction_enzyme_associations == ()
+    unresolved = [
+        item
+        for item in result.unresolved_frontier
+        if item.reason is FrontierReason.REACTION_CATALYST_UNRESOLVED
+        and item.entity_text == "YOR221C"
+    ]
+    assert len(unresolved) == 1
+    assert any("insufficient evidence" in warning for warning in result.warnings)
+
+
+def test_c3_order_independence_of_canonical_selection() -> None:
+    """Canonical-accession selection never depends on candidate order -- a pure,
+    offline test of the selection function itself, no live network, no database."""
+    from app.pathway_curation.strategies import select_canonical_gene_anchored_protein
+
+    reviewed = make_uniprot_entry(
+        accession="REVIEWED1",
+        recommended_name="r",
+        gene_names=("G1",),
+        organism_name="Saccharomyces cerevisiae",
+        organism_taxonomy_id=YEAST_TAXONOMY_ID,
+        entry_type="UniProtKB reviewed (Swiss-Prot)",
+    )
+    unreviewed_a = make_uniprot_entry(
+        accession="UNREV1",
+        recommended_name="u1",
+        gene_names=("G1",),
+        organism_name="Saccharomyces cerevisiae",
+        organism_taxonomy_id=YEAST_TAXONOMY_ID,
+        entry_type="UniProtKB unreviewed (TrEMBL)",
+    )
+    unreviewed_b = make_uniprot_entry(
+        accession="UNREV2",
+        recommended_name="u2",
+        gene_names=("G1",),
+        organism_name="Saccharomyces cerevisiae",
+        organism_taxonomy_id=YEAST_TAXONOMY_ID,
+        entry_type="UniProtKB unreviewed (TrEMBL)",
+    )
+    from app.connectors.uniprot import _parse_reviewed
+
+    def _record(entry):
+        return UniProtProteinRecord(
+            primary_accession=entry.primary_accession,
+            entry_name=None,
+            reviewed=_parse_reviewed(entry.entry_type),
+            protein_name=entry.recommended_name,
+            gene_names=entry.gene_names,
+            organism_name=entry.organism_name,
+            organism_taxonomy_id=entry.organism_taxonomy_id,
+            ec_numbers=(),
+            sequence_length=None,
+            secondary_accessions=(),
+            cross_references=(),
+            raw=entry,
+        )
+
+    records = [_record(unreviewed_a), _record(reviewed), _record(unreviewed_b)]
+    forward = select_canonical_gene_anchored_protein(tuple(records))
+    backward = select_canonical_gene_anchored_protein(tuple(reversed(records)))
+    assert forward is not None
+    assert forward.primary_accession == "REVIEWED1"
+    assert backward is not None
+    assert backward.primary_accession == "REVIEWED1"
+
+
+def test_c3_multiple_unreviewed_with_no_distinguishing_evidence_returns_none() -> None:
+    from app.pathway_curation.strategies import select_canonical_gene_anchored_protein
+
+    def _record(accession):
+        return UniProtProteinRecord(
+            primary_accession=accession,
+            entry_name=None,
+            reviewed=False,
+            protein_name="p",
+            gene_names=("G1",),
+            organism_name="Saccharomyces cerevisiae",
+            organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ec_numbers=(),
+            sequence_length=None,
+            secondary_accessions=(),
+            cross_references=(),
+            raw=None,
+        )
+
+    result = select_canonical_gene_anchored_protein((_record("A"), _record("B")))
+    assert result is None
+
+
+def test_c3_idempotent_persistence_no_duplicate_protein_or_cross_references(
+    db_session: Session,
+) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YMR207C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YMR207C": make_sgd_locus(sgd_id="S1", systematic_name="YMR207C", standard_name="HFA1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "HFA1": make_uniprot_entry(
+                accession="P32874",
+                recommended_name="fake HFA1 canonical strain",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB reviewed (Swiss-Prot)",
+            ),
+            "FA1": make_uniprot_entry(
+                accession="A0A0STRAINB",
+                recommended_name="fake HFA1 strain B",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                entry_type="UniProtKB unreviewed (TrEMBL)",
+            ),
+        }
+    )
+    request = _c2_request(
+        request_id="req-c3-idempotency", seed_entity_texts=(), include_publications=False
+    )
+    connectors = PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot)
+
+    first = execute_pathway_curation(request, session=db_session, connectors=connectors)
+    db_session.flush()
+    second = execute_pathway_curation(request, session=db_session, connectors=connectors)
+
+    assert len(first.agent1_knowledge_package.proteins) == 1
+    assert len(second.agent1_knowledge_package.proteins) == 1
+    assert (
+        first.agent1_knowledge_package.proteins[0].id
+        == second.agent1_knowledge_package.proteins[0].id
+    )
+    cross_refs = _cross_references_for(db_session, second.agent1_knowledge_package.proteins[0].id)
+    external_ids = [ref.external_id for ref in cross_refs]
+    assert len(external_ids) == len(set(external_ids))  # no duplicate cross-reference rows
+    assert len(second.agent1_knowledge_package.reaction_enzyme_associations) == 1
+
+
+def test_c3_acc1_hfa1_like_genes_remain_distinct_proteins_despite_shared_ec(
+    db_session: Session,
+) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(
+                entry_type="gene", names=("YMR207C", "YNR016C"), reaction_ids=("R00742",)
+            ),
+        ),
+        ec_by_reaction={"R00742": ("6.4.1.2",)},
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YMR207C": make_sgd_locus(sgd_id="S1", systematic_name="YMR207C", standard_name="HFA1"),
+            "YNR016C": make_sgd_locus(sgd_id="S2", systematic_name="YNR016C", standard_name="ACC1"),
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "HFA1": make_uniprot_entry(
+                accession="P32874",
+                recommended_name="fake HFA1",
+                gene_names=("HFA1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            ),
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="fake ACC1",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-acc1-hfa1", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 2
+    uniprot_ids = {p.uniprot_id for p in proteins}
+    assert uniprot_ids == {"P32874", "Q00955"}
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 2
+
+
+def test_c3_fas1_fas2_like_multi_gene_reaction_gets_two_reaction_enzyme_rows(
+    db_session: Session,
+) -> None:
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(
+                entry_type="gene", names=("YKL182W", "YPL231W"), reaction_ids=("R00742",)
+            ),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YKL182W": make_sgd_locus(sgd_id="S1", systematic_name="YKL182W", standard_name="FAS1"),
+            "YPL231W": make_sgd_locus(sgd_id="S2", systematic_name="YPL231W", standard_name="FAS2"),
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "FAS1": make_uniprot_entry(
+                accession="P07149",
+                recommended_name="fake FAS1",
+                gene_names=("FAS1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+            "FAS2": make_uniprot_entry(
+                accession="P19097",
+                recommended_name="fake FAS2",
+                gene_names=("FAS2",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c3-fas1-fas2", seed_entity_texts=(), include_publications=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    proteins = result.agent1_knowledge_package.proteins
+    assert len(proteins) == 2
+    associations = result.agent1_knowledge_package.reaction_enzyme_associations
+    assert len(associations) == 2
+    # Both associations target the same reaction (no fabricated complex; both
+    # genes recorded as independent catalyst candidates per C.2's own rule).
+    reaction_ids = {a.reaction_id for a in associations}
+    assert len(reaction_ids) == 1
+
+
+def test_c3_gene_anchored_protein_reused_via_by_gene_id_no_second_uniprot_call(
+    db_session: Session,
+) -> None:
+    """Once a Protein exists for a Gene (e.g. resolved via one reaction), a second
+    reaction naming the same gene reuses it via ``ProteinLookup.by_gene_id`` --
+    confirmed by the connector call count never issuing a second UniProt search for
+    the same gene symbol within one run (already covered indirectly by
+    ``direct_catalyst_cache``, but this asserts the gene_id-based lookup path
+    specifically survives a fresh run reusing a previous run's persisted Protein)."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            )
+        }
+    )
+    request = _c2_request(
+        request_id="req-c3-reuse-by-gene-id", seed_entity_texts=(), include_publications=False
+    )
+    first_result = execute_pathway_curation(
+        request,
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+    db_session.flush()
+
+    # A second, independent run (fresh connectors/state) against the same database
+    # -- the Protein already anchored to this Gene must be reused with zero new
+    # UniProt search calls.
+    uniprot2 = FakeUniProtConnector(entries={})  # no data at all -- reuse must not need it
+    second_request = _c2_request(
+        request_id="req-c3-reuse-by-gene-id-2", seed_entity_texts=(), include_publications=False
+    )
+    second_result = execute_pathway_curation(
+        second_request,
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot2),
+    )
+
+    assert not any(call[0] == "search" for call in uniprot2.calls)
+    assert len(second_result.agent1_knowledge_package.reaction_enzyme_associations) == 1
+    assert (
+        first_result.agent1_knowledge_package.proteins[0].id
+        == second_result.agent1_knowledge_package.proteins[0].id
+    )

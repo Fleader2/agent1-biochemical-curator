@@ -51,7 +51,15 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: precedence changed materially -- direct organism-specific KGML
 #: reaction->gene evidence is now tried first and, when present, entirely
 #: preempts the EC-based search (see ``docs/26_...md`` §47).
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.2"
+#:
+#: Bumped to ``v1.3`` by Agent 1.x Increment C.3: gene-anchored protein
+#: identity resolution replaces a bare free-text UniProt search classified
+#: purely at the accession level -- a materially different, observable
+#: result for the same input (confirmed live: Real Integration Pilot 1 Run
+#: 4's zero-protein outcome for all 13 KGML genes; the same 13 genes each
+#: now resolve to exactly one confirmed, canonical protein) (see
+#: ``docs/26_...md`` §48).
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.3"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase

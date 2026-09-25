@@ -310,11 +310,19 @@ class FakeUniProtConnector:
         return None
 
     def normalize(self, raw: UniProtEntryRecord) -> UniProtProteinRecord:
+        """Increment C.3: ``reviewed`` is derived from ``raw.entry_type`` via the
+        real connector's own ``_parse_reviewed`` classifier, not hardcoded --
+        ``make_uniprot_entry``'s own ``entry_type`` parameter (default
+        ``"Swiss-Prot"``) lets a test construct an unreviewed (TrEMBL) fake entry to
+        exercise ``strategies.select_canonical_gene_anchored_protein``'s own
+        reviewed-vs-unreviewed tie-break."""
+        from app.connectors.uniprot import _parse_reviewed
+
         self.calls.append(("normalize", (raw.primary_accession,)))
         return UniProtProteinRecord(
             primary_accession=raw.primary_accession,
             entry_name=raw.entry_name,
-            reviewed=True,
+            reviewed=_parse_reviewed(raw.entry_type),
             protein_name=raw.recommended_name,
             gene_names=raw.gene_names,
             organism_name=raw.organism_name,
@@ -334,17 +342,30 @@ def make_uniprot_entry(
     gene_names: tuple[str, ...],
     organism_name: str,
     ec_numbers: tuple[str, ...] = (),
+    organism_taxonomy_id: int | None = None,
+    entry_type: str = "UniProtKB reviewed (Swiss-Prot)",
+    secondary_accessions: tuple[str, ...] = (),
 ) -> UniProtEntryRecord:
+    """``organism_taxonomy_id`` (Increment C.3): a real, exact NCBI taxonomy id --
+    ``None`` by default, matching this fixture's pre-C.3 behavior, but a test
+    exercising gene-anchored classification must supply the same id the request's
+    own ``organism_ncbi_taxonomy_id`` resolves to (see ``classify_gene_anchored_
+    candidate``, which treats a ``None``/mismatched taxonomy id as insufficient
+    evidence, never a guess). ``entry_type`` uses UniProtKB's own real
+    ``entryType`` string shape (``"UniProtKB reviewed (Swiss-Prot)"``/``"UniProtKB
+    unreviewed (TrEMBL)"``) so ``FakeUniProtConnector.normalize``'s ``_parse_
+    reviewed`` reuse classifies it exactly like the real connector would.
+    """
     return UniProtEntryRecord(
         primary_accession=accession,
         entry_name=None,
-        entry_type="Swiss-Prot",
-        secondary_accessions=(),
+        entry_type=entry_type,
+        secondary_accessions=secondary_accessions,
         recommended_name=recommended_name,
         submitted_names=(),
         gene_names=gene_names,
         organism_name=organism_name,
-        organism_taxonomy_id=None,
+        organism_taxonomy_id=organism_taxonomy_id,
         ec_numbers=ec_numbers,
         sequence_length=None,
         cross_references=(),
