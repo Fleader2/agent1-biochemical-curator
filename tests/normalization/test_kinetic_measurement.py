@@ -293,6 +293,87 @@ def test_sabiork_adapter_one_entry_two_parameters_yields_independent_identities(
     assert len(ids) == 2
 
 
+# --- Increment C.6: reaction-context policy (explicit/ambiguous/absent) -----------------
+#
+# kinetic_identity_from_sabiork already accepted reaction_id as a plain, optional,
+# caller-supplied parameter before this increment -- these tests lock in the exact
+# policy Increment C.6 requires: preserved when a caller has deterministic evidence
+# (Test D), left unresolved when it does not (Test F). No SABIO-RK connector in this
+# repository currently supplies deterministic reaction evidence of its own (its
+# reaction.equation field is free text, no structured cross-reference to a curated
+# Agent 1 Reaction) -- ambiguous/ecosystem-level reaction-inference-avoidance (Test E)
+# is exercised at the executor level instead (test_c6_multiple_reaction_enzyme_
+# associations_never_produce_a_fabricated_reaction_id, tests/pathway_curation/
+# test_executor.py), since that is where ReactionEnzyme associations actually exist.
+
+
+def test_c6_explicit_reaction_id_is_preserved_when_supplied() -> None:
+    """Test D: a caller with deterministic source reaction identity (however it was
+    established) passes reaction_id through untouched -- never discarded."""
+    import json
+
+    reaction_id = uuid4()
+    record = parse_kinetic_law_json("42", json.dumps(_sabiork_entry_json()))
+    identity = kinetic_identity_from_sabiork(record, record.parameters[0], reaction_id=reaction_id)
+    assert identity is not None
+    assert identity.reaction_id == reaction_id
+
+
+def test_c6_reaction_id_stays_unresolved_when_not_supplied() -> None:
+    """Test F: no reaction evidence at all -- reaction_id stays None, the measurement
+    itself is still fully valid and constructed."""
+    import json
+
+    record = parse_kinetic_law_json("42", json.dumps(_sabiork_entry_json()))
+    identity = kinetic_identity_from_sabiork(record, record.parameters[0])
+    assert identity is not None
+    assert identity.reaction_id is None
+
+
+def test_c6_pubmed_id_resolved_publication_is_preserved() -> None:
+    """Test G (normalization layer): a resolved publication_id, however obtained,
+    passes through untouched -- kinetic_identity_from_sabiork never resolves one
+    itself (see module docstring: 'never resolves entity identity')."""
+    import json
+
+    publication_id = uuid4()
+    record = parse_kinetic_law_json("42", json.dumps(_sabiork_entry_json()))
+    assert record.pubmed_id == "999"  # confirms the fixture actually reports one
+    identity = kinetic_identity_from_sabiork(
+        record, record.parameters[0], publication_id=publication_id
+    )
+    assert identity is not None
+    assert identity.publication_id == publication_id
+
+
+def test_c6_substrate_species_context_preserved_in_raw_not_fabricated_as_a_compound() -> None:
+    """Test I: SABIO-RK's own explicit substrate/species label
+    (kineticlaw.parameter[].species.species_key) is preserved verbatim in the parsed
+    record's raw payload -- kinetic_identity_from_sabiork never invents a
+    substrate_id from it (no compound-resolution machinery is invoked here at all;
+    substrate_id remains whatever the caller explicitly supplies, exactly like every
+    other entity reference)."""
+    import json
+
+    entry_json = _sabiork_entry_json()
+    entry_json["kineticlaw"]["parameter"][0]["species"] = {
+        "species_ref_type": "species",
+        "species_key": "n | Malonyl-CoA | Substrate",
+    }
+    record = parse_kinetic_law_json("42", json.dumps(entry_json))
+    assert record.parameters[0].species_label == "n | Malonyl-CoA | Substrate"
+
+    identity = kinetic_identity_from_sabiork(record, record.parameters[0])
+    assert identity is not None
+    assert identity.substrate_id is None  # never guessed from the species label
+    # The source's own explicit substrate context is not discarded -- it survives in
+    # the connector-level record's raw payload, available to a future increment.
+    assert (
+        record.raw["kineticlaw"]["parameter"][0]["species"]["species_key"]
+        == "n | Malonyl-CoA | Substrate"
+    )
+
+
 # --- kinetic_identity_from_oed ------------------------------------------------------
 
 

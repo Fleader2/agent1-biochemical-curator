@@ -13,11 +13,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.enums import SourceType
-from app.models.kinetic_measurement import KineticMeasurement
+from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
+from app.models.organism import Organism
+from app.models.protein import Protein
 from app.models.reaction import Reaction
 from app.normalization.kinetic_measurement import KineticMeasurementIdentity, KineticParameterType
 from app.persistence import kinetic_measurement as kinetic_measurement_module
 from app.persistence.kinetic_measurement import (
+    attach_kinetic_measurement_protein_context,
     get_kinetic_measurement,
     list_kinetic_measurements_by_reaction,
     persist_kinetic_measurement,
@@ -99,6 +102,16 @@ def test_range_maximum_preserved_in_notes_never_averaged(db_session):
 
 def _reaction(session: Session) -> Reaction:
     row = Reaction(internal_id=f"R{uuid4()}", name="test reaction")
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _protein(session: Session, *, name: str = "test protein") -> Protein:
+    organism = Organism(scientific_name=f"Test organism {uuid4()}")
+    session.add(organism)
+    session.flush()
+    row = Protein(organism_id=organism.id, name=name)
     session.add(row)
     session.flush()
     return row
@@ -353,3 +366,194 @@ def test_no_partial_row_on_failure(db_session, monkeypatch):
 def test_rejects_non_identity_type(db_session):
     with pytest.raises(TypeError):
         persist_kinetic_measurement("not-an-identity", session=db_session)
+
+
+# ---------------------------------------------------------------------------------------------
+# Increment C.6 -- Context-preserving kinetic measurement persistence
+# ---------------------------------------------------------------------------------------------
+#
+# Real Integration Pilot 1 Run 7: two distinct proteins (yeast's real FAS1/FAS2)
+# sharing one EC number each independently, legitimately discovered the identical
+# 7 real SABIO-RK records. Before this increment, the second protein's own
+# successful discovery left no trace at all once persist_kinetic_measurement's
+# existing (source, source_id) uniqueness check found the first protein's row
+# already there. These tests exercise kinetic_measurement_protein_context, the
+# join table that fixes this without redesigning (source, source_id) identity
+# itself and without ever choosing a "winning" protein.
+
+
+def _protein_context_rows(session, kinetic_measurement_id):
+    return (
+        session.execute(
+            select(KineticMeasurementProteinContext).where(
+                KineticMeasurementProteinContext.kinetic_measurement_id == kinetic_measurement_id
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+# --- Test A: same source record, two proteins ---------------------------------------------
+
+
+def test_c6_same_source_record_two_proteins_both_contexts_survive(db_session):
+    protein_a = _protein(db_session, name="FAS2-like")
+    protein_b = _protein(db_session, name="FAS1-like")
+    shared_source_id = "sabiork:18229:Vmax"
+
+    first = persist_kinetic_measurement(
+        _identity(source=SourceType.SABIORK, source_id=shared_source_id, protein_id=protein_a.id),
+        session=db_session,
+    )
+    second = persist_kinetic_measurement(
+        _identity(source=SourceType.SABIORK, source_id=shared_source_id, protein_id=protein_b.id),
+        session=db_session,
+    )
+
+    # (source, source_id) identity is unchanged: still exactly one row.
+    assert first.action is PersistenceAction.CREATED
+    assert second.action is PersistenceAction.REUSED_EXISTING
+    assert second.kinetic_measurement_id == first.kinetic_measurement_id
+    rows = db_session.execute(
+        select(KineticMeasurement).where(KineticMeasurement.source_id == shared_source_id)
+    ).scalars().all()
+    assert len(rows) == 1
+
+    # Legacy .protein_id: whichever protein persisted first (protein_a) -- kept
+    # exactly as before, for backward compatibility, never a fabricated re-attribution.
+    row = get_kinetic_measurement(db_session, first.kinetic_measurement_id)
+    assert row.protein_id == protein_a.id
+
+    # Both protein contexts survive via the new join table -- neither protein
+    # "wins" at this level, and protein_b's own successful discovery is not lost.
+    contexts = _protein_context_rows(db_session, first.kinetic_measurement_id)
+    assert {c.protein_id for c in contexts} == {protein_a.id, protein_b.id}
+    assert len(contexts) == 2
+
+
+# --- Test B: reversed processing order -----------------------------------------------------
+
+
+def test_c6_reversed_processing_order_yields_identical_context_set(db_session):
+    protein_a = _protein(db_session, name="A")
+    protein_b = _protein(db_session, name="B")
+    shared_source_id = "sabiork:reversed:Km"
+
+    # protein_b processed first this time (order reversed from the test above).
+    first = persist_kinetic_measurement(
+        _identity(source=SourceType.SABIORK, source_id=shared_source_id, protein_id=protein_b.id),
+        session=db_session,
+    )
+    persist_kinetic_measurement(
+        _identity(source=SourceType.SABIORK, source_id=shared_source_id, protein_id=protein_a.id),
+        session=db_session,
+    )
+
+    contexts = _protein_context_rows(db_session, first.kinetic_measurement_id)
+    assert {c.protein_id for c in contexts} == {protein_a.id, protein_b.id}
+    # The set of surviving contexts is identical regardless of which protein
+    # happened to be processed first -- only the legacy .protein_id column
+    # (an explicitly-preserved, order-dependent, backward-compatible field)
+    # differs between this test and the one above.
+    row = get_kinetic_measurement(db_session, first.kinetic_measurement_id)
+    assert row.protein_id == protein_b.id
+
+
+# --- Test C: one protein, one source record (ordinary case unaffected) ----------------------
+
+
+def test_c6_single_protein_context_unaffected(db_session):
+    protein = _protein(db_session)
+    result = persist_kinetic_measurement(
+        _identity(protein_id=protein.id), session=db_session
+    )
+    row = get_kinetic_measurement(db_session, result.kinetic_measurement_id)
+    assert row.protein_id == protein.id
+
+    contexts = _protein_context_rows(db_session, result.kinetic_measurement_id)
+    assert len(contexts) == 1
+    assert contexts[0].protein_id == protein.id
+
+
+def test_c6_no_protein_context_created_when_identity_has_no_protein(db_session):
+    """A measurement with no resolved protein at all creates no join-table row --
+    never a fabricated NULL-protein context."""
+    result = persist_kinetic_measurement(_identity(), session=db_session)
+    contexts = _protein_context_rows(db_session, result.kinetic_measurement_id)
+    assert contexts == []
+
+
+# --- Test J: idempotent repeat ---------------------------------------------------------------
+
+
+def test_c6_idempotent_repeat_creates_no_duplicate_contexts(db_session):
+    protein_a = _protein(db_session, name="A")
+    protein_b = _protein(db_session, name="B")
+    shared_source_id = "sabiork:idempotent:Km"
+
+    for _ in range(2):  # simulate the identical curation request running twice
+        persist_kinetic_measurement(
+            _identity(
+                source=SourceType.SABIORK, source_id=shared_source_id, protein_id=protein_a.id
+            ),
+            session=db_session,
+        )
+        persist_kinetic_measurement(
+            _identity(
+                source=SourceType.SABIORK, source_id=shared_source_id, protein_id=protein_b.id
+            ),
+            session=db_session,
+        )
+
+    rows = db_session.execute(
+        select(KineticMeasurement).where(KineticMeasurement.source_id == shared_source_id)
+    ).scalars().all()
+    assert len(rows) == 1  # no duplicate KineticMeasurement row
+
+    contexts = _protein_context_rows(db_session, rows[0].id)
+    assert len(contexts) == 2  # no duplicate context rows despite 4 total persist calls
+    assert {c.protein_id for c in contexts} == {protein_a.id, protein_b.id}
+
+
+def test_c6_attach_kinetic_measurement_protein_context_is_idempotent(db_session):
+    """Direct unit test of the new helper itself: attaching the identical
+    (measurement, protein) pair twice returns the same row id, never a duplicate."""
+    protein = _protein(db_session)
+    result = persist_kinetic_measurement(_identity(), session=db_session)
+
+    first_id = attach_kinetic_measurement_protein_context(
+        db_session, kinetic_measurement_id=result.kinetic_measurement_id, protein_id=protein.id
+    )
+    second_id = attach_kinetic_measurement_protein_context(
+        db_session, kinetic_measurement_id=result.kinetic_measurement_id, protein_id=protein.id
+    )
+    assert first_id == second_id
+
+    contexts = _protein_context_rows(db_session, result.kinetic_measurement_id)
+    assert len(contexts) == 1
+
+
+def test_c6_derivative_lineage_merge_also_attaches_protein_context(db_session):
+    """A derivative-lineage merge (Increment A Step 25) is also a 'reuse' outcome --
+    its own identity.protein_id, if set, must also be attached, not silently dropped."""
+    protein_a = _protein(db_session, name="original-protein")
+    protein_b = _protein(db_session, name="derivative-protein")
+
+    original = _identity(
+        source=SourceType.SABIORK, source_id="sabiork:derivative-ctx:Km", protein_id=protein_a.id
+    )
+    original_result = persist_kinetic_measurement(original, session=db_session)
+
+    derivative = _identity(
+        source=SourceType.OED,
+        source_id="oed:derivative-ctx-digest",
+        protein_id=protein_b.id,
+        original_source=SourceType.SABIORK,
+        original_source_identifier="sabiork:derivative-ctx:Km",
+    )
+    derivative_result = persist_kinetic_measurement(derivative, session=db_session)
+    assert derivative_result.kinetic_measurement_id == original_result.kinetic_measurement_id
+
+    contexts = _protein_context_rows(db_session, original_result.kinetic_measurement_id)
+    assert {c.protein_id for c in contexts} == {protein_a.id, protein_b.id}

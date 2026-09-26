@@ -87,7 +87,20 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: ``discover_kinetics_sabiork``'s return shape (``SabiorkKineticDiscoveryResult``)
 #: -- no request/result field on this package's own public contracts was
 #: removed or repurposed.
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.5"
+#: Bumped to ``v1.6`` by Agent 1.x Increment C.6: kinetics discovery now
+#: resolves a SABIO-RK-reported PubMed ID into a real ``Publication`` (via
+#: the existing publication normalization/persistence machinery) and passes
+#: it through as ``publication_id`` -- a materially different, observable
+#: result for the same real input (before this increment, every kinetic
+#: measurement's ``publication_id`` was unconditionally ``None``). No
+#: request/result field on this package's own public contracts was removed
+#: or repurposed; the persistence-layer protein-context fix
+#: (``kinetic_measurement_protein_context``, Real Integration Pilot 1 Run
+#: 7's FAS1/FAS2 collision) lives entirely in ``app.persistence.kinetic_
+#: measurement``/``app.agent1``, outside this package's own contracts, and
+#: does not by itself require this bump -- the PubMed resolution addition
+#: does.
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.6"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase

@@ -291,6 +291,7 @@ def execute_pathway_curation(
                     organism_text=effective_request.organism_text,
                     organism_id=organism_id,
                     resolved_protein_ec_numbers=resolved_protein_ec_numbers,
+                    publication_lookup=publication_lookup,
                     session=session,
                     state=state,
                 )
@@ -1985,6 +1986,7 @@ def _discover_kinetics(
     organism_text: str,
     organism_id: UUID,
     resolved_protein_ec_numbers: list[tuple[UUID, str]],
+    publication_lookup,
     session: Session,
     state: CurationRunState,
 ) -> None:
@@ -2011,7 +2013,59 @@ def _discover_kinetics(
     record among 7 real hits for one EC number previously escaped as a bare
     ``AttributeError``, aborting not just this function but the entire pathway-curation
     run).
+
+    **Increment C.6**: when SABIO-RK reports a PubMed ID for a kinetic record, it is now
+    resolved (or reused, if already ingested) via the existing publication normalization/
+    persistence machinery (``strategies.resolve_publication_by_pmid`` -- the same "expansion:
+    fetch one exact, already-known PMID directly" path ``_discover_publications`` never used
+    for this, since kinetics needs an exact PMID lookup, not a free-text search), through the
+    ``_resolve_publication_for_pmid`` closure defined below. A resolution failure (PubMed
+    unconfigured, a connector error, or no such PMID) is disclosed as its own warning and
+    never blocks the kinetic measurement itself -- only its own ``publication_id`` stays
+    unresolved, exactly like a protein/reaction that could not be resolved already does not
+    block the measurement's own persistence. ``_pmid_publication_cache`` avoids re-fetching
+    the identical PMID once per parameter/record (confirmed live: all 7 real EC 2.3.1.86
+    records share one real PMID) -- a plain ``dict``, matching every other per-run cache
+    already used throughout this module (``direct_catalyst_cache``, ``compound_cache``, ...).
     """
+    pmid_publication_cache: dict[str, UUID | None] = {}
+
+    def _resolve_publication_for_pmid(pmid: str) -> UUID | None:
+        if pmid in pmid_publication_cache:
+            return pmid_publication_cache[pmid]
+        if connectors.pubmed is None:
+            pmid_publication_cache[pmid] = None
+            return None
+        query_id = query_identity(
+            connector=SourceType.PUBMED, action="resolve_publication_for_kinetics", pmid=pmid
+        )
+        try:
+            outcome = strategies.resolve_publication_by_pmid(
+                connectors.pubmed, pmid, lookup=publication_lookup, session=session
+            )
+        except ConnectorError as exc:
+            state.warn(
+                f"PubMed publication resolution failed for PMID {pmid} "
+                f"(kinetics provenance): {exc}"
+            )
+            state.record_connector_call()
+            state.record_query(
+                query_id, display_text=f"PubMed fetch (kinetics provenance): {pmid}"
+            )
+            pmid_publication_cache[pmid] = None
+            return None
+        state.record_connector_call()
+        state.record_query(query_id, display_text=f"PubMed fetch (kinetics provenance): {pmid}")
+        if outcome.entity_id is not None:
+            state.record_publication(outcome.entity_id)
+        else:
+            state.warn(
+                f"PubMed publication resolution for PMID {pmid} (kinetics provenance): "
+                f"{outcome.notes}"
+            )
+        pmid_publication_cache[pmid] = outcome.entity_id
+        return outcome.entity_id
+
     if connectors.sabiork is None and connectors.oed is None:
         state.add_frontier(
             CurationFrontierItem(
@@ -2053,6 +2107,7 @@ def _discover_kinetics(
                         organism=organism_text,
                         protein_id=protein_id,
                         organism_id=organism_id,
+                        resolve_publication=_resolve_publication_for_pmid,
                     )
                 except ConnectorError as exc:
                     state.warn(f"SABIO-RK kinetics discovery failed for EC {ec_number}: {exc}")

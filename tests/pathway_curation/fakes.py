@@ -448,7 +448,13 @@ class FakeSabiorkConnector:
 
 
 def make_sabio_record(
-    *, entry_id: str, ec_number: str, parameter_type: str, value: str, unit: str
+    *,
+    entry_id: str,
+    ec_number: str,
+    parameter_type: str,
+    value: str,
+    unit: str,
+    pubmed_id: str | None = None,
 ) -> SabioKineticRecord:
     parameter = SabioKineticParameter(
         name=parameter_type,
@@ -475,7 +481,7 @@ def make_sabio_record(
         ph=None,
         temperature=None,
         temperature_unit=None,
-        pubmed_id=None,
+        pubmed_id=pubmed_id,
         publication_title=None,
         raw={},
     )

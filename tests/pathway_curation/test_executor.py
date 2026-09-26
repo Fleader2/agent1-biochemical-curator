@@ -3132,17 +3132,19 @@ def test_c4_two_genes_sharing_one_ec_each_queried_independently(
     own kinetics search executes independently, exactly once each, never skipped
     merely because a sibling protein already queried the identical EC.
 
-    A genuine, pre-existing, disclosed architectural characteristic (unrelated to
-    which protein resolution path found either protein, and not something this
-    narrow increment changes): if the underlying source's own two independent
-    per-protein searches happen to return the *same external record*
-    (SABIO-RK/OED's own EC-scoped, not protein-scoped, search semantics -- real
-    for both), ``persist_kinetic_measurement``'s own ``(source, source_id)``
-    idempotency (Increment A's documented policy) reuses the one existing row
-    rather than creating a second, so only the first protein to query ends up
-    linked -- never a fabricated second measurement, and never a query silently
-    skipped, but also never two independent rows for what the source itself
-    reports as one identical external record."""
+If the underlying source's own two independent per-protein searches happen to
+    return the *same external record* (SABIO-RK/OED's own EC-scoped, not
+    protein-scoped, search semantics -- real for both),
+    ``persist_kinetic_measurement``'s own ``(source, source_id)`` idempotency
+    (Increment A's documented policy) still reuses the one existing
+    ``KineticMeasurement`` row rather than creating a second -- never a
+    fabricated second measurement, and never two independent rows for what the
+    source itself reports as one identical external record. **Increment C.6**:
+    both proteins' own applicability to that one shared row are now preserved
+    via ``kinetic_measurement_protein_context`` -- confirmed live to have been
+    lost entirely before this increment (Real Integration Pilot 1 Run 7:
+    yeast's real FAS1/FAS2, only the alphabetically-first protein UUID ever
+    appeared in the database)."""
     kegg = _c2_kegg(
         reaction_ids=("R00742", "R00900"),
         catalyst_entries=(
@@ -3217,9 +3219,17 @@ def test_c4_two_genes_sharing_one_ec_each_queried_independently(
     measurements = result.agent1_knowledge_package.kinetic_measurements
     # Persistence-layer (source, source_id) idempotency reuses the one shared
     # external record rather than duplicating it -- exactly one row survives,
-    # linked to whichever protein's independent query persisted it first.
+    # linked (via .protein_id, kept for backward compatibility) to whichever
+    # protein's independent query persisted it first.
     assert len(measurements) == 1
     assert measurements[0].protein_id in protein_ids
+
+    # Increment C.6: BOTH protein contexts survive via the new join table,
+    # regardless of which one "won" the legacy .protein_id column above.
+    contexts = result.agent1_knowledge_package.kinetic_measurement_protein_contexts
+    assert len(contexts) == 2
+    assert {c.protein_id for c in contexts} == protein_ids
+    assert all(c.kinetic_measurement_id == measurements[0].id for c in contexts)
 
 
 def test_c4_shared_gene_across_two_reactions_queries_kinetics_exactly_once(
@@ -3781,3 +3791,206 @@ def test_c5_real_schema_variant_reaches_kinetic_measurement_via_real_sabiork_con
         item.reason is FrontierReason.KINETICS_REQUESTED_NOT_ATTEMPTED
         for item in result.unresolved_frontier
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Increment C.6 -- Context-preserving kinetic measurement persistence
+# ---------------------------------------------------------------------------------------------
+
+
+def test_c6_multiple_reaction_enzyme_associations_never_produce_a_fabricated_reaction_id(
+    db_session: Session,
+) -> None:
+    """Test E: a gene-anchored protein catalyzing two reactions (an ambiguous
+    protein -> ReactionEnzyme -> reaction mapping) must never have that ambiguity
+    silently resolved into a reaction_id on its own kinetic measurement -- the
+    real Run 7 shape (FAS2 alone had 15 ReactionEnzyme associations), reproduced
+    deterministically with 2."""
+    kegg = _c2_kegg(
+        reaction_ids=("R00742", "R00900"),
+        catalyst_entries=(
+            FakeKgmlEntrySpec(
+                entry_type="gene", names=("YER061C",), reaction_ids=("R00742", "R00900")
+            ),
+        ),
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(sgd_id="S1", systematic_name="YER061C", standard_name="CEM1")
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1", ec_number="2.3.1.41", parameter_type="kcat", value="12.0",
+                unit="1/s",
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(
+            request_id="req-c6-ambiguous-reaction",
+            seed_entity_texts=(),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    assert len(result.agent1_knowledge_package.reaction_enzyme_associations) == 2
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 1
+    # Never inferred from the protein's own ReactionEnzyme associations, however
+    # many exist -- the measurement is still preserved, just with reaction
+    # attribution left honestly unresolved.
+    assert measurements[0].reaction_id is None
+
+
+def test_c6_pubmed_id_resolves_and_links_a_real_publication(db_session: Session) -> None:
+    """Test G: SABIO-RK's own reported PubMed ID is resolved via the existing
+    publication normalization/persistence machinery and linked to the kinetic
+    measurement, reaching both Agent 1 handoff representations."""
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd = FakeSgdConnector(
+        loci={"ACC1": make_sgd_locus(sgd_id="S1", systematic_name="YNR016C", standard_name="ACC1")}
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1", ec_number="6.4.1.2", parameter_type="Km", value="0.5", unit="mM",
+                pubmed_id="7044669",
+            )
+        }
+    )
+    pubmed = FakePubMedConnector(
+        articles={
+            "7044669": make_pubmed_article(pmid="7044669", title="A real paper about FAS kinetics")
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-c6-pubmed-link",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork, pubmed=pubmed
+        ),
+    )
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 1
+    assert measurements[0].publication_id is not None
+
+    publication_ids = {p.id for p in result.agent1_knowledge_package.publications}
+    assert measurements[0].publication_id in publication_ids
+
+    view_measurements = result.curated_knowledge_view.kinetic_measurements
+    assert len(view_measurements) == 1
+    assert view_measurements[0].publication_id == measurements[0].publication_id
+
+
+def test_c6_pubmed_publication_reused_across_shared_records_not_duplicated(
+    db_session: Session,
+) -> None:
+    """Test H: two SABIO-RK records (e.g. two parameters of the same real
+    entry, or two distinct entries) reporting the identical PubMed ID resolve
+    to the *same* Publication row, fetched from PubMed only once."""
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd = FakeSgdConnector(
+        loci={"ACC1": make_sgd_locus(sgd_id="S1", systematic_name="YNR016C", standard_name="ACC1")}
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+    # Two independent SABIO-RK entries, both reporting the same real PubMed ID --
+    # exactly the confirmed live shape (all 7 EC 2.3.1.86 records share one PMID).
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1", ec_number="6.4.1.2", parameter_type="Km", value="0.5", unit="mM",
+                pubmed_id="7044669",
+            ),
+            "SABIO2": make_sabio_record(
+                entry_id="SABIO2", ec_number="6.4.1.2", parameter_type="kcat", value="1.2",
+                unit="1/s", pubmed_id="7044669",
+            ),
+        }
+    )
+    pubmed = FakePubMedConnector(
+        articles={"7044669": make_pubmed_article(pmid="7044669", title="Shared paper")}
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-c6-pubmed-reuse",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork, pubmed=pubmed
+        ),
+    )
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 2
+    publication_ids = {m.publication_id for m in measurements}
+    assert len(publication_ids) == 1  # both share exactly one Publication row
+    assert None not in publication_ids
+
+    assert len(result.agent1_knowledge_package.publications) == 1  # never duplicated
+    fetch_calls = [call for call in pubmed.calls if call[0] == "fetch"]
+    assert len(fetch_calls) == 1  # the cache prevented a second live fetch
+
+
+def test_c6_kinetics_disabled_publication_lookup_still_accepted(db_session: Session) -> None:
+    """Regression guard: _discover_kinetics's new publication_lookup parameter does
+    not change behavior at all when kinetics is not requested."""
+    kegg = _kegg_with_reactions(("R00742",))
+    result = execute_pathway_curation(
+        _request(request_id="req-c6-no-kinetics", include_publications=False),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+    assert result.agent1_knowledge_package.kinetic_measurements == ()
+    assert result.agent1_knowledge_package.kinetic_measurement_protein_contexts == ()

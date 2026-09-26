@@ -64,6 +64,41 @@ limitation and its follow-up).
 (the partial unique index is the real concurrency authority), every other
 exception left to propagate. Never commits or rolls back the session it is
 given -- the caller owns that (``app/db/session.py``).
+
+**Protein-context preservation, never a "winning" protein** (Agent 1.x
+Increment C.6). ``identity.protein_id`` is the protein whose own resolution
+*motivated this specific persist call* -- on a first-ever ``(source,
+source_id)`` insert, it becomes ``KineticMeasurement.protein_id`` (kept
+exactly as before, for backward compatibility with the ordinary,
+single-protein-context case); on a *reuse* (exact replay, derivative
+lineage, or a race), it is a **different, independently valid** protein
+context for a record that already exists under a different protein.
+Before this increment, that second protein's own successful discovery left
+no trace at all once ``_reuse`` returned pointing at the first protein's
+row -- confirmed live, Real Integration Pilot 1 Run 7 (yeast's real
+FAS1/FAS2 heterodimer, sharing one EC number, each independently
+discovering the identical 7 real SABIO-RK records; only the
+alphabetically-first protein UUID ever appeared in the database).
+``_attach_protein_context`` is now called on every persist outcome (create
+*and* reuse alike) whenever ``identity.protein_id`` is set, recording that
+protein's own applicability to the measurement in
+``kinetic_measurement_protein_context`` -- idempotently (the same protein
+attached twice is a no-op, never a duplicate row) and independent of
+processing order (attaching protein A then protein B produces the exact
+same two rows as attaching B then A). This never changes
+``KineticMeasurement.protein_id`` itself once set -- no "correction," no
+re-attribution, no arbitrarily preferred protein; the join table is
+strictly additive.
+
+**``KineticMeasurement.protein_id`` is a legacy convenience field after
+this increment, not the authoritative answer to "which protein(s) is this
+measurement applicable to."** It remains populated (whichever protein
+happened to persist first) solely so pre-C.6 single-protein-context
+callers/queries keep working unmodified. Any new code -- and any downstream
+consumer of the Agent 1 handoff -- must treat
+``kinetic_measurement_protein_context`` (and its reshapings,
+``Agent1KnowledgePackage.kinetic_measurement_protein_contexts`` /
+``CuratedKineticMeasurement.protein_ids``) as authoritative instead.
 """
 
 from __future__ import annotations
@@ -75,7 +110,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.enums import SourceType
-from app.models.kinetic_measurement import KineticMeasurement
+from app.models.kinetic_measurement import (
+    KINETIC_MEASUREMENT_PROTEIN_CONTEXT_BASIS_QUERY,
+    KineticMeasurement,
+    KineticMeasurementProteinContext,
+)
 from app.normalization.kinetic_measurement import KineticMeasurementIdentity
 from app.persistence.kinetic_measurement_types import KineticMeasurementPersistenceResult
 from app.persistence.provenance import (
@@ -96,6 +135,38 @@ def _existing_by_source(
             KineticMeasurement.source == source, KineticMeasurement.source_id == source_id
         )
     ).scalar_one_or_none()
+
+
+def attach_kinetic_measurement_protein_context(
+    session: Session, *, kinetic_measurement_id: UUID, protein_id: UUID
+) -> UUID:
+    """Idempotently record that ``protein_id`` is biologically applicable to
+    ``kinetic_measurement_id`` (Increment C.6). See module docstring.
+
+    Mirrors ``app.persistence.provenance.attach_source_cross_reference``'s
+    own idempotent shape exactly: reuse an existing row with the identical
+    ``(kinetic_measurement_id, protein_id)`` pair rather than creating a
+    duplicate -- both an application-level check and backed by a real
+    database unique constraint as a concurrency backstop. Never commits or
+    rolls back -- the caller owns that.
+    """
+    existing_id = session.execute(
+        select(KineticMeasurementProteinContext.id).where(
+            KineticMeasurementProteinContext.kinetic_measurement_id == kinetic_measurement_id,
+            KineticMeasurementProteinContext.protein_id == protein_id,
+        )
+    ).scalar_one_or_none()
+    if existing_id is not None:
+        return existing_id
+
+    row = KineticMeasurementProteinContext(
+        kinetic_measurement_id=kinetic_measurement_id,
+        protein_id=protein_id,
+        basis=KINETIC_MEASUREMENT_PROTEIN_CONTEXT_BASIS_QUERY,
+    )
+    session.add(row)
+    session.flush()
+    return row.id
 
 
 def _build_notes(identity: KineticMeasurementIdentity) -> str | None:
@@ -128,6 +199,10 @@ def _reuse(
         source=identity.source,
         external_id=identity.source_id,
     )
+    if identity.protein_id is not None:
+        attach_kinetic_measurement_protein_context(
+            session, kinetic_measurement_id=existing.id, protein_id=identity.protein_id
+        )
     external_record_id = (
         record_external_record(session, source=identity.source, provenance=provenance)
         if provenance is not None
@@ -252,6 +327,10 @@ def persist_kinetic_measurement(
         source=identity.source,
         external_id=identity.source_id,
     )
+    if identity.protein_id is not None:
+        attach_kinetic_measurement_protein_context(
+            session, kinetic_measurement_id=row.id, protein_id=identity.protein_id
+        )
     external_record_id = (
         record_external_record(session, source=identity.source, provenance=provenance)
         if provenance is not None
@@ -295,6 +374,7 @@ def list_kinetic_measurements_by_reaction(
 
 
 __all__ = [
+    "attach_kinetic_measurement_protein_context",
     "get_kinetic_measurement",
     "list_kinetic_measurements_by_reaction",
     "persist_kinetic_measurement",

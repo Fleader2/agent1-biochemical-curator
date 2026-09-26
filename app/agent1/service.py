@@ -23,6 +23,14 @@ the scoped reactions' ids, ``Compound`` by the scoped participants'
 ``compound_id``\\ s (``Compound`` itself carries no ``organism_id`` -- it is
 organism-agnostic in this schema), ``Evidence`` by the scoped claims' ids,
 ``Publication`` by the scoped evidence's ``publication_id``\\ s,
+``Publication`` is also scoped by any already-scoped kinetic measurement's
+own ``publication_id`` (Agent 1.x Increment C.6) -- not just via
+``Evidence`` as above -- since a kinetic measurement's resolved publication
+(SABIO-RK's own reported PubMed ID) creates no ``Evidence`` row at all;
+without this, the ``Publication`` row would be correctly linked
+(``kinetic_measurement.publication_id``) but absent from this package's own
+``publications`` tuple, an incomplete provenance handoff for exactly the
+case Increment C.6 exists to preserve.
 ``KnowledgeGap`` by whether its own ``subject_id`` names a scoped entity or
 its ``supporting_claim_ids_json`` intersects the scoped claim ids,
 ``ExperimentRecommendationRecord`` by the scoped gaps'
@@ -93,7 +101,7 @@ from app.models.enzyme_state import (
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
 from app.models.gene import Gene
-from app.models.kinetic_measurement import KineticMeasurement
+from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.organism import Organism
 from app.models.protein import Protein
@@ -172,6 +180,10 @@ def get_agent1_knowledge_package(
     regulatory_interactions = _select_by_organism(session, RegulatoryInteraction, organism_id)
 
     kinetic_measurements = _select_kinetic_measurements(session, reaction_ids, organism_id)
+    kinetic_measurement_ids = tuple(measurement.id for measurement in kinetic_measurements)
+    kinetic_measurement_protein_contexts = _select_kinetic_measurement_protein_contexts(
+        session, kinetic_measurement_ids
+    )
 
     protein_ids = tuple(protein.id for protein in proteins)
     enzyme_states = _select_enzyme_states(session, protein_ids, organism_id)
@@ -192,6 +204,17 @@ def get_agent1_knowledge_package(
     evidence = _select_in(session, Evidence, Evidence.claim_id, claim_ids)
     publication_ids = tuple(
         {record.publication_id for record in evidence if record.publication_id is not None}
+        # Agent 1.x Increment C.6: a kinetic measurement's own resolved
+        # publication (SABIO-RK's reported PubMed ID) creates no Evidence row
+        # at all -- without this, the Publication itself would be correctly
+        # linked (kinetic_measurements[i].publication_id) but absent from
+        # this package's own publications tuple, an incomplete provenance
+        # handoff for exactly the case Increment C.6 exists to preserve.
+        | {
+            measurement.publication_id
+            for measurement in kinetic_measurements
+            if measurement.publication_id is not None
+        }
     )
     publications = _select_publications(session, publication_ids, organism_id)
 
@@ -252,6 +275,7 @@ def get_agent1_knowledge_package(
         regulatory_interactions=regulatory_interactions,
         publications=publications,
         kinetic_measurements=kinetic_measurements,
+        kinetic_measurement_protein_contexts=kinetic_measurement_protein_contexts,
         enzyme_states=enzyme_states,
         enzyme_modifications=enzyme_modifications,
         allosteric_interactions=allosteric_interactions,
@@ -377,6 +401,23 @@ def _select_kinetic_measurements(
         or (row.organism_id is None and row.reaction_id in reaction_ids)
     ]
     return tuple(scoped)
+
+
+def _select_kinetic_measurement_protein_contexts(
+    session: Session, kinetic_measurement_ids: tuple[UUID, ...]
+) -> tuple[KineticMeasurementProteinContext, ...]:
+    """Every ``KineticMeasurementProteinContext`` row for an already-scoped set of
+    measurements (Agent 1.x Increment C.6) -- scoped transitively through
+    ``kinetic_measurement_ids``, exactly like ``reaction_participants``/
+    ``reaction_enzyme_associations`` are scoped through ``reaction_ids`` above,
+    since this join table has no ``organism_id`` of its own to filter by directly.
+    """
+    return _select_in(
+        session,
+        KineticMeasurementProteinContext,
+        KineticMeasurementProteinContext.kinetic_measurement_id,
+        kinetic_measurement_ids,
+    )
 
 
 def _select_enzyme_states(

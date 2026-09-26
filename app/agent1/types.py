@@ -58,6 +58,25 @@ tables carries a ``Claim``/``CurationState`` column either, so the same
 separate field: ``reaction_enzyme_associations`` is already a tuple of raw
 ``ReactionEnzyme`` rows, and every such row already carries its own
 ``enzyme_state_id`` column (added by the same increment) for free.
+
+**Agent 1.x Increment C.6** added ``kinetic_measurement_protein_contexts``
+(raw ``KineticMeasurementProteinContext`` join rows) to
+``Agent1KnowledgePackage``, and ``protein_ids`` to
+``CuratedKineticMeasurement``, bumping ``AGENT1_CONTRACT_VERSION`` to
+``"1.3"`` -- both additive fields, no existing field removed or repurposed.
+Motivated directly by Real Integration Pilot 1 Run 7: SABIO-RK's own
+EC-scoped (not protein-scoped) search let two distinct proteins sharing one
+EC number (yeast's real FAS1/FAS2) each independently, legitimately
+discover the identical external source record, but
+``KineticMeasurement.protein_id``'s own single-value shape could only ever
+record one of them -- the second protein's own equally valid discovery left
+no trace at all. ``protein_ids`` is always a superset of the legacy
+``protein_id`` (kept unchanged, for backward compatibility with the
+ordinary single-protein case); no `Claim`/`CurationState` column exists on
+the new join table either, so it is included in
+``Agent1CuratedKnowledgeView`` unfiltered, per this contract's own
+established "exists = curated" policy for structural/schema records that
+carry no curation state of their own.
 """
 
 from __future__ import annotations
@@ -88,7 +107,7 @@ from app.models.enzyme_state import (
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
 from app.models.gene import Gene
-from app.models.kinetic_measurement import KineticMeasurement
+from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.organism import Organism
 from app.models.protein import Protein
@@ -99,7 +118,7 @@ from app.models.review_event import ReviewEvent
 
 #: This contract's own version. Bump only when ``Agent1KnowledgePackage``/
 #: ``Agent1CuratedKnowledgeView``'s field shape changes.
-AGENT1_CONTRACT_VERSION = "1.2"
+AGENT1_CONTRACT_VERSION = "1.3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +184,15 @@ class CuratedKineticMeasurement:
     what ``KineticMeasurement`` itself stores -- ``None`` when Agent 1 could
     not resolve that reference, never guessed or defaulted here.
 
+    **Agent 1.x Increment C.6: ``protein_id`` is a legacy convenience field,
+    not the authoritative record of protein applicability -- use
+    ``protein_ids`` instead.** ``protein_id`` reflects only whichever
+    protein's own resolution happened to persist this measurement's
+    ``(source, source_id)`` row first, an accident of processing order; it
+    is preserved unchanged solely so pre-C.6 single-protein-context callers
+    keep working. ``protein_ids`` (see its own field comment below) is the
+    complete, order-independent set and is authoritative going forward.
+
     ``value``/``unit`` are ``KineticMeasurement.parameter_value``/``.unit``
     (the as-reported figures; see ``app.persistence.kinetic_measurement``'s
     module docstring for why ``original_value``/``original_unit`` currently
@@ -208,6 +236,21 @@ class CuratedKineticMeasurement:
     #: to any other state of it, when set (see
     #: ``docs/25_enzyme_regulatory_states_contract.md`` §15).
     enzyme_state_id: UUID | None = None
+
+    #: Agent 1.x Increment C.6. **The authoritative record of every protein
+    #: this measurement is biologically applicable to** -- always a superset
+    #: of ``protein_id`` (which is a legacy convenience field only, see that
+    #: field's own comment above; do not treat it as the source of truth).
+    #: Length 0 when no protein context was ever resolved, length 1 for the
+    #: ordinary single-protein case, length 2+ only when more than one
+    #: distinct protein's own independent query legitimately discovered the
+    #: identical external source record (confirmed live, Real Integration
+    #: Pilot 1 Run 7: yeast's real FAS1/FAS2). Order is not significant and
+    #: must never be read as "who discovered it first" -- that information,
+    #: when needed, belongs to
+    #: ``Agent1KnowledgePackage.kinetic_measurement_protein_contexts``
+    #: (``created_at``), not to this tuple's own ordering.
+    protein_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +364,7 @@ class Agent1KnowledgePackage:
     regulatory_interactions: tuple[RegulatoryInteraction, ...]
     publications: tuple[Publication, ...]
     kinetic_measurements: tuple[KineticMeasurement, ...]
+    kinetic_measurement_protein_contexts: tuple[KineticMeasurementProteinContext, ...]
     enzyme_states: tuple[EnzymeState, ...]
     enzyme_modifications: tuple[EnzymeModification, ...]
     allosteric_interactions: tuple[AllostericInteraction, ...]

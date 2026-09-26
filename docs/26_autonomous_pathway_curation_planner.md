@@ -1024,6 +1024,20 @@ own per-record isolation (one malformed record among valid ones, both
 preserved); a whole-call failure still propagating unweakened; and a full
 C.4/C.5 integration test through the real `SabiorkConnector`.
 
+**Increment C.6's context-preserving kinetic measurement persistence**
+(§51) added a 7-test section to `tests/persistence/test_kinetic_
+measurement.py`, a 4-test section to `tests/normalization/test_kinetic_
+measurement.py`, and a 5-test section to `test_executor.py` — see §51's own
+"Testing" paragraph for the full list; in outline: one shared source
+record discovered through two distinct proteins, both contexts surviving
+regardless of processing order; the ordinary single-protein case and
+idempotent repeated execution unaffected; explicit `reaction_id` preserved
+when supplied and left unresolved when not, with no `ReactionEnzyme`-based
+inference ever occurring even with multiple candidate reactions; a real
+PubMed ID resolving to a real, reused `Publication` visible in both Agent 1
+handoff representations; and substrate/species context preserved without
+fabricating a compound identity.
+
 ## 39. Increment C.1 — Live Pathway Discovery Repair
 
 Pilot 1 Run 1 (`artifacts/pilots/yeast_fatty_acid_001/13_pilot_report.md`)
@@ -1777,7 +1791,171 @@ network) through the exact schema variant that caused Run 6's crash, all
 the way to a measurement in both `Agent1KnowledgePackage` and
 `Agent1CuratedKnowledgeView`.
 
-## 51. Final architectural rule
+## 51. Increment C.6 — Context-preserving kinetic measurement persistence
+
+Real Integration Pilot 1 Run 7 (§50's own robust SABIO-RK parsing, run
+against real, live data for the first time) confirmed C.5 works exactly as
+designed — all 7 real EC 2.3.1.86 records parsed successfully — but exposed
+three concrete, empirically-confirmed defects in what happens *after*
+parsing: (A) FAS1 and FAS2 (yeast's real heterodimer, sharing one EC
+number) each independently, legitimately discovered the identical 7 real
+records, but `KineticMeasurement.protein_id`'s single-value shape could
+only ever record one of them — whichever protein's UUID happened to sort
+first (an artifact of random UUID generation, not a scientific choice) —
+persisted all 14 rows; the other protein's own equally successful discovery
+left no trace at all. (B) All 14 measurements had `reaction_id = NULL`,
+and — confirmed directly, not assumed — mapping them through
+`ReactionEnzyme` yields **15** candidate reactions each (the real FAS
+iterative elongation cycle), genuinely not reconstructable to one reaction.
+(C) SABIO-RK's own real, reported PubMed ID (`"7044669"`) never reached
+`KineticMeasurement.publication_id` — kinetics discovery never resolved it.
+
+**Central principle applied**: a kinetic source record's own identity
+(`source`, `source_id`) and the biological context it is applicable to
+(protein, reaction, publication) are kept as explicitly distinct concepts —
+reusing one external record's `(source, source_id)` row never erases a
+second, independently-valid protein context, and no protein is ever chosen
+as "winning."
+
+**(A) Protein context — a new join table, not a redesigned identity.**
+`kinetic_measurement_protein_context` (migration `0015_kinetic_protein_
+context`, mirroring `enzyme_complex_member`'s own established join-table
+shape exactly: `kinetic_measurement_id` cascades, `protein_id` restricts,
+a `UniqueConstraint` on the pair is both the idempotency guarantee and the
+concurrency backstop) records every protein a measurement is applicable
+to. `KineticMeasurement.protein_id` is untouched — kept exactly as before,
+still the first-established context, for backward compatibility with the
+ordinary single-protein case. `app.persistence.kinetic_measurement
+.persist_kinetic_measurement` now calls the new `attach_kinetic_
+measurement_protein_context` helper (mirrors `attach_source_cross_
+reference`'s own idempotent shape) on **every** outcome — create *and*
+reuse alike — whenever `identity.protein_id` is set. Confirmed by test:
+processing FAS2 then FAS1 and processing FAS1 then FAS2 produce the exact
+same two context rows either way — order-independent, no fabricated
+merge, no invented enzyme complex.
+
+**`KineticMeasurement.protein_id` is, from this increment forward, a
+legacy convenience field, not the authoritative representation of protein
+applicability.** It records only whichever protein's own persist call
+happened to reach the row first — an accident of processing order (e.g.
+random UUID sort order), never a scientific judgment that this protein is
+the "real" or "preferred" one — and it is kept unmodified going forward
+purely so pre-C.6, single-protein-context callers/queries need no change.
+`kinetic_measurement_protein_context` (and its downstream reshapings,
+`Agent1KnowledgePackage.kinetic_measurement_protein_contexts` and
+`CuratedKineticMeasurement.protein_ids`) is the authoritative, complete,
+order-independent answer to "which protein(s) is this measurement
+applicable to," and is documented as such directly in
+`app.models.kinetic_measurement`, `app.persistence.kinetic_measurement`,
+and `app.agent1.types`/`.export` — any new code, and any downstream
+consumer of the Agent 1 handoff, should read from there, never from
+`protein_id` alone.
+
+`(source, source_id)` identity itself is **not** redesigned: still exactly
+one `KineticMeasurement` row per external record/parameter, still no
+numeric-equality-based deduplication, still the same partial unique index
+from Increment A. Only what happens *after* that identity resolves to an
+existing row changed: before, a second protein's own successful discovery
+was silently absorbed with no trace (`_reuse`'s own `attach_source_cross_
+reference` call recorded `(source, source_id)` as "also known as" itself,
+a no-op); now, its own protein context also survives.
+
+**(B) Reaction context — policy confirmed, not implemented, because no
+mechanism exists to violate it.** `kinetic_identity_from_sabiork` already
+accepted `reaction_id` as a plain, optional, caller-supplied parameter
+before this increment; persistence already passed it straight through
+unchanged. No code anywhere infers `protein → ReactionEnzyme → reaction_id`
+— confirmed by a dedicated regression test (a protein with 2
+`ReactionEnzyme` associations still persists its kinetic measurement with
+`reaction_id = None`, never an arbitrary pick). No SABIO-RK data this
+repository can retrieve carries a structured, resolvable reaction
+cross-reference (`reaction.equation` is free text only) — so "explicit
+unique reaction evidence" is a policy the architecture already honors
+whenever a caller has one, exercised today only by direct, synthetic test
+fixtures, never by live data. No new reaction-matching heuristic was
+built, per instructions.
+
+**(C) Publication linkage — reused, not reinvented.** `_discover_kinetics`
+(`executor.py`) gained a `_resolve_publication_for_pmid` closure that calls
+`strategies.resolve_publication_by_pmid` — the same, already-existing
+"expansion: fetch one exact, already-known PMID directly" path, reusing
+its own already-established `PublicationLookup`-based MATCHED/NEW reuse
+logic unchanged — whenever a parsed SABIO-RK record reports a PubMed ID.
+`discover_kinetics_sabiork` itself never resolves or persists anything
+(consistent with `strategies.py`'s own "connector I/O failures ...
+deliberately not caught here" separation): it accepts a `resolve_
+publication` callback and only ever asks "what UUID, if any, corresponds
+to this PMID" — the executor owns the connector call, the cache (avoiding
+7 redundant live fetches for 7 records sharing one real PMID, confirmed
+live), and the audit/warning bookkeeping, exactly like every other
+connector interaction in this file already does. A resolution failure
+(PubMed unconfigured, a connector error, no such PMID) is disclosed as its
+own warning and never blocks the kinetic measurement itself.
+
+A related, narrower gap this exposed and also fixed: `Agent1KnowledgePackage
+.publications` was scoped only via `Evidence.publication_id` — a kinetics-
+resolved publication created no `Evidence` row, so it would have been
+correctly linked (`kinetic_measurement.publication_id`) but invisible in
+the package's own `publications` tuple. `app.agent1.service`'s scoping now
+also includes any already-scoped kinetic measurement's own
+`publication_id` — a narrow, targeted extension of existing scoping logic,
+not a new mechanism.
+
+**Agent 1 handoff**: `Agent1KnowledgePackage` gained `kinetic_measurement_
+protein_contexts` (raw join rows, mirroring `reaction_enzyme_associations`'
+own established shape exactly); `CuratedKineticMeasurement` gained
+`protein_ids` (always the union of `protein_id` and every join-table
+context — never just one or the other). `AGENT1_CONTRACT_VERSION` bumps to
+`"1.3"` — both additive fields, nothing removed or repurposed.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to
+`"pathway-curation-v1.6"` for the PubMed-resolution addition (a materially
+different observable result for the same real input — every measurement's
+`publication_id` was unconditionally `None` before). The protein-context
+fix lives entirely in `app.persistence`/`app.agent1`, outside this
+package's own request/plan/result contracts, and does not by itself
+require this bump.
+
+**Testing**: a 7-test C.6 section in `tests/persistence/test_kinetic_
+measurement.py` (same record/two proteins, both contexts survive;
+reversed processing order yields an identical context set; the ordinary
+single-protein case unaffected; no context row when no protein is
+resolved; idempotent repeat creates no duplicates; the new helper's own
+idempotency directly; a derivative-lineage merge also attaches its own
+protein context). A 4-test section in `tests/normalization/test_kinetic_
+measurement.py` (explicit `reaction_id` preserved when supplied; left
+unresolved when not; a resolved `publication_id` preserved; substrate/
+species context preserved in the parsed record's own `raw` payload,
+never fabricated into a guessed `substrate_id`). A 5-test section in
+`test_executor.py` (multiple `ReactionEnzyme` associations never produce a
+fabricated `reaction_id`; a real PubMed ID resolves and links a real
+`Publication`, reaching both Agent 1 handoff representations; two records
+sharing one PubMed ID reuse one `Publication`, fetched only once; kinetics
+disabled leaves the new parameters inert; the existing C.4 shared-EC test
+extended to also assert both protein contexts survive). The existing C.5
+integration test (the real, mocked `SabiorkConnector`, exact crash-shape
+payload) required no changes and continues to pass, confirming C.6 is
+fully backward compatible with C.5's own fix.
+
+**Also documented here**: mid-increment, `agent1_test`'s pilot-populated
+tables (Real Integration Pilot 1 Run 7's own real data) were truncated a
+second time (same verified procedure as Increment C.5's own cleanup:
+database name confirmed via `SELECT current_database()` before any
+destructive action, the 13 migration-seeded reference compartments
+preserved/restored, schema and migrations never touched), after explicit
+approval, because that leftover real data was blocking this increment's
+own required full-suite validation the same way Run 6's had blocked C.5's.
+Separately, a real mistake during this increment's own migration work is
+disclosed for completeness: a bare `alembic upgrade head` invocation (run
+directly from the shell, not through pytest's own `test_environment`
+fixture) resolves to the *primary* `DATABASE_URL`, not `TEST_DATABASE_URL`
+— confirmed to have applied and then correctly reverted against the
+primary `agent1` database, which held no data of any kind beyond the same
+13 seeded compartments (verified directly; no data was lost). All
+migration work after that point used `alembic -x db_url=...` explicitly
+scoped to `agent1_test`.
+
+## 52. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

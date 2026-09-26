@@ -119,6 +119,7 @@ def _package(**overrides) -> Agent1KnowledgePackage:
         "regulatory_interactions": (),
         "publications": (),
         "kinetic_measurements": (),
+        "kinetic_measurement_protein_contexts": (),
         "enzyme_states": (),
         "enzyme_modifications": (),
         "allosteric_interactions": (),

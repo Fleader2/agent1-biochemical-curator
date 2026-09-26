@@ -24,6 +24,18 @@ reshaping is purely mechanical (one field copied to another of the same
 name) and asserts no kinetic-law selection, parameter mapping, or model
 usage decision -- those remain Agent 2's responsibility.
 
+**Protein context** (Agent 1.x Increment C.6). ``CuratedKineticMeasurement
+.protein_ids`` -- the authoritative field for "which protein(s) is this
+measurement applicable to," per that dataclass's own field comment -- is
+computed here, not copied from a single column: the union of
+``row.protein_id`` (a legacy convenience field only, kept solely for
+pre-C.6 callers) and every ``kinetic_measurement_protein_context`` row
+scoped to it, so a measurement two independent proteins legitimately,
+separately discovered (SABIO-RK's own EC-scoped search; confirmed live,
+Real Integration Pilot 1 Run 7, yeast's real FAS1/FAS2) reaches Agent 2's
+handoff with both contexts intact -- never just whichever protein happened
+to persist the underlying source record first.
+
 **Enzyme regulatory states** (Agent 1.x Increment B). Every
 ``package.enzyme_states``/``.enzyme_modifications``/
 ``.allosteric_interactions``/``.enzyme_state_transitions`` row is reshaped
@@ -77,8 +89,16 @@ def get_agent1_curated_knowledge_view(
     accepted_confidence = tuple(
         summary for summary in package.confidence_summaries if summary.claim_id in accepted_ids
     )
+    protein_ids_by_measurement: dict = {}
+    for context in package.kinetic_measurement_protein_contexts:
+        protein_ids_by_measurement.setdefault(context.kinetic_measurement_id, set()).add(
+            context.protein_id
+        )
     kinetic_measurements = tuple(
-        _curated_kinetic_measurement(row) for row in package.kinetic_measurements
+        _curated_kinetic_measurement(
+            row, protein_ids_by_measurement.get(row.id, frozenset())
+        )
+        for row in package.kinetic_measurements
     )
     enzyme_states = tuple(_curated_enzyme_state(row) for row in package.enzyme_states)
     enzyme_modifications = tuple(
@@ -111,12 +131,26 @@ def get_agent1_curated_knowledge_view(
     )
 
 
-def _curated_kinetic_measurement(row: KineticMeasurement) -> CuratedKineticMeasurement:
-    """Pure field-for-field reshaping of one ``KineticMeasurement`` row. No I/O, no inference."""
+def _curated_kinetic_measurement(
+    row: KineticMeasurement, additional_protein_ids
+) -> CuratedKineticMeasurement:
+    """Pure field-for-field reshaping of one ``KineticMeasurement`` row. No I/O, no inference.
+
+    ``additional_protein_ids`` (Agent 1.x Increment C.6) is the set of
+    protein ids ``kinetic_measurement_protein_context`` records for this row
+    -- ``protein_ids`` is always their union with ``row.protein_id`` itself
+    (never just one or the other), so a caller never has to separately check
+    both fields to get the complete, order-independent set of applicable
+    proteins.
+    """
+    protein_ids = set(additional_protein_ids)
+    if row.protein_id is not None:
+        protein_ids.add(row.protein_id)
     return CuratedKineticMeasurement(
         kinetic_measurement_id=row.id,
         reaction_id=row.reaction_id,
         protein_id=row.protein_id,
+        protein_ids=tuple(sorted(protein_ids, key=str)),
         complex_id=row.complex_id,
         substrate_id=row.substrate_id,
         organism_id=row.organism_id,

@@ -19,6 +19,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -126,6 +127,18 @@ class KineticMeasurement(Base):
         PGUUID(as_uuid=True), ForeignKey("reaction.id", ondelete="RESTRICT"), index=True
     )
 
+    # LEGACY CONVENIENCE FIELD, NOT AUTHORITATIVE (Agent 1.x Increment C.6): records
+    # only whichever protein's own persist_kinetic_measurement call happened to
+    # reach this (source, source_id) row first -- an accident of processing order
+    # (e.g. random UUID sort order), not a scientific judgment that this protein is
+    # the "real" or "preferred" one. Kept unmodified, forever, purely so an
+    # already-existing single-protein-context caller/query needs no change. The
+    # authoritative, complete, order-independent record of every protein this
+    # measurement is applicable to is `protein_contexts`
+    # (`kinetic_measurement_protein_context`, see that model's own docstring) --
+    # always query that (or Agent1KnowledgePackage.kinetic_measurement_protein_
+    # contexts / CuratedKineticMeasurement.protein_ids downstream) to answer "which
+    # protein(s) is this measurement applicable to," never this column alone.
     protein_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("protein.id", ondelete="RESTRICT"), index=True
     )
@@ -214,3 +227,97 @@ class KineticMeasurement(Base):
     publication: Mapped[Publication | None] = relationship(back_populates="kinetic_measurements")
     evidence: Mapped[Evidence | None] = relationship(back_populates="kinetic_measurements")
     enzyme_state: Mapped[EnzymeState | None] = relationship(back_populates="kinetic_measurements")
+    protein_contexts: Mapped[list[KineticMeasurementProteinContext]] = relationship(
+        back_populates="kinetic_measurement"
+    )
+
+
+#: The sole basis value populated today (Agent 1.x Increment C.6): a protein
+#: context was established because a query issued *for that protein*
+#: independently discovered this exact source record. This is deliberately a
+#: plain string, not a closed enum (mirrors ``KineticMeasurement.parameter_type``'s
+#: own "never a closed enum" policy, ``app/models/enums.py``'s own docstring) --
+#: a future increment able to derive protein applicability directly from a
+#: source's own explicitly-reported protein/accession evidence (see
+#: ``app.connectors.sabiork.SabioKineticRecord.uniprot_ids``) would record that
+#: as a new, distinct basis value here, e.g. ``"EXPLICIT_SOURCE_EVIDENCE"`` --
+#: never silently reusing this one to mean something stronger than it does.
+KINETIC_MEASUREMENT_PROTEIN_CONTEXT_BASIS_QUERY = "QUERY_CONTEXT"
+
+
+class KineticMeasurementProteinContext(Base):
+    """Records that one persisted ``KineticMeasurement`` is biologically
+    applicable to one ``Protein`` (Agent 1.x Increment C.6).
+
+    **This table -- not ``KineticMeasurement.protein_id`` -- is the
+    authoritative representation of protein applicability.**
+    ``KineticMeasurement.protein_id`` records only the *first* protein
+    context ever established for a given ``(source, source_id)`` record, an
+    accident of processing order; it is kept unmodified, forever, purely as
+    a legacy convenience field so an already-existing single-protein-context
+    caller/query needs no change (see that column's own comment in
+    ``KineticMeasurement``). This table is the general, complete,
+    order-independent record of *every* protein context a measurement is
+    actually applicable to, including that first one (``app.persistence
+    .kinetic_measurement.persist_kinetic_measurement`` always attaches a row
+    here, on both the create and the reuse path) -- any code that needs to
+    answer "which protein(s) is this measurement applicable to" must query
+    this table (or its downstream reshapings,
+    ``Agent1KnowledgePackage.kinetic_measurement_protein_contexts`` /
+    ``CuratedKineticMeasurement.protein_ids``), never ``protein_id`` alone.
+
+    This exists because SABIO-RK's own search is EC-scoped, not
+    protein-scoped: two distinct proteins sharing one EC number (e.g. yeast's
+    real FAS1/FAS2 heterodimer) can each independently, legitimately
+    discover the identical external source record. Before this table
+    existed, the second protein's own successful query found the first
+    protein's already-persisted row via the ``(source, source_id)`` unique
+    index and was silently absorbed into it with no trace of its own,
+    equally valid protein context -- confirmed live, Real Integration Pilot
+    1 Run 7. This table lets both contexts survive, regardless of which
+    protein's query happened to run first.
+
+    Never merges or infers biological identity: FAS1 and FAS2 remain two
+    distinct ``Protein`` rows, each with their own row here pointing at the
+    *same* ``KineticMeasurement`` -- this table is additive evidence about
+    applicability, never a claim that the two proteins are the same enzyme
+    or form an inferred complex.
+
+    Has no independent scientific meaning apart from its own measurement
+    (mirrors ``EnzymeComplexMember``'s own identical ``ON DELETE`` split):
+    ``kinetic_measurement_id`` cascades, ``protein_id`` (an independent
+    scientific record) restricts.
+    """
+
+    __tablename__ = "kinetic_measurement_protein_context"
+    __table_args__ = (
+        UniqueConstraint(
+            "kinetic_measurement_id",
+            "protein_id",
+            name="uq_kinetic_measurement_protein_context_km_id_protein_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+
+    kinetic_measurement_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("kinetic_measurement.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    protein_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("protein.id", ondelete="RESTRICT"), nullable=False
+    )
+
+    basis: Mapped[str] = mapped_column(
+        String, nullable=False, default=KINETIC_MEASUREMENT_PROTEIN_CONTEXT_BASIS_QUERY
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    kinetic_measurement: Mapped[KineticMeasurement] = relationship(
+        back_populates="protein_contexts"
+    )
+    protein: Mapped[Protein] = relationship(back_populates="kinetic_measurement_contexts")

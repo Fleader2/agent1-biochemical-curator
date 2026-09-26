@@ -45,6 +45,7 @@ record-granularity, which nothing in the existing architecture provided.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -1440,6 +1441,7 @@ def discover_kinetics_sabiork(
     organism: str | None,
     protein_id: UUID | None = None,
     organism_id: UUID | None = None,
+    resolve_publication: Callable[[str], UUID | None] | None = None,
 ) -> SabiorkKineticDiscoveryResult:
     """Search SABIO-RK for ``ec_number`` and build one ``KineticMeasurementIdentity`` per
     reported parameter (never persisted here -- the caller/executor persists each one, since
@@ -1463,6 +1465,17 @@ def discover_kinetics_sabiork(
     parsed. A failure before any record is reached at all (``search()`` itself, or the very
     first ``fetch()``, raising) is a different, call-level concern and still propagates
     uncaught, exactly as before Increment C.5.
+
+    **Increment C.6**: ``resolve_publication``, when supplied, is called with a record's own
+    reported ``pubmed_id`` (only when non-``None``) and must return an already-resolved/
+    persisted ``Publication`` UUID or ``None`` -- this function never resolves or persists a
+    publication itself (this module has no ``session``/connector/lookup for that, by design;
+    see the module docstring's "connector I/O failures ... deliberately not caught here" --
+    the same separation applies to publication resolution: the caller owns *how* PMIDs become
+    UUIDs, including its own audit/query-log bookkeeping and its own failure containment, this
+    function only ever asks "what UUID, if any, corresponds to this PMID"). When omitted
+    (``None``, the default), every measurement's ``publication_id`` stays ``None``, exactly as
+    before this increment -- existing callers/tests need no change.
     """
     hits = connector.search(ec_number, organism=organism)
     identities: list[KineticMeasurementIdentity] = []
@@ -1475,9 +1488,18 @@ def discover_kinetics_sabiork(
             continue
         if record is None:
             continue
+        publication_id = (
+            resolve_publication(record.pubmed_id)
+            if resolve_publication is not None and record.pubmed_id
+            else None
+        )
         for parameter in connector.normalize(record):
             identity = kinetic_identity_from_sabiork(
-                record, parameter, protein_id=protein_id, organism_id=organism_id
+                record,
+                parameter,
+                protein_id=protein_id,
+                organism_id=organism_id,
+                publication_id=publication_id,
             )
             if identity is not None:
                 identities.append(identity)
