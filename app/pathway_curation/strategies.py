@@ -62,6 +62,7 @@ from app.connectors.kegg import (
     parse_kgml_entries,
     parse_kgml_reaction_ids,
 )
+from app.connectors.sabiork import SabioKineticParameter, SabioKineticRecord
 from app.entity_resolution.adapters import (
     KeggSearchAndFetch,
     PubMedSearchAndFetch,
@@ -1442,6 +1443,8 @@ def discover_kinetics_sabiork(
     protein_id: UUID | None = None,
     organism_id: UUID | None = None,
     resolve_publication: Callable[[str], UUID | None] | None = None,
+    resolve_substrate: Callable[[SabioKineticRecord, SabioKineticParameter], UUID | None]
+    | None = None,
 ) -> SabiorkKineticDiscoveryResult:
     """Search SABIO-RK for ``ec_number`` and build one ``KineticMeasurementIdentity`` per
     reported parameter (never persisted here -- the caller/executor persists each one, since
@@ -1476,6 +1479,16 @@ def discover_kinetics_sabiork(
     function only ever asks "what UUID, if any, corresponds to this PMID"). When omitted
     (``None``, the default), every measurement's ``publication_id`` stays ``None``, exactly as
     before this increment -- existing callers/tests need no change.
+
+    **Agent 1.x Increment C.7**: ``resolve_substrate``, when supplied, is called once per
+    parameter with that parameter's own ``(record, parameter)`` pair and must return an
+    already-resolved ``Compound`` UUID or ``None`` -- this function never resolves a compound
+    itself (no ``session``/lookup here, by design; the same separation already established for
+    ``resolve_publication``). Called only when ``parameter.species_label is not None`` --
+    every real ``Vmax`` observed this increment carries no species label at all, so this
+    never even asks the caller to resolve one. When omitted (``None``, the default), every
+    measurement's ``substrate_id`` stays ``None``, exactly as before this increment --
+    existing callers/tests need no change.
     """
     hits = connector.search(ec_number, organism=organism)
     identities: list[KineticMeasurementIdentity] = []
@@ -1494,12 +1507,18 @@ def discover_kinetics_sabiork(
             else None
         )
         for parameter in connector.normalize(record):
+            substrate_id = (
+                resolve_substrate(record, parameter)
+                if resolve_substrate is not None and parameter.species_label is not None
+                else None
+            )
             identity = kinetic_identity_from_sabiork(
                 record,
                 parameter,
                 protein_id=protein_id,
                 organism_id=organism_id,
                 publication_id=publication_id,
+                substrate_id=substrate_id,
             )
             if identity is not None:
                 identities.append(identity)

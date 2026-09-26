@@ -132,6 +132,22 @@ compound-level record at a compatible abstraction level
 connector exists yet, so no adapter for any of them is implemented here --
 fabricating one against an API this repository does not yet call would be
 speculative, not justified by existing code.
+
+**Agent 1.x Increment C.7** adds ``compound_identity_from_sabiork``: a real
+SABIO-RK kinetic-law entry's own ``kineticlaw.parameter[].species``
+free-text ``species_key`` (e.g. ``"n | Malonyl-CoA | Substrate"``) names a
+compound but carries no identifier of its own. This adapter resolves which
+of the *same entry's* ``reaction.species[]`` rows that text refers to (an
+exact, source-internal name match -- never against Agent 1's own compounds,
+never fuzzy), then reads that compound's external identifiers from the
+*same entry's* ``external_links.compound[]`` section, and returns a
+``CompoundIdentity`` built only from those already-structured identifiers
+(ChEBI/KEGG/PubChem/MetaCyc/InChIKey) -- never from the free-text name
+alone. Real, live data (this increment) confirmed every one of 7 real
+FAS1/FAS2 (EC 2.3.1.86) entries reports a ``species_key`` for every ``Km``
+and no ``species_key`` at all for ``Vmax`` -- ``Vmax`` therefore never
+produces a resolvable identity from this adapter, matching real source
+behavior exactly, not a hardcoded parameter-type exclusion.
 """
 
 from __future__ import annotations
@@ -152,6 +168,7 @@ from app.normalization.types import MatchMethod, NormalizationResult, Normalizat
 
 if TYPE_CHECKING:
     from app.connectors.kegg import KeggCompoundRecord
+    from app.connectors.sabiork import SabioKineticParameter, SabioKineticRecord
 
 _ENTITY_TYPE = "compound"
 
@@ -574,10 +591,96 @@ def compound_identity_from_kegg(record: KeggCompoundRecord) -> CompoundIdentity:
     )
 
 
+def _species_name_from_sabiork_species_key(species_key: str) -> str | None:
+    """Extract the compound-name segment from a SABIO-RK ``species_key`` string.
+
+    Real, live data (Agent 1.x Increment C.7) confirmed the format is
+    always exactly ``"<stoichiometry> | <name> | <role>"`` across every
+    ``Km`` in all 7 real FAS1/FAS2 entries (e.g. ``"1 | Acetyl-CoA |
+    Substrate"``). Returns ``None`` for anything that does not split into
+    exactly three ``|``-separated segments -- never guessed from a partial
+    match.
+    """
+    parts = [part.strip() for part in species_key.split("|")]
+    if len(parts) != 3:
+        return None
+    return parts[1] or None
+
+
+def compound_identity_from_sabiork(
+    record: SabioKineticRecord, parameter: SabioKineticParameter
+) -> CompoundIdentity | None:
+    """Pure adapter: one SABIO-RK kinetic parameter -> a source-neutral compound identity,
+    or ``None`` when the source itself supplies no safely-resolvable one.
+
+    Returns ``None`` when:
+
+    * ``parameter.species_label`` is ``None`` (no species associated with this parameter at
+      all -- every real ``Vmax`` observed this increment) or does not match the documented
+      ``"<stoichiometry> | <name> | <role>"`` shape;
+    * that name does not match **exactly one** entry in ``record.reaction_species`` (SABIO-RK's
+      own internal name/id join, never Agent 1's own compounds -- see module docstring);
+    * the resolved SABIO-RK internal compound id has no
+      ``SabioCompoundExternalIdentity`` in ``record.compound_external_identities``, or that
+      identity carries no non-``None`` field at all (nothing to anchor on).
+
+    Never falls back to a free-text ``canonical_name``-only identity: doing so would let a
+    weak, Level 3 candidate-generation signal silently stand in for the missing structured
+    identifier this function exists to require. ``canonical_name`` is still attached to the
+    returned identity (when one *is* returned) purely as corroborating metadata for
+    diagnostics/eventual compound creation -- it plays no role in whether this function
+    returns ``None``.
+    """
+    if parameter.species_label is None:
+        return None
+    name = _species_name_from_sabiork_species_key(parameter.species_label)
+    if name is None:
+        return None
+
+    matching_internal_ids = {
+        species.internal_id for species in record.reaction_species if species.name == name
+    }
+    if len(matching_internal_ids) != 1:
+        return None
+    internal_id = next(iter(matching_internal_ids))
+
+    matching_identities = [
+        identity
+        for identity in record.compound_external_identities
+        if identity.internal_id == internal_id
+    ]
+    if len(matching_identities) != 1:
+        return None
+    external = matching_identities[0]
+
+    if not any(
+        (
+            external.chebi_id,
+            external.kegg_compound_id,
+            external.pubchem_cid,
+            external.metacyc_id,
+            external.inchikey,
+        )
+    ):
+        return None
+
+    return CompoundIdentity(
+        source=SourceType.SABIORK,
+        source_identifier=f"{record.entry_id}:{internal_id}",
+        chebi_id=external.chebi_id,
+        kegg_compound_id=external.kegg_compound_id,
+        pubchem_cid=external.pubchem_cid,
+        metacyc_id=external.metacyc_id,
+        inchikey=external.inchikey,
+        canonical_name=name,
+    )
+
+
 __all__ = [
     "CompoundCandidate",
     "CompoundIdentity",
     "CompoundLookup",
     "compound_identity_from_kegg",
+    "compound_identity_from_sabiork",
     "normalize_compound",
 ]

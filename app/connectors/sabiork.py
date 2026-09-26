@@ -141,6 +141,47 @@ class SabioKineticParameter:
 
 
 @dataclass(frozen=True, slots=True)
+class SabioReactionSpecies:
+    """One compound named in a SABIO-RK entry's own ``reaction.species[]`` list.
+
+    ``internal_id`` is SABIO-RK's own internal numeric compound id (e.g.
+    ``1930`` for Malonyl-CoA in a given entry) -- not a ChEBI/KEGG/PubChem
+    accession. It exists purely to join a kinetic parameter's own
+    ``species_key`` text (which names a compound but carries no id of its
+    own) against ``external_links.compound[]`` (keyed by this same internal
+    id) within the *same* SABIO-RK document -- see
+    ``app.normalization.compound.compound_identity_from_sabiork``, Agent
+    1.x Increment C.7.
+    """
+
+    internal_id: int
+    name: str
+    role: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SabioCompoundExternalIdentity:
+    """External-database identifiers for one SABIO-RK internal compound id.
+
+    Aggregated from ``external_links.compound[]``. A field is populated
+    only when SABIO-RK reports **exactly one** distinct value for that key
+    -- real, live data (Agent 1.x Increment C.7) confirmed ChEBI routinely
+    lists several distinct accessions per SABIO-RK internal compound id
+    (different protonation states lumped under one internal id), and
+    picking any one of them would be an arbitrary, unjustified choice, not
+    a deterministic identity. Two or more distinct values for a key leave
+    that field ``None`` here -- never a first-one guess.
+    """
+
+    internal_id: int
+    chebi_id: str | None
+    kegg_compound_id: str | None
+    pubchem_cid: str | None
+    metacyc_id: str | None
+    inchikey: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class SabioKineticRecord:
     """One full SABIO-RK entry, parsed from its ``Json`` field.
 
@@ -166,6 +207,14 @@ class SabioKineticRecord:
     temperature_unit: str | None
     pubmed_id: str | None
     publication_title: str | None
+    #: Agent 1.x Increment C.7. Every compound named in this entry's own reaction, with
+    #: SABIO-RK's internal numeric id -- never resolved against Agent 1's own compounds here
+    #: (pure parsing only; see ``app.normalization.compound.compound_identity_from_sabiork``).
+    reaction_species: tuple[SabioReactionSpecies, ...]
+    #: Agent 1.x Increment C.7. External-database identifiers for every compound this entry's
+    #: ``external_links.compound[]`` section describes, keyed internally by SABIO-RK's own
+    #: numeric compound id (join key for ``reaction_species``, above).
+    compound_external_identities: tuple[SabioCompoundExternalIdentity, ...]
     raw: dict[str, Any]
 
 
@@ -276,6 +325,74 @@ def parse_kinetic_law_json(entry_id: str, raw_json_text: str) -> SabioKineticRec
         ) from exc
 
 
+#: SABIO-RK's own external_links.compound[] key -> the SabioCompoundExternalIdentity field it
+#: populates. Agent 1.x Increment C.7. Every other key SABIO-RK reports (ReactomeCompoundID,
+#: MetaNetXCompoundID, ChemSpiderID, PubChemSID, InChI, SMILES, ...) is deliberately not
+#: mapped here: none has a corresponding Level 1 anchor field on
+#: ``app.normalization.compound.CompoundIdentity`` today, and inventing one would be
+#: speculative, not justified by existing normalization policy.
+_EXTERNAL_LINK_KEY_TO_FIELD: dict[str, str] = {
+    "ChebiID": "chebi_id",
+    "KeggCompoundID": "kegg_compound_id",
+    "PubChemCID": "pubchem_cid",
+    "MetaCycCompoundID": "metacyc_id",
+    "InChIKey": "inchikey",
+}
+
+
+def _parse_reaction_species(reaction: dict[str, Any]) -> tuple[SabioReactionSpecies, ...]:
+    species: list[SabioReactionSpecies] = []
+    for entry in reaction.get("species") or []:
+        if not isinstance(entry, dict):
+            continue
+        compound = entry.get("compound")
+        if not isinstance(compound, dict) or compound.get("id") is None:
+            continue
+        name = _as_str(compound.get("name"))
+        if name is None:
+            continue
+        species.append(
+            SabioReactionSpecies(
+                internal_id=int(compound["id"]), name=name, role=_as_str(entry.get("role"))
+            )
+        )
+    return tuple(species)
+
+
+def _single_distinct_value(values: set[str]) -> str | None:
+    """Agent 1.x Increment C.7: never an arbitrary first-one choice among 2+ distinct values."""
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _parse_compound_external_identities(
+    external_links: dict[str, Any],
+) -> tuple[SabioCompoundExternalIdentity, ...]:
+    values_by_id: dict[int, dict[str, set[str]]] = {}
+    for entry in external_links.get("compound") or []:
+        if not isinstance(entry, dict):
+            continue
+        internal_id = entry.get("id")
+        field_name = _EXTERNAL_LINK_KEY_TO_FIELD.get(entry.get("key"))
+        value = _as_str(entry.get("value"))
+        if internal_id is None or field_name is None or value is None:
+            continue
+        values_by_id.setdefault(int(internal_id), {}).setdefault(field_name, set()).add(value)
+
+    identities: list[SabioCompoundExternalIdentity] = []
+    for internal_id, fields in values_by_id.items():
+        identities.append(
+            SabioCompoundExternalIdentity(
+                internal_id=internal_id,
+                chebi_id=_single_distinct_value(fields.get("chebi_id", set())),
+                kegg_compound_id=_single_distinct_value(fields.get("kegg_compound_id", set())),
+                pubchem_cid=_single_distinct_value(fields.get("pubchem_cid", set())),
+                metacyc_id=_single_distinct_value(fields.get("metacyc_id", set())),
+                inchikey=_single_distinct_value(fields.get("inchikey", set())),
+            )
+        )
+    return tuple(identities)
+
+
 def _parse_kinetic_law_payload(entry_id: str, payload: dict[str, Any]) -> SabioKineticRecord:
     """The actual field-extraction body of ``parse_kinetic_law_json``, kept separate
     so that its own caller can draw one clear boundary around "structure this
@@ -334,6 +451,10 @@ def _parse_kinetic_law_payload(entry_id: str, payload: dict[str, Any]) -> SabioK
         temperature_unit=_named_or_scalar(temperature_section.get("unit")),
         pubmed_id=_as_str(publication.get("pubmed_id")),
         publication_title=_as_str(publication.get("title")),
+        reaction_species=_parse_reaction_species(reaction),
+        compound_external_identities=_parse_compound_external_identities(
+            payload.get("external_links") or {}
+        ),
         raw=payload,
     )
 
@@ -456,8 +577,10 @@ class SabiorkConnector:
 
 
 __all__ = [
+    "SabioCompoundExternalIdentity",
     "SabioKineticParameter",
     "SabioKineticRecord",
+    "SabioReactionSpecies",
     "SabioSearchHit",
     "SabiorkConnector",
     "parse_kinetic_law_json",

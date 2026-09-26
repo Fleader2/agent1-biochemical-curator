@@ -19,12 +19,19 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.connectors.kegg import KeggCompoundRecord, KeggFlatFileRecord
+from app.connectors.sabiork import (
+    SabioCompoundExternalIdentity,
+    SabioKineticParameter,
+    SabioKineticRecord,
+    SabioReactionSpecies,
+)
 from app.models.enums import SourceType
 from app.normalization.compound import (
     CompoundCandidate,
     CompoundIdentity,
     CompoundLookup,
     compound_identity_from_kegg,
+    compound_identity_from_sabiork,
     normalize_compound,
 )
 from app.normalization.types import MatchMethod, NormalizationStatus
@@ -951,3 +958,202 @@ def test_compound_identity_from_kegg_does_not_copy_molecular_weight() -> None:
 
     assert not hasattr(identity, "molecular_weight")
     assert not hasattr(identity, "mol_weight")
+
+
+# --- compound_identity_from_sabiork (Agent 1.x Increment C.7) ------------------------------------
+
+
+def _sabio_record(
+    *,
+    entry_id: str = "18229",
+    reaction_species: tuple[SabioReactionSpecies, ...] = (),
+    compound_external_identities: tuple[SabioCompoundExternalIdentity, ...] = (),
+) -> SabioKineticRecord:
+    return SabioKineticRecord(
+        entry_id=entry_id,
+        parameters=(),
+        reaction_equation=None,
+        ec_number="2.3.1.86",
+        enzyme_name="fatty-acyl-CoA synthase",
+        uniprot_ids=(),
+        is_wildtype=None,
+        is_recombinant=None,
+        organism="Saccharomyces cerevisiae",
+        ncbi_taxonomy_id=None,
+        strain=None,
+        tissue=None,
+        buffer=None,
+        ph=None,
+        temperature=None,
+        temperature_unit=None,
+        pubmed_id=None,
+        publication_title=None,
+        reaction_species=reaction_species,
+        compound_external_identities=compound_external_identities,
+        raw={},
+    )
+
+
+def _sabio_parameter(*, species_label: str | None) -> SabioKineticParameter:
+    return SabioKineticParameter(
+        name="Km",
+        parameter_type="Km",
+        value="18.0",
+        unit="µM",
+        species_label=species_label,
+        comment="apparent",
+    )
+
+
+def _malonyl_coa_record() -> SabioKineticRecord:
+    """Shaped exactly after the real, live SABIO-RK entry 18229 (Agent 1.x Increment C.7
+    inspection): Malonyl-CoA has one unique KeggCompoundID (C00083) but SEVEN distinct
+    ChebiID values (real ChEBI protonation-state granularity) -- chebi_id must stay
+    unresolved while kegg_compound_id still resolves."""
+    return _sabio_record(
+        reaction_species=(
+            SabioReactionSpecies(internal_id=1930, name="Malonyl-CoA", role="Substrate"),
+        ),
+        compound_external_identities=(
+            SabioCompoundExternalIdentity(
+                internal_id=1930,
+                chebi_id=None,  # 7 distinct real ChEBI ids -> never a single value
+                kegg_compound_id="C00083",
+                pubchem_cid="644066",
+                metacyc_id="MALONYL-COA",
+                inchikey=None,
+            ),
+        ),
+    )
+
+
+def test_compound_identity_from_sabiork_resolves_via_unique_kegg_id() -> None:
+    record = _malonyl_coa_record()
+    parameter = _sabio_parameter(species_label="n | Malonyl-CoA | Substrate")
+
+    identity = compound_identity_from_sabiork(record, parameter)
+
+    assert identity is not None
+    assert identity.kegg_compound_id == "C00083"
+    assert identity.pubchem_cid == "644066"
+    assert identity.metacyc_id == "MALONYL-COA"
+    assert identity.chebi_id is None
+    assert identity.canonical_name == "Malonyl-CoA"
+    assert identity.source == SourceType.SABIORK
+
+
+def test_compound_identity_from_sabiork_none_when_no_species_label() -> None:
+    """Every real Vmax observed this increment carries no species_label at all."""
+    record = _malonyl_coa_record()
+    parameter = _sabio_parameter(species_label=None)
+
+    assert compound_identity_from_sabiork(record, parameter) is None
+
+
+def test_compound_identity_from_sabiork_none_when_label_shape_unrecognized() -> None:
+    record = _malonyl_coa_record()
+    parameter = _sabio_parameter(species_label="not the expected shape")
+
+    assert compound_identity_from_sabiork(record, parameter) is None
+
+
+def test_compound_identity_from_sabiork_none_when_name_matches_no_reaction_species() -> None:
+    record = _sabio_record(reaction_species=(), compound_external_identities=())
+    parameter = _sabio_parameter(species_label="1 | Propionyl-CoA | Substrate")
+
+    assert compound_identity_from_sabiork(record, parameter) is None
+
+
+def test_compound_identity_from_sabiork_none_when_name_matches_two_internal_ids() -> None:
+    """Never guesses among ambiguous internal SABIO-RK ids sharing one name."""
+    record = _sabio_record(
+        reaction_species=(
+            SabioReactionSpecies(internal_id=1, name="Ambiguous", role="Substrate"),
+            SabioReactionSpecies(internal_id=2, name="Ambiguous", role="Product"),
+        ),
+        compound_external_identities=(),
+    )
+    parameter = _sabio_parameter(species_label="1 | Ambiguous | Substrate")
+
+    assert compound_identity_from_sabiork(record, parameter) is None
+
+
+def test_compound_identity_from_sabiork_none_when_no_external_identifiers_at_all() -> None:
+    record = _sabio_record(
+        reaction_species=(SabioReactionSpecies(internal_id=1, name="Enzyme", role="Catalyst"),),
+        compound_external_identities=(
+            SabioCompoundExternalIdentity(
+                internal_id=1,
+                chebi_id=None,
+                kegg_compound_id=None,
+                pubchem_cid=None,
+                metacyc_id=None,
+                inchikey=None,
+            ),
+        ),
+    )
+    parameter = _sabio_parameter(species_label="1 | Enzyme | Catalyst")
+
+    assert compound_identity_from_sabiork(record, parameter) is None
+
+
+def test_compound_identity_from_sabiork_never_guesses_a_single_chebi_from_several() -> None:
+    """No fuzzy/arbitrary selection: 7 distinct ChEBI ids for one internal compound (real,
+    live-confirmed shape) must never collapse into "the first one"."""
+    record = _malonyl_coa_record()
+    parameter = _sabio_parameter(species_label="n | Malonyl-CoA | Substrate")
+
+    identity = compound_identity_from_sabiork(record, parameter)
+
+    assert identity is not None
+    assert identity.chebi_id is None
+
+
+def test_compound_identity_from_sabiork_end_to_end_matches_existing_compound() -> None:
+    """Full, real-shaped resolution: an existing curated Compound with kegg_compound_id
+    matching SABIO-RK's own reported KeggCompoundID resolves to MATCHED -- the exact real
+    outcome confirmed live for Malonyl-CoA/Acetyl-CoA/NADPH (Agent 1.x Increment C.7)."""
+    existing = CompoundCandidate(
+        id=uuid4(), canonical_name="Malonyl-CoA", kegg_compound_id="C00083"
+    )
+    lookup = FakeCompoundLookup(compounds=(existing,))
+    record = _malonyl_coa_record()
+    parameter = _sabio_parameter(species_label="n | Malonyl-CoA | Substrate")
+
+    identity = compound_identity_from_sabiork(record, parameter)
+    assert identity is not None
+    result = normalize_compound(identity, lookup=lookup)
+
+    assert result.status is NormalizationStatus.MATCHED
+    assert result.matched_entity_id == existing.id
+
+
+def test_compound_identity_from_sabiork_absent_compound_does_not_match() -> None:
+    """Real, live-confirmed outcome for Propionyl-/Butanoyl-/Hexanoyl-/Octanoyl-CoA: a
+    compound with no curated Compound row at all never resolves, and this module never
+    creates one -- normalize_compound alone (never called with a creating caller) already
+    makes that safe, but confirm the identity itself carries no anchor an empty lookup could
+    spuriously match."""
+    lookup = FakeCompoundLookup(compounds=())
+    record = _sabio_record(
+        reaction_species=(
+            SabioReactionSpecies(internal_id=1, name="Propionyl-CoA", role="Substrate"),
+        ),
+        compound_external_identities=(
+            SabioCompoundExternalIdentity(
+                internal_id=1,
+                chebi_id=None,
+                kegg_compound_id="C00100",
+                pubchem_cid=None,
+                metacyc_id=None,
+                inchikey=None,
+            ),
+        ),
+    )
+    parameter = _sabio_parameter(species_label="1 | Propionyl-CoA | Substrate")
+
+    identity = compound_identity_from_sabiork(record, parameter)
+    assert identity is not None
+    result = normalize_compound(identity, lookup=lookup)
+
+    assert result.status is not NormalizationStatus.MATCHED

@@ -579,3 +579,123 @@ def test_sabiork_raises_connector_http_error_for_permanent_failure() -> None:
     connector = SabiorkConnector(_client_for(handler), base_url=_BASE_URL)
     with pytest.raises(ConnectorHTTPError):
         connector.search("1.1.1.1")
+
+
+# --- reaction_species / compound_external_identities (Agent 1.x Increment C.7) ------------------
+
+
+def test_parse_kinetic_law_json_extracts_reaction_species() -> None:
+    payload = _entry_json(
+        reaction={
+            "equation": "Malonyl-CoA + ACP <=> Malonyl-ACP + CoA",
+            "species": [
+                {
+                    "stoch_value": "1",
+                    "compound": {"id": 1930, "name": "Malonyl-CoA"},
+                    "role": "Substrate",
+                },
+                {
+                    "stoch_value": "1",
+                    "compound": {"id": 40, "name": "Acyl-carrier protein"},
+                    "role": "Substrate",
+                },
+            ],
+        }
+    )
+    record = parse_kinetic_law_json("1", json.dumps(payload))
+
+    assert len(record.reaction_species) == 2
+    by_name = {s.name: s for s in record.reaction_species}
+    assert by_name["Malonyl-CoA"].internal_id == 1930
+    assert by_name["Malonyl-CoA"].role == "Substrate"
+
+
+def test_parse_kinetic_law_json_reaction_species_defaults_to_empty() -> None:
+    """No reaction.species[] at all (not every real entry's own shape is inspected by this
+    connector for this key) -- never an error, an empty tuple."""
+    payload = _entry_json(reaction={"equation": "A + B <=> C"})
+    record = parse_kinetic_law_json("1", json.dumps(payload))
+
+    assert record.reaction_species == ()
+
+
+def test_parse_kinetic_law_json_compound_external_identities_single_value_per_key() -> None:
+    payload = _entry_json(
+        external_links={
+            "compound": [
+                {"id": 1930, "key": "KeggCompoundID", "value": "C00083"},
+                {"id": 1930, "key": "PubChemCID", "value": "644066"},
+            ]
+        }
+    )
+    record = parse_kinetic_law_json("1", json.dumps(payload))
+
+    (identity,) = record.compound_external_identities
+    assert identity.internal_id == 1930
+    assert identity.kegg_compound_id == "C00083"
+    assert identity.pubchem_cid == "644066"
+    assert identity.chebi_id is None
+
+
+def test_parse_kinetic_law_json_compound_external_identities_multi_value_key_stays_none() -> None:
+    """Real, live-confirmed shape: ChEBI routinely lists several distinct accessions for one
+    SABIO-RK internal compound id (different protonation states) -- never collapsed to a
+    first-one guess."""
+    payload = _entry_json(
+        external_links={
+            "compound": [
+                {"id": 1930, "key": "ChebiID", "value": "15531"},
+                {"id": 1930, "key": "ChebiID", "value": "6661"},
+                {"id": 1930, "key": "KeggCompoundID", "value": "C00083"},
+            ]
+        }
+    )
+    record = parse_kinetic_law_json("1", json.dumps(payload))
+
+    (identity,) = record.compound_external_identities
+    assert identity.chebi_id is None
+    assert identity.kegg_compound_id == "C00083"
+
+
+def test_parse_kinetic_law_json_compound_external_identities_repeated_value_is_single() -> None:
+    """Two entries reporting the *same* value for a key are one distinct value, not two --
+    exactly one KeggCompoundID value still resolves even if SABIO-RK repeats the row."""
+    payload = _entry_json(
+        external_links={
+            "compound": [
+                {"id": 1930, "key": "KeggCompoundID", "value": "C00083"},
+                {"id": 1930, "key": "KeggCompoundID", "value": "C00083"},
+            ]
+        }
+    )
+    record = parse_kinetic_law_json("1", json.dumps(payload))
+
+    (identity,) = record.compound_external_identities
+    assert identity.kegg_compound_id == "C00083"
+
+
+def test_parse_kinetic_law_json_compound_external_identities_ignores_unmapped_keys() -> None:
+    payload = _entry_json(
+        external_links={
+            "compound": [
+                {"id": 1930, "key": "ReactomeCompoundID", "value": "12345"},
+                {"id": 1930, "key": "KeggCompoundID", "value": "C00083"},
+            ]
+        }
+    )
+    record = parse_kinetic_law_json("1", json.dumps(payload))
+
+    (identity,) = record.compound_external_identities
+    assert identity.kegg_compound_id == "C00083"
+    assert identity.chebi_id is None
+    assert identity.pubchem_cid is None
+    assert identity.metacyc_id is None
+    assert identity.inchikey is None
+
+
+def test_parse_kinetic_law_json_compound_external_identities_defaults_to_empty() -> None:
+    payload = _entry_json()
+    payload.pop("external_links", None)
+    record = parse_kinetic_law_json("1", json.dumps(payload))
+
+    assert record.compound_external_identities == ()

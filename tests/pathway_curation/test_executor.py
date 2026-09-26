@@ -17,7 +17,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.connectors.exceptions import ConnectorError
+from app.connectors.sabiork import SabioCompoundExternalIdentity, SabioReactionSpecies
 from app.connectors.uniprot import UniProtProteinRecord
+from app.models.compound import Compound
 from app.models.enums import ReactionParticipantRole, SourceType
 from app.models.protein import Protein
 from app.models.source_cross_reference import SourceCrossReference
@@ -3994,3 +3996,271 @@ def test_c6_kinetics_disabled_publication_lookup_still_accepted(db_session: Sess
     )
     assert result.agent1_knowledge_package.kinetic_measurements == ()
     assert result.agent1_knowledge_package.kinetic_measurement_protein_contexts == ()
+
+
+# --- Kinetic Compound-Context Resolution (Agent 1.x Increment C.7) -------------------------------
+
+
+def _c7_uniprot_and_sgd():
+    sgd = FakeSgdConnector(
+        loci={"ACC1": make_sgd_locus(sgd_id="S1", systematic_name="YNR016C", standard_name="ACC1")}
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+    return sgd, uniprot
+
+
+def _malonyl_coa_sabio_record(*, entry_id: str = "SABIO1") -> object:
+    """Shaped exactly after the real, live SABIO-RK entry 18229 (Agent 1.x Increment C.7
+    inspection): a Km on Malonyl-CoA (unique KeggCompoundID C00083) plus a Vmax with no
+    species at all."""
+    reaction_species = (
+        SabioReactionSpecies(internal_id=1930, name="Malonyl-CoA", role="Substrate"),
+    )
+    external_identities = (
+        SabioCompoundExternalIdentity(
+            internal_id=1930,
+            chebi_id=None,
+            kegg_compound_id="C00083",
+            pubchem_cid="644066",
+            metacyc_id="MALONYL-COA",
+            inchikey=None,
+        ),
+    )
+    return make_sabio_record(
+        entry_id=entry_id,
+        ec_number="6.4.1.2",
+        parameter_type="Km",
+        value="18.0",
+        unit="uM",
+        species_label="n | Malonyl-CoA | Substrate",
+        reaction_species=reaction_species,
+        compound_external_identities=external_identities,
+    )
+
+
+def test_c7_structured_kegg_id_resolves_existing_compound_as_substrate(
+    db_session: Session,
+) -> None:
+    """Real, live-confirmed outcome: Malonyl-CoA's Km resolves to the existing curated
+    Compound whose kegg_compound_id matches SABIO-RK's own reported KeggCompoundID."""
+    existing = Compound(canonical_name="Malonyl-CoA", kegg_compound_id="C00083")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd, uniprot = _c7_uniprot_and_sgd()
+    sabiork = FakeSabiorkConnector(records={"SABIO1": _malonyl_coa_sabio_record()})
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-c7-kegg-resolves",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 1
+    assert measurements[0].substrate_id == existing.id
+
+    view_measurements = result.curated_knowledge_view.kinetic_measurements
+    assert len(view_measurements) == 1
+    assert view_measurements[0].substrate_id == existing.id
+
+    # No new Compound row was created -- resolution only ever reuses.
+    assert db_session.query(Compound).count() == 1
+
+
+def test_c7_uncurated_species_remains_unresolved_no_compound_created(
+    db_session: Session,
+) -> None:
+    """Real, live-confirmed outcome for Propionyl-/Butanoyl-/Hexanoyl-/Octanoyl-CoA: a
+    species with no curated Compound row at all stays unresolved, and no new Compound is
+    created as a side effect of ingesting kinetics."""
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd, uniprot = _c7_uniprot_and_sgd()
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="6.4.1.2",
+                parameter_type="Km",
+                value="222.0",
+                unit="uM",
+                species_label="1 | Propionyl-CoA | Substrate",
+                reaction_species=(
+                    SabioReactionSpecies(internal_id=99, name="Propionyl-CoA", role="Substrate"),
+                ),
+                compound_external_identities=(
+                    SabioCompoundExternalIdentity(
+                        internal_id=99,
+                        chebi_id=None,
+                        kegg_compound_id="C00100",
+                        pubchem_cid=None,
+                        metacyc_id=None,
+                        inchikey=None,
+                    ),
+                ),
+            )
+        }
+    )
+    before_compound_count = db_session.query(Compound).count()
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-c7-uncurated",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 1
+    assert measurements[0].substrate_id is None
+    assert db_session.query(Compound).count() == before_compound_count
+
+
+def test_c7_vmax_with_no_species_label_stays_unresolved(db_session: Session) -> None:
+    """Every real Vmax observed this increment carries no species_label -- must never be
+    assigned a substrate from nearby record content."""
+    existing = Compound(canonical_name="Malonyl-CoA", kegg_compound_id="C00083")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd, uniprot = _c7_uniprot_and_sgd()
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="6.4.1.2",
+                parameter_type="Vmax",
+                value="3340.0",
+                unit="nmol/(min*mg)",
+                species_label=None,
+                reaction_species=(
+                    SabioReactionSpecies(internal_id=1930, name="Malonyl-CoA", role="Substrate"),
+                ),
+                compound_external_identities=(
+                    SabioCompoundExternalIdentity(
+                        internal_id=1930,
+                        chebi_id=None,
+                        kegg_compound_id="C00083",
+                        pubchem_cid=None,
+                        metacyc_id=None,
+                        inchikey=None,
+                    ),
+                ),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-c7-vmax-no-species",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork),
+    )
+
+    (measurement,) = result.agent1_knowledge_package.kinetic_measurements
+    assert measurement.substrate_id is None
+
+
+def test_c7_repeated_execution_is_idempotent(db_session: Session) -> None:
+    existing = Compound(canonical_name="Malonyl-CoA", kegg_compound_id="C00083")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd, uniprot = _c7_uniprot_and_sgd()
+    sabiork = FakeSabiorkConnector(records={"SABIO1": _malonyl_coa_sabio_record()})
+    request = _request(
+        request_id="req-c7-idempotent",
+        seed_entity_texts=("ACC1",),
+        include_publications=False,
+        include_kinetics=True,
+    )
+    connectors = PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork)
+
+    first = execute_pathway_curation(request, session=db_session, connectors=connectors)
+    second = execute_pathway_curation(request, session=db_session, connectors=connectors)
+
+    assert len(first.agent1_knowledge_package.kinetic_measurements) == 1
+    assert len(second.agent1_knowledge_package.kinetic_measurements) == 1
+    assert (
+        first.agent1_knowledge_package.kinetic_measurements[0].substrate_id
+        == second.agent1_knowledge_package.kinetic_measurements[0].substrate_id
+        == existing.id
+    )
+    assert db_session.query(Compound).count() == 1
+
+
+def test_c7_resolved_substrate_coexists_with_protein_and_publication_context(
+    db_session: Session,
+) -> None:
+    """Regression guard: resolving substrate_id does not disturb protein_id/protein_ids or
+    publication_id -- existing C.4-C.6 behavior is unaffected by this increment."""
+    existing = Compound(canonical_name="Malonyl-CoA", kegg_compound_id="C00083")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd, uniprot = _c7_uniprot_and_sgd()
+    pubmed = FakePubMedConnector(
+        articles={"7044669": make_pubmed_article(pmid="7044669", title="A real paper")}
+    )
+    record = _malonyl_coa_sabio_record()
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="6.4.1.2",
+                parameter_type="Km",
+                value="18.0",
+                unit="uM",
+                pubmed_id="7044669",
+                species_label="n | Malonyl-CoA | Substrate",
+                reaction_species=record.reaction_species,
+                compound_external_identities=record.compound_external_identities,
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-c7-coexist",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, sabiork=sabiork, pubmed=pubmed
+        ),
+    )
+
+    (measurement,) = result.agent1_knowledge_package.kinetic_measurements
+    assert measurement.substrate_id == existing.id
+    assert measurement.protein_id is not None
+    assert measurement.publication_id is not None

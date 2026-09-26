@@ -100,7 +100,26 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: measurement``/``app.agent1``, outside this package's own contracts, and
 #: does not by itself require this bump -- the PubMed resolution addition
 #: does.
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.6"
+#:
+#: Bumped to ``v1.7`` by Agent 1.x Increment C.7: kinetics discovery now
+#: resolves a SABIO-RK kinetic parameter's own reported species (its
+#: ``species_key`` free text, joined against the same entry's own
+#: ``reaction.species[]``/``external_links.compound[]`` -- never Agent 1's
+#: own compounds by name, never fuzzy) into a real, already-curated
+#: ``Compound`` via the existing compound normalization machinery, and
+#: passes it through as ``substrate_id`` -- a materially different,
+#: observable result for the same real input (before this increment, every
+#: real SABIO-RK ``Km`` measurement's ``substrate_id`` was unconditionally
+#: ``None``; Malonyl-CoA/Acetyl-CoA/NADPH now resolve via their real,
+#: already-curated KEGG compound ids). Reuse only, never creation: an
+#: uncurated species (real: Propionyl-/Butanoyl-/Hexanoyl-/Octanoyl-CoA)
+#: still leaves ``substrate_id=None``, and no new ``Compound`` row is ever
+#: created as a side effect of ingesting kinetics. No request/result field
+#: on this package's own public contracts was removed or repurposed --
+#: ``discover_kinetics_sabiork`` gained one new optional parameter
+#: (``resolve_substrate``, defaulted to ``None``, exactly mirroring
+#: ``resolve_publication``'s own v1.6 addition).
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.7"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase

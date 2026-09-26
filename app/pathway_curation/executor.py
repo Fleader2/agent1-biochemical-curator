@@ -33,7 +33,9 @@ from app.entity_resolution.adapters import (
 )
 from app.knowledge_gaps.analysis import analyze_knowledge_gaps
 from app.models.enums import ReactionParticipantRole, SourceType
+from app.normalization.compound import compound_identity_from_sabiork, normalize_compound
 from app.normalization.reaction import ReactionParticipantIdentity
+from app.normalization.types import NormalizationStatus
 from app.pathway_curation import strategies
 from app.pathway_curation.equation_parser import parse_kegg_equation
 from app.pathway_curation.errors import CurationExecutionError
@@ -292,6 +294,7 @@ def execute_pathway_curation(
                     organism_id=organism_id,
                     resolved_protein_ec_numbers=resolved_protein_ec_numbers,
                     publication_lookup=publication_lookup,
+                    compound_lookup=compound_lookup,
                     session=session,
                     state=state,
                 )
@@ -1987,6 +1990,7 @@ def _discover_kinetics(
     organism_id: UUID,
     resolved_protein_ec_numbers: list[tuple[UUID, str]],
     publication_lookup,
+    compound_lookup,
     session: Session,
     state: CurationRunState,
 ) -> None:
@@ -2027,8 +2031,48 @@ def _discover_kinetics(
     the identical PMID once per parameter/record (confirmed live: all 7 real EC 2.3.1.86
     records share one real PMID) -- a plain ``dict``, matching every other per-run cache
     already used throughout this module (``direct_catalyst_cache``, ``compound_cache``, ...).
+
+    **Agent 1.x Increment C.7**: when a SABIO-RK kinetic parameter carries a species label
+    (real data: every ``Km``, never a ``Vmax``), its compound context is now resolved --
+    reused only, never created here -- via the existing compound normalization machinery
+    (``app.normalization.compound.compound_identity_from_sabiork`` +
+    ``.normalize_compound``), through the ``_resolve_substrate_for_sabiork_parameter``
+    closure defined below. Only ``NormalizationStatus.MATCHED`` (an unambiguous, exact
+    structured-identifier match -- ChEBI/KEGG/PubChem/MetaCyc/InChIKey, never a bare name)
+    ever sets ``substrate_id``; every other outcome (``NEW``, ``AMBIGUOUS``, ``CONFLICTED``,
+    ``UNRESOLVED``) leaves it ``None`` -- this function never creates a new ``Compound`` row,
+    unlike ``_resolve_one_participant_compound``'s reaction-participant-curation path, which
+    legitimately does: kinetic-parameter compound *context* only ever reuses an already-
+    curated compound, it does not expand the compound registry as a side effect of ingesting
+    kinetics. No new connector call is made for this resolution -- the structured identifiers
+    come from the same SABIO-RK entry ``connector.fetch()`` already retrieved, so
+    ``state.record_connector_call()`` is not invoked here. ``_substrate_compound_cache`` avoids
+    re-normalizing the identical SABIO-RK-internal compound identity more than once per run,
+    mirroring ``_pmid_publication_cache``'s own pattern immediately below.
     """
     pmid_publication_cache: dict[str, UUID | None] = {}
+    substrate_compound_cache: dict[str, UUID | None] = {}
+
+    def _resolve_substrate_for_sabiork_parameter(record, parameter) -> UUID | None:
+        identity = compound_identity_from_sabiork(record, parameter)
+        if identity is None:
+            return None
+        if identity.source_identifier in substrate_compound_cache:
+            return substrate_compound_cache[identity.source_identifier]
+        result = normalize_compound(identity, lookup=compound_lookup)
+        if result.status in (NormalizationStatus.AMBIGUOUS, NormalizationStatus.CONFLICTED):
+            state.warn(
+                f"SABIO-RK kinetic-parameter compound context {identity.source_identifier} "
+                f"({identity.canonical_name}) is {result.status.value}, not resolved: "
+                f"{result.reason}"
+            )
+        resolved = (
+            result.matched_entity_id if result.status is NormalizationStatus.MATCHED else None
+        )
+        if resolved is not None:
+            state.record_entity(resolved)
+        substrate_compound_cache[identity.source_identifier] = resolved
+        return resolved
 
     def _resolve_publication_for_pmid(pmid: str) -> UUID | None:
         if pmid in pmid_publication_cache:
@@ -2108,6 +2152,7 @@ def _discover_kinetics(
                         protein_id=protein_id,
                         organism_id=organism_id,
                         resolve_publication=_resolve_publication_for_pmid,
+                        resolve_substrate=_resolve_substrate_for_sabiork_parameter,
                     )
                 except ConnectorError as exc:
                     state.warn(f"SABIO-RK kinetics discovery failed for EC {ec_number}: {exc}")

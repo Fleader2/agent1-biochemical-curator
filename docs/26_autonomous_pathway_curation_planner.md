@@ -1955,7 +1955,84 @@ primary `agent1` database, which held no data of any kind beyond the same
 migration work after that point used `alembic -x db_url=...` explicitly
 scoped to `agent1_test`.
 
-## 52. Final architectural rule
+## 52. Increment C.7 — Kinetic compound-context resolution
+
+Real Integration Pilot 2 (Agent 2 side) confirmed the Agent 1→2 handoff
+faithfully maps `substrate_id → compound_id`, but every real SABIO-RK `Km`
+measurement arrived with `substrate_id = NULL` — Agent 1 never resolved
+which compound a kinetic parameter's own reported species referred to.
+This increment closes exactly that gap, and only that gap: no reaction
+inference, no new fuzzy matching, no compound creation from a bare name.
+
+**Where the source evidence actually lives.** A SABIO-RK kinetic
+parameter's own `species` field (e.g. `"n | Malonyl-CoA | Substrate"`)
+names a compound but carries no identifier — the connector previously
+treated this as one opaque `species_label` string. The *same* SABIO-RK
+entry separately carries `reaction.species[]` (every compound in the
+entry's own reaction, each with SABIO-RK's own internal numeric id) and
+`external_links.compound[]` (ChEBI/KEGG/PubChem/MetaCyc/InChIKey
+identifiers, keyed by that same internal id) — confirmed live, this
+increment, for all 7 real EC 2.3.1.86 entries. Resolving a parameter's
+species to a structured identifier is therefore a two-step, fully
+deterministic **join within one SABIO-RK document** (species text → exact
+name match against `reaction.species[]` → internal id → `external_links
+.compound[]`), never a lookup against Agent 1's own compounds by name.
+
+**Real finding: ChEBI is routinely multi-valued per SABIO-RK internal
+compound id** (different protonation states lumped under one id — e.g.
+Malonyl-CoA's internal id carries 7 distinct ChEBI accessions). Picking
+any one would be an arbitrary, unjustified guess, so
+`SabioCompoundExternalIdentity` (`app.connectors.sabiork`) populates a
+field only when SABIO-RK reports **exactly one** distinct value for that
+key — never a first-one choice. KEGG/PubChem/MetaCyc were confirmed
+single-valued for the real FAS compounds this increment inspected
+(Malonyl-CoA→C00083, Acetyl-CoA→C00024, NADPH→C00005), so the KEGG anchor
+alone is what actually resolves them.
+
+**Resolution policy, deliberately match-only.** `app.normalization.compound
+.compound_identity_from_sabiork` (a pure adapter, mirroring
+`compound_identity_from_kegg`'s existing shape) returns a `CompoundIdentity`
+built only from structured identifiers — never from the free-text name
+alone — or `None` when the species can't be safely resolved to exactly one
+internal compound with at least one usable identifier.
+`app.pathway_curation.executor._discover_kinetics`'s new
+`_resolve_substrate_for_sabiork_parameter` closure (mirroring the existing
+`_resolve_publication_for_pmid` pattern exactly) feeds that identity through
+the existing, unmodified `normalize_compound` against the real database, and
+accepts **only `NormalizationStatus.MATCHED`** — `NEW`/`AMBIGUOUS`/
+`CONFLICTED`/`UNRESOLVED` all leave `substrate_id = NULL`. This is a
+deliberate, narrower policy than `_resolve_one_participant_compound`'s own
+reaction-participant-curation path (which legitimately persists a `NEW`
+compound): kinetic-parameter compound *context* only ever reuses an
+already-curated compound, it never expands the compound registry as a side
+effect of ingesting kinetics. Confirmed live: a species absent from Agent
+1's curated compound set entirely (real: Propionyl-/Butanoyl-/Hexanoyl-/
+Octanoyl-CoA) stays unresolved, and no new `Compound` row is ever created.
+
+**Parameter semantics match real source behavior exactly, not a hardcoded
+rule about parameter-type strings.** Every real `Vmax` observed this
+increment carries no species field at all — `compound_identity_from_sabiork`
+returns `None` whenever `species_label is None`, which is simply what the
+source itself reports; `discover_kinetics_sabiork` additionally never even
+calls `resolve_substrate` for a parameter with no species label, so no
+connector-adjacent work happens for `Vmax` at all.
+
+**No new connector call.** The structured identifiers used for resolution
+come from the same SABIO-RK entry `connector.fetch()` already retrieved
+earlier in the same run — `state.record_connector_call()` is correctly not
+invoked a second time for this resolution.
+
+**Handoff**: `KineticMeasurement.substrate_id` (already an existing column
+and an already-existing field on `CuratedKineticMeasurement`/
+`Agent1CuratedKnowledgeView` — no shape change) now actually carries a
+value for the first time on real data. `AGENT1_CONTRACT_VERSION` is
+unchanged (`"1.3"`) — no field was added, removed, or repurposed on any
+public contract; `PATHWAY_CURATION_POLICY_VERSION` is bumped to
+`"pathway-curation-v1.7"` (a genuine, observable rule-set behavior change
+for the same real input, exactly the same bump criterion this file's own
+history already applied to C.4/C.5/C.6).
+
+## 53. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

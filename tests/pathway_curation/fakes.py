@@ -23,7 +23,13 @@ from app.connectors.kegg import (
 )
 from app.connectors.open_enzyme_database import OedDataRow
 from app.connectors.pubmed import PubMedArticleRecord, PubMedNormalizedRecord, PubMedSearchHit
-from app.connectors.sabiork import SabioKineticParameter, SabioKineticRecord, SabioSearchHit
+from app.connectors.sabiork import (
+    SabioCompoundExternalIdentity,
+    SabioKineticParameter,
+    SabioKineticRecord,
+    SabioReactionSpecies,
+    SabioSearchHit,
+)
 from app.connectors.sgd import SgdLocusRecord, SgdNormalizedRecord, SgdSearchHit
 from app.connectors.uniprot import UniProtEntryRecord, UniProtProteinRecord, UniProtSearchHit
 
@@ -455,13 +461,16 @@ def make_sabio_record(
     value: str,
     unit: str,
     pubmed_id: str | None = None,
+    species_label: str | None = None,
+    reaction_species: tuple[SabioReactionSpecies, ...] = (),
+    compound_external_identities: tuple[SabioCompoundExternalIdentity, ...] = (),
 ) -> SabioKineticRecord:
     parameter = SabioKineticParameter(
         name=parameter_type,
         parameter_type=parameter_type,
         value=value,
         unit=unit,
-        species_label=None,
+        species_label=species_label,
         comment=None,
     )
     return SabioKineticRecord(
@@ -483,6 +492,8 @@ def make_sabio_record(
         temperature_unit=None,
         pubmed_id=pubmed_id,
         publication_title=None,
+        reaction_species=reaction_species,
+        compound_external_identities=compound_external_identities,
         raw={},
     )
 
