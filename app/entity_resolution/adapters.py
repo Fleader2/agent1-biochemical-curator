@@ -27,6 +27,7 @@ satisfy these structurally; tests supply lightweight fakes instead.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -62,6 +63,10 @@ from app.normalization.reaction import (
     ReactionLookup,
     normalize_reaction,
     reaction_identity_from_kegg,
+)
+from app.normalization.reaction_reversibility import (
+    resolve_reaction_reversibility,
+    reversibility_evidence_from_kegg_equation,
 )
 
 
@@ -248,6 +253,18 @@ def resolve_reaction_via_kegg(
         if not isinstance(normalized_record, KeggReactionRecord):
             continue
         identity = reaction_identity_from_kegg(normalized_record)
+        reversibility_evidence = reversibility_evidence_from_kegg_equation(
+            normalized_record.entry_id, normalized_record.equation
+        )
+        reversibility = resolve_reaction_reversibility(
+            (reversibility_evidence,) if reversibility_evidence is not None else ()
+        )
+        if reversibility.reversible is not None or reversibility.conflicting:
+            # Agent 1.x Increment C.8: see resolve_reaction_by_kegg_id's identical comment in
+            # app.pathway_curation.strategies -- currently unreachable with any connector this
+            # repository calls today, kept as real, tested behavior for a future qualifying
+            # source.
+            identity = dataclasses.replace(identity, reversible=reversibility.reversible)
         result = normalize_reaction(identity, organism_id=organism_id, lookup=lookup)
         candidates.append(
             IdentifierCandidate(

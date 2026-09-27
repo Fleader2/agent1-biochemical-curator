@@ -500,3 +500,35 @@ def test_curated_knowledge_view_includes_accepted_claim(db_session):
     view = get_agent1_curated_knowledge_view(package)
     assert [c.id for c in view.claims] == [fixture["claim"].id]
     assert [e.id for e in view.evidence] == [fixture["evidence"].id]
+
+
+def test_resolved_reversibility_survives_the_full_handoff(db_session):
+    """Agent 1.x Increment C.8: whatever value Reaction.reversible actually holds already
+    flows through both handoff representations unchanged -- confirmed here with an explicit
+    True/False pair (no new export/service code was needed for this)."""
+    from tests.persistence.conftest import make_reaction
+
+    organism = make_organism(db_session)
+    reversible_reaction = make_reaction(
+        db_session, organism_id=organism.id, suffix="reversible", reversible=True
+    )
+    irreversible_reaction = make_reaction(
+        db_session, organism_id=organism.id, suffix="irreversible", reversible=False
+    )
+    unresolved_reaction = make_reaction(
+        db_session, organism_id=organism.id, suffix="unresolved", reversible=None
+    )
+
+    package = get_agent1_knowledge_package(db_session, organism_id=organism.id)
+    view = get_agent1_curated_knowledge_view(package)
+
+    package_by_id = {r.id: r for r in package.reactions}
+    view_by_id = {r.id: r for r in view.reactions}
+
+    assert package_by_id[reversible_reaction.id].reversible is True
+    assert package_by_id[irreversible_reaction.id].reversible is False
+    assert package_by_id[unresolved_reaction.id].reversible is None
+
+    assert view_by_id[reversible_reaction.id].reversible is True
+    assert view_by_id[irreversible_reaction.id].reversible is False
+    assert view_by_id[unresolved_reaction.id].reversible is None

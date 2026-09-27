@@ -111,6 +111,10 @@ from app.normalization.reaction_enzyme import (
     ReactionEnzymeLookup,
     normalize_reaction_enzyme,
 )
+from app.normalization.reaction_reversibility import (
+    resolve_reaction_reversibility,
+    reversibility_evidence_from_kegg_equation,
+)
 from app.normalization.types import NormalizationResult, NormalizationStatus
 from app.pathway_curation.types import FrontierReason
 from app.persistence.compound import persist_compound
@@ -690,6 +694,18 @@ def resolve_reaction_by_kegg_id(
     identity = reaction_identity_from_kegg(normalized_record)
     if participants:
         identity = dataclasses.replace(identity, participants=participants)
+    reversibility_evidence = reversibility_evidence_from_kegg_equation(
+        kegg_reaction_id, normalized_record.equation
+    )
+    reversibility = resolve_reaction_reversibility(
+        (reversibility_evidence,) if reversibility_evidence is not None else ()
+    )
+    if reversibility.reversible is not None or reversibility.conflicting:
+        # Agent 1.x Increment C.8: currently unreachable with any connector this repository
+        # calls today (reversibility_evidence_from_kegg_equation always returns None -- see its
+        # own docstring) -- kept as real, tested behavior for the day a qualifying source
+        # (Rhea/BioCyc/MetaCyc) is connected, rather than a speculative branch added later.
+        identity = dataclasses.replace(identity, reversible=reversibility.reversible)
     result = normalize_reaction(identity, organism_id=organism_id, lookup=lookup)
     return _outcome_for_result(
         entity_kind=EntityKind.REACTION,

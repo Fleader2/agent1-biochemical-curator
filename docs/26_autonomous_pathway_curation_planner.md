@@ -2032,7 +2032,79 @@ public contract; `PATHWAY_CURATION_POLICY_VERSION` is bumped to
 for the same real input, exactly the same bump criterion this file's own
 history already applied to C.4/C.5/C.6).
 
-## 53. Final architectural rule
+## 53. Increment C.8 — Evidence-based reaction reversibility curation
+
+Motivated directly by Pilot 2 Run 5: with a first real, source-derived
+Agent 2 parameter now flowing end-to-end, `reversible=None` on every real
+reaction became this pathway's next concrete blocker to executable model
+generation. This increment inspected every currently-connected source,
+live, and found none currently qualifies as reversibility evidence under
+this repository's own foundational specification
+(`docs/03_agent_behavior.md`, "Reversibility Behavior": reversibility must
+never be inferred solely from arrow notation, and must be supported by
+evidence such as thermodynamics, measured equilibrium, enzyme mechanism,
+physiological flux evidence, or curated database annotation):
+
+* **KEGG** -- no field distinct from the `EQUATION` line's own arrow
+  token exists at all (confirmed live against real `sce00061` reactions:
+  `R05188`/`R05190`/`R01624`/`R00742`/`R05199` all use `<=>` uniformly,
+  matching KEGG's own well-known, database-wide convention rather than a
+  per-reaction claim -- even textbook-irreversible hexokinase, EC
+  2.7.1.1, is written `<=>`).
+* **SABIO-RK** -- has a real, structured `kineticlaw.reversible` field
+  (previously unused by this repository), but a live sample of 67 entries
+  (all 7 real yeast FAS entries, plus 60 spanning EC 2.7.1.1 and an
+  unfiltered low-`EntryID` range) reports the identical literal value,
+  `"reversible"`, on every single one -- zero variation, hence zero
+  discriminating information.
+* **BRENDA** -- no currently-implemented method reports reversibility or
+  an equilibrium constant; even a future one would report a raw K_eq
+  number, not a categorical claim, and applying a threshold to it would
+  be exactly the "numeric scoring" this increment's own instructions
+  forbid.
+* **Rhea/BioCyc/MetaCyc** -- `SourceType`/`ReactionIdentity` already
+  reserve fields for all three (confirmed: real `sce00061` reactions
+  already carry live `DBLINKS: RHEA:...` cross-references in their own
+  KEGG entries), but no connector for any of the three exists in this
+  repository, and Rhea's own real, official, documented REST API
+  (confirmed live) exposes no "direction" column among its queryable
+  fields at all -- only Rhea's full RDF/OBO data release carries that,
+  a substantially larger integration outside this increment's own scope.
+  BioCyc additionally requires a paid subscription for most organism
+  databases.
+
+**Deliverable**: `app.normalization.reaction_reversibility` -- a real,
+tested, deterministic evidence-combining policy
+(`ReversibilityEvidence`/`ReversibilityResolution`/
+`resolve_reaction_reversibility`) that any future qualifying source can
+plug into with no further plumbing changes, wired into both existing
+KEGG-reaction-identity call sites
+(`strategies.resolve_reaction_by_kegg_id`,
+`entity_resolution.adapters.resolve_reaction_via_kegg`) via
+`reversibility_evidence_from_kegg_equation` -- which, per the finding
+above, always and correctly returns `None` today, so every real
+reaction's `reversible` remains `None`, exactly as before this increment,
+with zero change in observable output for any real input.
+`reversibility_evidence_from_sabiork_kineticlaw` is defined and tested
+identically (always `None`) but not wired into any live call site: SABIO-
+RK never creates reactions, only kinetic measurements for already-
+existing ones, and `app.persistence.reaction`'s own, pre-existing,
+deliberate non-destructive-reuse policy (confirmed directly: `_reuse`
+never updates any field, including `reversible`, on an already-persisted
+reaction) means there is currently no path to backfill a field onto an
+existing row at all -- a genuine, disclosed, separate architectural
+question (whether/how to ever allow a later-discovered field to update an
+existing curated row), correctly out of this tightly-scoped increment's
+own bounds.
+
+**No `PATHWAY_CURATION_POLICY_VERSION` bump**: this increment's own real
+code change produces byte-identical output to before, for every real
+input (confirmed by test: every real KEGG equation, regardless of arrow
+token, still resolves to `reversible=None`) -- the same "no behavior to
+track" bump criterion this file's own Increment 7 consistency-revision
+entry already established for an analogous case.
+
+## 54. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

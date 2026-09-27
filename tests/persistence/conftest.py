@@ -70,11 +70,18 @@ def make_compartment(
     return compartment
 
 
-def make_reaction(session: Session, *, organism_id=None, suffix: str | None = None) -> Reaction:
+def make_reaction(
+    session: Session,
+    *,
+    organism_id=None,
+    suffix: str | None = None,
+    reversible: bool | None = None,
+) -> Reaction:
     reaction = Reaction(
         internal_id=make_internal_id(),
         name=f"test-only reaction {suffix or uuid4().hex[:8]}",
         organism_id=organism_id,
+        reversible=reversible,
     )
     session.add(reaction)
     session.flush()

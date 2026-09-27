@@ -258,6 +258,9 @@ def test_resolve_reaction_via_kegg_matched():
     assert candidate.normalization_result.status is NormalizationStatus.MATCHED
     # The raw equation is never parsed into participants.
     assert candidate.normalization_input.participants == ()
+    # Agent 1.x Increment C.8: the equation's own "<=>" arrow never becomes reversibility
+    # evidence, regardless of which arrow token is present.
+    assert candidate.normalization_input.reversible is None
 
 
 def test_resolve_publication_via_pubmed_matched():

@@ -315,3 +315,82 @@ def test_unresolved_takes_no_action(db_session):
     result = _result(NormalizationStatus.UNRESOLVED, organism.id, match_method=MatchMethod.NONE)
     outcome = persist_reaction(_identity(), result, organism_id=organism.id, session=db_session)
     assert outcome.action is PersistenceAction.NO_ACTION
+
+
+# --- Reversibility (Agent 1.x Increment C.8) -----------------------------------------------------
+
+
+def test_new_persists_resolved_reversibility(db_session):
+    organism = make_organism(db_session)
+    result = _result(NormalizationStatus.NEW, organism.id, match_method=MatchMethod.NONE)
+
+    outcome = persist_reaction(
+        _identity(kegg_reaction_id="R00301", name="a reaction with resolved reversibility",
+                  reversible=True),
+        result,
+        organism_id=organism.id,
+        session=db_session,
+    )
+
+    row = db_session.get(Reaction, outcome.entity_id)
+    assert row.reversible is True
+
+
+def test_new_without_reversibility_evidence_persists_none(db_session):
+    organism = make_organism(db_session)
+    result = _result(NormalizationStatus.NEW, organism.id, match_method=MatchMethod.NONE)
+
+    outcome = persist_reaction(
+        _identity(kegg_reaction_id="R00302", name="a reaction with no reversibility evidence"),
+        result,
+        organism_id=organism.id,
+        session=db_session,
+    )
+
+    row = db_session.get(Reaction, outcome.entity_id)
+    assert row.reversible is None
+
+
+def test_repeated_matched_persistence_is_idempotent_and_never_overwrites_reversibility(
+    db_session,
+):
+    """A later re-run naming a DIFFERENT reversibility claim on a MATCHED (already-existing)
+    reaction never overwrites the row -- the existing non-destructive-reuse policy already
+    covers every field, including reversible; this just confirms it explicitly."""
+    organism = make_organism(db_session)
+    existing = make_reaction(db_session, organism_id=organism.id, reversible=True)
+
+    result = _result(NormalizationStatus.MATCHED, organism.id, matched_entity_id=existing.id)
+    outcome = persist_reaction(
+        _identity(reversible=False),  # a conflicting later claim
+        result,
+        organism_id=organism.id,
+        session=db_session,
+    )
+
+    assert outcome.action is PersistenceAction.REUSED_EXISTING
+    refreshed = db_session.get(Reaction, existing.id)
+    assert refreshed.reversible is True  # unchanged -- never silently overwritten
+
+
+def test_reversibility_persistence_does_not_disturb_unrelated_fields(db_session):
+    organism = make_organism(db_session)
+    result = _result(NormalizationStatus.NEW, organism.id, match_method=MatchMethod.NONE)
+
+    outcome = persist_reaction(
+        _identity(
+            kegg_reaction_id="R00303",
+            name="unaffected name",
+            ec_number="1.1.1.1",
+            reversible=True,
+        ),
+        result,
+        organism_id=organism.id,
+        session=db_session,
+    )
+
+    row = db_session.get(Reaction, outcome.entity_id)
+    assert row.name == "unaffected name"
+    assert row.ec_number == "1.1.1.1"
+    assert row.kegg_reaction_id == "R00303"
+    assert row.reversible is True
