@@ -19,9 +19,11 @@ if TYPE_CHECKING:
     from app.models.claim import Claim
     from app.models.compartment import Compartment
     from app.models.enzyme_complex import EnzymeComplex
+    from app.models.experimental_context import ExperimentalContext
     from app.models.gene import Gene
     from app.models.kinetic_measurement import KineticMeasurement
     from app.models.protein import Protein
+    from app.models.quantitative_observation import QuantitativeObservation
     from app.models.reaction import Reaction
     from app.models.regulatory_interaction import RegulatoryInteraction
 
@@ -89,5 +91,11 @@ class Organism(Base):
         back_populates="organism"
     )
     regulatory_interactions: Mapped[list[RegulatoryInteraction]] = relationship(
+        back_populates="organism"
+    )
+    experimental_contexts: Mapped[list[ExperimentalContext]] = relationship(
+        back_populates="organism"
+    )
+    quantitative_observations: Mapped[list[QuantitativeObservation]] = relationship(
         back_populates="organism"
     )

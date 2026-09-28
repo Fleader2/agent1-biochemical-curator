@@ -42,6 +42,19 @@ to persist the underlying source record first.
 into its ``Curated*`` counterpart and passed through unfiltered, for the
 identical reason kinetic measurements are (no ``Claim``/``CurationState``
 column on any of the four tables). Each reshaping is purely mechanical.
+
+**Experimental context and quantitative observations** (Agent 1.x
+Increment "Experimental Context and Quantitative Observation Framework").
+Every ``package.experimental_contexts``/``.perturbations``/
+``.quantitative_observations`` row is reshaped into its ``Curated*``
+counterpart and passed through unfiltered, for the identical reason
+kinetic measurements are (no ``Claim``/``CurationState`` column on any of
+the four new tables). ``CuratedQuantitativeObservation.dependencies`` is
+computed here from ``package.quantitative_observation_dependencies``,
+exactly like ``CuratedKineticMeasurement.protein_ids`` is computed from
+``package.kinetic_measurement_protein_contexts`` -- never copied from a
+single column, and never itself a derivation (see that dataclass's own
+docstring).
 """
 
 from __future__ import annotations
@@ -55,7 +68,11 @@ from app.agent1.types import (
     CuratedEnzymeModification,
     CuratedEnzymeState,
     CuratedEnzymeStateTransition,
+    CuratedExperimentalContext,
     CuratedKineticMeasurement,
+    CuratedPerturbation,
+    CuratedQuantitativeObservation,
+    CuratedQuantitativeObservationDependency,
 )
 from app.models.enzyme_state import (
     AllostericInteraction,
@@ -63,7 +80,13 @@ from app.models.enzyme_state import (
     EnzymeState,
     EnzymeStateTransition,
 )
+from app.models.experimental_context import ExperimentalContext
 from app.models.kinetic_measurement import KineticMeasurement
+from app.models.perturbation import Perturbation
+from app.models.quantitative_observation import (
+    QuantitativeObservation,
+    QuantitativeObservationDependency,
+)
 
 
 def get_agent1_curated_knowledge_view(
@@ -110,6 +133,21 @@ def get_agent1_curated_knowledge_view(
     enzyme_state_transitions = tuple(
         _curated_enzyme_state_transition(row) for row in package.enzyme_state_transitions
     )
+    experimental_contexts = tuple(
+        _curated_experimental_context(row) for row in package.experimental_contexts
+    )
+    perturbations = tuple(_curated_perturbation(row) for row in package.perturbations)
+    dependencies_by_observation: dict = {}
+    for dependency in package.quantitative_observation_dependencies:
+        dependencies_by_observation.setdefault(dependency.derived_observation_id, []).append(
+            dependency
+        )
+    quantitative_observations = tuple(
+        _curated_quantitative_observation(
+            row, dependencies_by_observation.get(row.id, ())
+        )
+        for row in package.quantitative_observations
+    )
 
     return Agent1CuratedKnowledgeView(
         contract_version=AGENT1_CONTRACT_VERSION,
@@ -125,6 +163,9 @@ def get_agent1_curated_knowledge_view(
         enzyme_modifications=enzyme_modifications,
         allosteric_interactions=allosteric_interactions,
         enzyme_state_transitions=enzyme_state_transitions,
+        experimental_contexts=experimental_contexts,
+        perturbations=perturbations,
+        quantitative_observations=quantitative_observations,
         claims=accepted,
         evidence=accepted_evidence,
         confidence_summaries=accepted_confidence,
@@ -235,6 +276,99 @@ def _curated_enzyme_state_transition(
         source=row.source,
         source_id=row.source_id,
         notes=row.notes,
+    )
+
+
+def _curated_experimental_context(row: ExperimentalContext) -> CuratedExperimentalContext:
+    """Pure field-for-field reshaping of one ``ExperimentalContext`` row. No I/O, no inference."""
+    return CuratedExperimentalContext(
+        experimental_context_id=row.id,
+        organism_id=row.organism_id,
+        strain=row.strain,
+        genotype=row.genotype,
+        medium=row.medium,
+        carbon_source=row.carbon_source,
+        temperature_c=row.temperature_c,
+        ph=row.ph,
+        growth_phase=row.growth_phase,
+        growth_condition=row.growth_condition,
+        classification=row.classification,
+        source=row.source,
+        source_id=row.source_id,
+        publication_id=row.publication_id,
+        notes=row.notes,
+    )
+
+
+def _curated_perturbation(row: Perturbation) -> CuratedPerturbation:
+    """Pure field-for-field reshaping of one ``Perturbation`` row. No I/O, no inference."""
+    return CuratedPerturbation(
+        perturbation_id=row.id,
+        perturbation_type=row.perturbation_type,
+        target=row.target,
+        magnitude=row.magnitude,
+        magnitude_unit=row.magnitude_unit,
+        start_time_value=row.start_time_value,
+        start_time_unit=row.start_time_unit,
+        start_time_canonical_s=row.start_time_canonical_s,
+        duration_value=row.duration_value,
+        duration_unit=row.duration_unit,
+        duration_canonical_s=row.duration_canonical_s,
+        description=row.description,
+        source=row.source,
+        source_id=row.source_id,
+        publication_id=row.publication_id,
+        notes=row.notes,
+    )
+
+
+def _curated_quantitative_observation(
+    row: QuantitativeObservation, dependency_rows: tuple[QuantitativeObservationDependency, ...]
+) -> CuratedQuantitativeObservation:
+    """Pure field-for-field reshaping of one ``QuantitativeObservation`` row, plus its
+    dependency rows (when it is itself ``DERIVED``) reshaped into
+    ``CuratedQuantitativeObservationDependency``. No I/O, no inference, no derivation."""
+    dependencies = tuple(
+        CuratedQuantitativeObservationDependency(
+            input_observation_id=dependency.input_observation_id,
+            role=dependency.role,
+            assumption_notes=dependency.assumption_notes,
+        )
+        for dependency in dependency_rows
+    )
+    return CuratedQuantitativeObservation(
+        quantitative_observation_id=row.id,
+        observation_type=row.observation_type,
+        reported_observation_type=row.reported_observation_type,
+        value=row.value,
+        unit=row.unit,
+        normalized_value=row.normalized_value,
+        normalized_unit=row.normalized_unit,
+        uncertainty=row.uncertainty,
+        lower_bound=row.lower_bound,
+        upper_bound=row.upper_bound,
+        measurement_method=row.measurement_method,
+        evidence_class=row.evidence_class,
+        time_reference_basis=row.time_reference_basis,
+        time_value=row.time_value,
+        time_unit=row.time_unit,
+        time_canonical_s=row.time_canonical_s,
+        experimental_context_id=row.experimental_context_id,
+        perturbation_id=row.perturbation_id,
+        biological_replicate_id=row.biological_replicate_id,
+        technical_replicate_id=row.technical_replicate_id,
+        protein_id=row.protein_id,
+        compound_id=row.compound_id,
+        reaction_id=row.reaction_id,
+        organism_id=row.organism_id,
+        unresolved_identity_kind=row.unresolved_identity_kind,
+        unresolved_identity_text=row.unresolved_identity_text,
+        source=row.source,
+        source_id=row.source_id,
+        publication_id=row.publication_id,
+        dataset_id=row.dataset_id,
+        notes=row.notes,
+        dependencies=dependencies,
     )
 
 

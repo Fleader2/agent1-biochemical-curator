@@ -71,6 +71,23 @@ whether their ``enzyme_state_id`` names one of the already-scoped states;
 ``EnzymeStateTransition`` by whether its ``from_state_id``/``to_state_id``
 names one. A row with no way to resolve into the requested scope is only
 included when ``organism_id=None``.
+
+**Experimental context and quantitative observations** (Agent 1.x
+Increment "Experimental Context and Quantitative Observation Framework").
+``QuantitativeObservation`` is scoped exactly like ``KineticMeasurement``
+above: by its own ``organism_id`` when set, otherwise by whether its
+``protein_id``/``compound_id``/``reaction_id`` names an already-scoped
+entity. ``Perturbation`` has no ``organism_id`` (or any other direct
+scope) of its own at all -- it is included only when an already-scoped
+``QuantitativeObservation`` references it. ``ExperimentalContext`` is
+scoped by its own ``organism_id`` *and* by whether an already-scoped
+``QuantitativeObservation`` references it (a context with no
+``organism_id`` of its own -- legitimate -- would otherwise be silently
+dropped even though a scoped observation names it).
+``QuantitativeObservationDependency`` is scoped transitively through
+already-scoped observation ids, exactly like
+``KineticMeasurementProteinContext`` is scoped through
+``kinetic_measurement_ids``.
 """
 
 from __future__ import annotations
@@ -100,12 +117,18 @@ from app.models.enzyme_state import (
 )
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
+from app.models.experimental_context import ExperimentalContext
 from app.models.gene import Gene
 from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.organism import Organism
+from app.models.perturbation import Perturbation
 from app.models.protein import Protein
 from app.models.publication import Publication
+from app.models.quantitative_observation import (
+    QuantitativeObservation,
+    QuantitativeObservationDependency,
+)
 from app.models.reaction import Reaction, ReactionEnzyme, ReactionParticipant
 from app.models.regulatory_interaction import RegulatoryInteraction
 from app.review.history import get_review_history
@@ -198,6 +221,34 @@ def get_agent1_knowledge_package(
         session, enzyme_state_ids, organism_id
     )
 
+    quantitative_observations = _select_quantitative_observations(
+        session, protein_ids, compound_ids, reaction_ids, organism_id
+    )
+    quantitative_observation_ids = tuple(obs.id for obs in quantitative_observations)
+    quantitative_observation_dependencies = _select_in(
+        session,
+        QuantitativeObservationDependency,
+        QuantitativeObservationDependency.derived_observation_id,
+        quantitative_observation_ids,
+    )
+    referenced_context_ids = {
+        obs.experimental_context_id
+        for obs in quantitative_observations
+        if obs.experimental_context_id is not None
+    }
+    referenced_perturbation_ids = {
+        obs.perturbation_id for obs in quantitative_observations if obs.perturbation_id is not None
+    }
+    experimental_contexts = _select_experimental_contexts(
+        session, tuple(referenced_context_ids), organism_id
+    )
+    if organism_id is None:
+        perturbations = tuple(session.execute(select(Perturbation)).scalars().all())
+    else:
+        perturbations = _select_in(
+            session, Perturbation, Perturbation.id, tuple(referenced_perturbation_ids)
+        )
+
     claims = _select_by_organism(session, Claim, organism_id)
     claim_ids = tuple(claim.id for claim in claims)
 
@@ -214,6 +265,17 @@ def get_agent1_knowledge_package(
             measurement.publication_id
             for measurement in kinetic_measurements
             if measurement.publication_id is not None
+        }
+        # Agent 1.x Increment "Experimental Context and Quantitative Observation
+        # Framework": the same reasoning as Increment C.6 above applies identically to
+        # every new record type's own independent publication_id -- none of them creates
+        # an Evidence row either.
+        | {ctx.publication_id for ctx in experimental_contexts if ctx.publication_id is not None}
+        | {pert.publication_id for pert in perturbations if pert.publication_id is not None}
+        | {
+            obs.publication_id
+            for obs in quantitative_observations
+            if obs.publication_id is not None
         }
     )
     publications = _select_publications(session, publication_ids, organism_id)
@@ -280,6 +342,10 @@ def get_agent1_knowledge_package(
         enzyme_modifications=enzyme_modifications,
         allosteric_interactions=allosteric_interactions,
         enzyme_state_transitions=enzyme_state_transitions,
+        experimental_contexts=experimental_contexts,
+        perturbations=perturbations,
+        quantitative_observations=quantitative_observations,
+        quantitative_observation_dependencies=quantitative_observation_dependencies,
         claims=claims,
         evidence=evidence,
         confidence_summaries=confidence_summaries,
@@ -454,6 +520,59 @@ def _select_enzyme_state_transitions(
         or transition.to_state_id in enzyme_state_ids
     ]
     return tuple(scoped)
+
+
+def _select_quantitative_observations(
+    session: Session,
+    protein_ids: tuple[UUID, ...],
+    compound_ids: tuple[UUID, ...],
+    reaction_ids: tuple[UUID, ...],
+    organism_id: UUID | None,
+) -> tuple[QuantitativeObservation, ...]:
+    """Scoped like ``KineticMeasurement`` above: by the row's own ``organism_id`` when set,
+    otherwise by whether its ``protein_id``/``compound_id``/``reaction_id`` names one of the
+    already-scoped entities -- a row resolved into none of those is only included for
+    ``organism_id=None`` (whole-database export), never guessed into a scope it was not
+    resolved into."""
+    if organism_id is None:
+        return tuple(session.execute(select(QuantitativeObservation)).scalars().all())
+    all_observations = session.execute(select(QuantitativeObservation)).scalars().all()
+    scoped = [
+        row
+        for row in all_observations
+        if row.organism_id == organism_id
+        or (
+            row.organism_id is None
+            and (
+                row.protein_id in protein_ids
+                or row.compound_id in compound_ids
+                or row.reaction_id in reaction_ids
+            )
+        )
+    ]
+    return tuple(scoped)
+
+
+def _select_experimental_contexts(
+    session: Session, referenced_context_ids: tuple[UUID, ...], organism_id: UUID | None
+) -> tuple[ExperimentalContext, ...]:
+    """Every ``ExperimentalContext`` scoped directly by its own ``organism_id``, unioned with
+    every context an already-scoped ``QuantitativeObservation`` references (a context with no
+    ``organism_id`` of its own -- legitimate, since not every context need name one -- would
+    otherwise be silently excluded even though a scoped observation names it)."""
+    if organism_id is None:
+        return tuple(session.execute(select(ExperimentalContext)).scalars().all())
+    by_organism = set(
+        session.execute(
+            select(ExperimentalContext).where(ExperimentalContext.organism_id == organism_id)
+        )
+        .scalars()
+        .all()
+    )
+    by_reference = set(
+        _select_in(session, ExperimentalContext, ExperimentalContext.id, referenced_context_ids)
+    )
+    return tuple(by_organism | by_reference)
 
 
 def _select_knowledge_gaps(

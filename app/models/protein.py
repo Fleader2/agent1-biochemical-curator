@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from app.models.gene import Gene
     from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
     from app.models.organism import Organism
+    from app.models.quantitative_observation import QuantitativeObservation
     from app.models.reaction import ReactionEnzyme
 
 
@@ -75,3 +76,6 @@ class Protein(Base):
         back_populates="protein"
     )
     enzyme_states: Mapped[list[EnzymeState]] = relationship(back_populates="protein")
+    quantitative_observations: Mapped[list[QuantitativeObservation]] = relationship(
+        back_populates="protein"
+    )

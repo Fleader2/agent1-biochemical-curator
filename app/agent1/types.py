@@ -77,6 +77,26 @@ the new join table either, so it is included in
 ``Agent1CuratedKnowledgeView`` unfiltered, per this contract's own
 established "exists = curated" policy for structural/schema records that
 carry no curation state of their own.
+
+**Agent 1.x Increment "Experimental Context and Quantitative Observation
+Framework"** added ``experimental_contexts``/``perturbations``/
+``quantitative_observations`` to both container types, bumping
+``AGENT1_CONTRACT_VERSION`` to ``"1.4"`` -- three additive fields, no
+existing field removed or repurposed. See
+``docs/27_experimental_context_and_quantitative_observation_framework.md``
+for the full design. None of the four new tables
+(``ExperimentalContext``/``Perturbation``/``QuantitativeObservation``/
+``QuantitativeObservationDependency``) carries a ``Claim``/
+``CurationState`` column, so this contract's own established "exists =
+curated" policy applies to all of them unfiltered, exactly as it already
+does for kinetic measurements and enzyme regulatory states.
+``CuratedQuantitativeObservation.dependencies`` is computed here (a
+faithful reshaping of every ``QuantitativeObservationDependency`` row
+naming that observation as its ``derived_observation_id``), never copied
+from a single column -- this increment represents derived-value
+dependency/provenance only, it never performs a derivation itself
+(no code anywhere computes a ``DERIVED`` observation's own value from its
+declared inputs).
 """
 
 from __future__ import annotations
@@ -95,8 +115,11 @@ from app.models.enums import (
     CurationState,
     EnzymeStateTransitionType,
     EnzymeStateType,
+    ExperimentalContextClassification,
     ModificationType,
+    QuantitativeEvidenceClass,
     SourceType,
+    TimeReferenceBasis,
 )
 from app.models.enzyme_state import (
     AllostericInteraction,
@@ -106,19 +129,25 @@ from app.models.enzyme_state import (
 )
 from app.models.experiment_execution import ExperimentExecution, ExperimentResult
 from app.models.experiment_recommendation import ExperimentRecommendationRecord
+from app.models.experimental_context import ExperimentalContext
 from app.models.gene import Gene
 from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.organism import Organism
+from app.models.perturbation import Perturbation
 from app.models.protein import Protein
 from app.models.publication import Publication
+from app.models.quantitative_observation import (
+    QuantitativeObservation,
+    QuantitativeObservationDependency,
+)
 from app.models.reaction import Reaction, ReactionEnzyme, ReactionParticipant
 from app.models.regulatory_interaction import RegulatoryInteraction
 from app.models.review_event import ReviewEvent
 
 #: This contract's own version. Bump only when ``Agent1KnowledgePackage``/
 #: ``Agent1CuratedKnowledgeView``'s field shape changes.
-AGENT1_CONTRACT_VERSION = "1.3"
+AGENT1_CONTRACT_VERSION = "1.4"
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +374,143 @@ class CuratedEnzymeStateTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class CuratedExperimentalContext:
+    """Agent 2-facing view of one curated ``ExperimentalContext`` row (Agent 1.x
+    Increment "Experimental Context and Quantitative Observation Framework").
+
+    A faithful reshaping of one ``ExperimentalContext`` row -- see that
+    model's own docstring for why it is a distinct table from the
+    pre-existing ``ExperimentalCondition``.
+    """
+
+    experimental_context_id: UUID
+    organism_id: UUID | None
+    strain: str | None
+    genotype: str | None
+    medium: str | None
+    carbon_source: str | None
+    temperature_c: Decimal | None
+    ph: Decimal | None
+    growth_phase: str | None
+    growth_condition: str | None
+    classification: ExperimentalContextClassification | None
+    source: SourceType | None
+    source_id: str | None
+    publication_id: UUID | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedPerturbation:
+    """Agent 2-facing view of one curated ``Perturbation`` row (Agent 1.x
+    Increment "Experimental Context and Quantitative Observation Framework").
+
+    A faithful reshaping of one ``Perturbation`` row. ``perturbation_type``
+    is exactly the source's own reported string (see
+    ``app.models.perturbation.Perturbation``'s own docstring for why this
+    is a deliberately open field, never a closed enum).
+    """
+
+    perturbation_id: UUID
+    perturbation_type: str
+    target: str | None
+    magnitude: Decimal | None
+    magnitude_unit: str | None
+    start_time_value: Decimal | None
+    start_time_unit: str | None
+    start_time_canonical_s: Decimal | None
+    duration_value: Decimal | None
+    duration_unit: str | None
+    duration_canonical_s: Decimal | None
+    description: str | None
+    source: SourceType | None
+    source_id: str | None
+    publication_id: UUID | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedQuantitativeObservationDependency:
+    """One input a ``CuratedQuantitativeObservation`` (that is itself ``DERIVED``)
+    depends on (Agent 1.x Increment "Experimental Context and Quantitative
+    Observation Framework"). See
+    ``app.models.quantitative_observation.QuantitativeObservationDependency``'s
+    own docstring: this represents dependency/provenance only, never a
+    derivation computation.
+    """
+
+    input_observation_id: UUID
+    role: str | None
+    assumption_notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedQuantitativeObservation:
+    """Agent 2-facing view of one curated ``QuantitativeObservation`` row (Agent 1.x
+    Increment "Experimental Context and Quantitative Observation Framework").
+
+    A faithful reshaping of one ``QuantitativeObservation`` row -- never a
+    reinterpretation, and never a decision about model usage, mirroring
+    ``CuratedKineticMeasurement``'s own identical architectural boundary.
+    ``observation_type`` is exactly the source's own reported string (see
+    ``app.models.quantitative_observation.QuantitativeObservation``'s own
+    docstring for why this is deliberately open, never a closed enum).
+    Every identity link (``protein_id``/``compound_id``/``reaction_id``/
+    ``organism_id``) is exactly what the underlying row stores -- ``None``
+    when Agent 1 could not deterministically resolve it, never guessed;
+    ``unresolved_identity_kind``/``unresolved_identity_text`` preserve the
+    source's own free-text identity in that case, rather than silently
+    dropping it.
+    """
+
+    quantitative_observation_id: UUID
+
+    observation_type: str
+    reported_observation_type: str | None
+    value: Decimal
+    unit: str
+    normalized_value: Decimal | None
+    normalized_unit: str | None
+
+    uncertainty: Decimal | None
+    lower_bound: Decimal | None
+    upper_bound: Decimal | None
+    measurement_method: str | None
+
+    evidence_class: QuantitativeEvidenceClass
+
+    time_reference_basis: TimeReferenceBasis | None
+    time_value: Decimal | None
+    time_unit: str | None
+    time_canonical_s: Decimal | None
+
+    experimental_context_id: UUID | None
+    perturbation_id: UUID | None
+
+    biological_replicate_id: str | None
+    technical_replicate_id: str | None
+
+    protein_id: UUID | None
+    compound_id: UUID | None
+    reaction_id: UUID | None
+    organism_id: UUID | None
+    unresolved_identity_kind: str | None
+    unresolved_identity_text: str | None
+
+    source: SourceType | None
+    source_id: str | None
+    publication_id: UUID | None
+    dataset_id: str | None
+
+    notes: str | None
+
+    #: Every input this observation depends on, when it is itself ``DERIVED`` -- computed
+    #: from ``QuantitativeObservationDependency`` rows, never a stored column (see
+    #: this module's own docstring). Empty for every non-``DERIVED`` observation.
+    dependencies: tuple[CuratedQuantitativeObservationDependency, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Agent1KnowledgePackage:
     """The complete, coherent Agent 1 v1 knowledge product for one scope.
 
@@ -373,6 +539,10 @@ class Agent1KnowledgePackage:
     enzyme_modifications: tuple[EnzymeModification, ...]
     allosteric_interactions: tuple[AllostericInteraction, ...]
     enzyme_state_transitions: tuple[EnzymeStateTransition, ...]
+    experimental_contexts: tuple[ExperimentalContext, ...]
+    perturbations: tuple[Perturbation, ...]
+    quantitative_observations: tuple[QuantitativeObservation, ...]
+    quantitative_observation_dependencies: tuple[QuantitativeObservationDependency, ...]
 
     claims: tuple[Claim, ...]
     evidence: tuple[Evidence, ...]
@@ -413,6 +583,9 @@ class Agent1CuratedKnowledgeView:
     enzyme_modifications: tuple[CuratedEnzymeModification, ...]
     allosteric_interactions: tuple[CuratedAllostericInteraction, ...]
     enzyme_state_transitions: tuple[CuratedEnzymeStateTransition, ...]
+    experimental_contexts: tuple[CuratedExperimentalContext, ...]
+    perturbations: tuple[CuratedPerturbation, ...]
+    quantitative_observations: tuple[CuratedQuantitativeObservation, ...]
 
     claims: tuple[Claim, ...]
     evidence: tuple[Evidence, ...]
@@ -429,6 +602,10 @@ __all__ = [
     "CuratedEnzymeModification",
     "CuratedEnzymeState",
     "CuratedEnzymeStateTransition",
+    "CuratedExperimentalContext",
     "CuratedKineticMeasurement",
+    "CuratedPerturbation",
+    "CuratedQuantitativeObservation",
+    "CuratedQuantitativeObservationDependency",
     "ProvenanceSummary",
 ]

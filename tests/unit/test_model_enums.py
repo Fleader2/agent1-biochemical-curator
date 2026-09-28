@@ -16,14 +16,18 @@ from app.models.enums import (
     AllostericEffect,
     ClaimStatus,
     ConfidenceClass,
+    ContextCompatibility,
     CurationState,
     EnzymeStateTransitionType,
     EnzymeStateType,
     EvidenceType,
+    ExperimentalContextClassification,
     ModificationType,
+    QuantitativeEvidenceClass,
     ReactionParticipantRole,
     RegulatoryEffect,
     SourceType,
+    TimeReferenceBasis,
 )
 
 pytestmark = pytest.mark.unit
@@ -34,14 +38,18 @@ _EXPECTED_NAMES = {
     "AllostericEffect",
     "ClaimStatus",
     "ConfidenceClass",
+    "ContextCompatibility",
     "CurationState",
     "EnzymeStateTransitionType",
     "EnzymeStateType",
     "EvidenceType",
+    "ExperimentalContextClassification",
     "ModificationType",
+    "QuantitativeEvidenceClass",
     "ReactionParticipantRole",
     "RegulatoryEffect",
     "SourceType",
+    "TimeReferenceBasis",
 }
 
 # Expected value sets, transcribed verbatim from docs/02_database_schema.md.
@@ -129,6 +137,17 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
     EnzymeStateTransitionType: frozenset(
         {"MODIFICATION", "DEMODIFICATION", "LIGAND_BINDING", "LIGAND_RELEASE", "OTHER"}
     ),
+    # Added in Agent 1.x Increment "Experimental Context and Quantitative Observation
+    # Framework" (migration 0017_exp_context_qobs) -- see
+    # docs/27_experimental_context_and_quantitative_observation_framework.md.
+    QuantitativeEvidenceClass: frozenset(
+        {"EXPERIMENT_SPECIFIC", "REFERENCE_BASELINE", "MODEL_PREDICTED", "DERIVED"}
+    ),
+    ExperimentalContextClassification: frozenset({"REFERENCE", "EXPERIMENT_SPECIFIC"}),
+    TimeReferenceBasis: frozenset({"EXPERIMENT_START", "PERTURBATION_ONSET"}),
+    ContextCompatibility: frozenset(
+        {"EXACT_CONTEXT", "COMPATIBLE_REFERENCE", "CONTEXT_MISMATCH", "CONTEXT_UNKNOWN"}
+    ),
 }
 
 
@@ -148,12 +167,16 @@ def test_enum_values_are_stable_strings(enum_cls: type) -> None:
         assert _STABLE_ENUM_VALUE.match(member.value)
 
 
-def test_exactly_eleven_enums_are_defined() -> None:
-    """The module defines exactly the eleven enums named in docs/02_database_schema.md.
+def test_exactly_fifteen_enums_are_defined() -> None:
+    """The module defines exactly the fifteen enums named in docs/02_database_schema.md.
 
-    Seven from the original specification plus four added in Agent 1.x
+    Seven from the original specification, four added in Agent 1.x
     Increment B (``EnzymeStateType``, ``ModificationType``,
-    ``AllostericEffect``, ``EnzymeStateTransitionType``).
+    ``AllostericEffect``, ``EnzymeStateTransitionType``), and four added in
+    Agent 1.x Increment "Experimental Context and Quantitative Observation
+    Framework" (``QuantitativeEvidenceClass``,
+    ``ExperimentalContextClassification``, ``TimeReferenceBasis``,
+    ``ContextCompatibility``).
     """
     assert set(enums.__all__) == _EXPECTED_NAMES
 

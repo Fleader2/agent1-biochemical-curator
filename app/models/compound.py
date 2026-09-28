@@ -28,6 +28,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.kinetic_measurement import KineticMeasurement
+    from app.models.quantitative_observation import QuantitativeObservation
     from app.models.reaction import ReactionParticipant
 
 
@@ -92,6 +93,9 @@ class Compound(Base):
     )
     kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
         back_populates="substrate"
+    )
+    quantitative_observations: Mapped[list[QuantitativeObservation]] = relationship(
+        back_populates="compound"
     )
 
 

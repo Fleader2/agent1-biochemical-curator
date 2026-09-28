@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from app.models.kinetic_measurement import KineticMeasurement
     from app.models.organism import Organism
     from app.models.protein import Protein
+    from app.models.quantitative_observation import QuantitativeObservation
 
 # Type creation is owned exclusively by migration 0004_reaction
 # (create_type=False): these ORM-level Enum instances only describe the
@@ -118,6 +119,9 @@ class Reaction(Base):
     participants: Mapped[list[ReactionParticipant]] = orm_relationship(back_populates="reaction")
     enzymes: Mapped[list[ReactionEnzyme]] = orm_relationship(back_populates="reaction")
     kinetic_measurements: Mapped[list[KineticMeasurement]] = orm_relationship(
+        back_populates="reaction"
+    )
+    quantitative_observations: Mapped[list[QuantitativeObservation]] = orm_relationship(
         back_populates="reaction"
     )
 

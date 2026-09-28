@@ -37,7 +37,11 @@ from app.agent1.types import (
     CuratedEnzymeModification,
     CuratedEnzymeState,
     CuratedEnzymeStateTransition,
+    CuratedExperimentalContext,
     CuratedKineticMeasurement,
+    CuratedPerturbation,
+    CuratedQuantitativeObservation,
+    CuratedQuantitativeObservationDependency,
     ProvenanceSummary,
 )
 
@@ -51,7 +55,11 @@ __all__ = [
     "CuratedEnzymeModification",
     "CuratedEnzymeState",
     "CuratedEnzymeStateTransition",
+    "CuratedExperimentalContext",
     "CuratedKineticMeasurement",
+    "CuratedPerturbation",
+    "CuratedQuantitativeObservation",
+    "CuratedQuantitativeObservationDependency",
     "ProvenanceSummary",
     "curated_claims",
     "get_agent1_curated_knowledge_view",

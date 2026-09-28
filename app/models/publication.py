@@ -18,7 +18,10 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.claim import Evidence
+    from app.models.experimental_context import ExperimentalContext
     from app.models.kinetic_measurement import KineticMeasurement
+    from app.models.perturbation import Perturbation
+    from app.models.quantitative_observation import QuantitativeObservation
 
 
 class Publication(Base):
@@ -74,5 +77,12 @@ class Publication(Base):
 
     evidence_records: Mapped[list[Evidence]] = relationship(back_populates="publication")
     kinetic_measurements: Mapped[list[KineticMeasurement]] = relationship(
+        back_populates="publication"
+    )
+    experimental_contexts: Mapped[list[ExperimentalContext]] = relationship(
+        back_populates="publication"
+    )
+    perturbations: Mapped[list[Perturbation]] = relationship(back_populates="publication")
+    quantitative_observations: Mapped[list[QuantitativeObservation]] = relationship(
         back_populates="publication"
     )

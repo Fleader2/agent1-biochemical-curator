@@ -171,6 +171,93 @@ class EnzymeStateTransitionType(StrEnum):
     OTHER = "OTHER"
 
 
+class QuantitativeEvidenceClass(StrEnum):
+    """The provenance category of one ``QuantitativeObservation`` value.
+
+    Added in Agent 1.x Increment "Experimental Context and Quantitative
+    Observation Framework". A deliberately small, closed vocabulary --
+    unlike ``QuantitativeObservationType``/``PerturbationCategory``
+    (``app.normalization.quantitative_observation``), which are open-ended
+    and never backed by a closed enum (mirrors
+    ``kinetic_measurement.parameter_type``'s own "never a closed enum"
+    policy), this axis is deliberately closed: a value's evidence class is
+    always one of exactly these four kinds, decided by the curator/
+    connector constructing the record, never left ambiguous. A ``DERIVED``
+    or ``MODEL_PREDICTED`` value must never be represented as
+    ``EXPERIMENT_SPECIFIC``/``REFERENCE_BASELINE`` -- those two describe a
+    genuinely-measured value only.
+    """
+
+    #: A value measured under one specific, non-baseline experimental
+    #: condition (a perturbation, a specific replicate/time point).
+    EXPERIMENT_SPECIFIC = "EXPERIMENT_SPECIFIC"
+    #: A value measured (or curated) as the standard/untreated/baseline
+    #: condition for its organism -- e.g. SGD's reference protein
+    #: abundance.
+    REFERENCE_BASELINE = "REFERENCE_BASELINE"
+    #: A value produced by a predictive model (e.g. an AI/ML predictor),
+    #: never a direct experimental measurement.
+    MODEL_PREDICTED = "MODEL_PREDICTED"
+    #: A value computed from one or more other ``QuantitativeObservation``
+    #: rows plus stated assumptions (see
+    #: ``QuantitativeObservationDependency``) -- never itself a direct
+    #: measurement or a model prediction.
+    DERIVED = "DERIVED"
+
+
+class ExperimentalContextClassification(StrEnum):
+    """Whether one ``ExperimentalContext`` describes a reference/baseline
+    condition or an experiment-specific one.
+
+    Added in Agent 1.x Increment "Experimental Context and Quantitative
+    Observation Framework". Distinct from ``QuantitativeEvidenceClass``:
+    this classifies the *context* itself (a growth condition can be "the"
+    standard reference condition for an organism regardless of which
+    specific observation later reuses it), not any one observation's own
+    evidence class.
+    """
+
+    REFERENCE = "REFERENCE"
+    EXPERIMENT_SPECIFIC = "EXPERIMENT_SPECIFIC"
+
+
+class TimeReferenceBasis(StrEnum):
+    """What a ``QuantitativeObservation``'s own time value is measured relative to.
+
+    Added in Agent 1.x Increment "Experimental Context and Quantitative
+    Observation Framework". ``NULL`` on the observation itself (this enum
+    is never required) means "no time / a reference value" (task's own
+    first case) -- there is deliberately no ``NONE``/``REFERENCE`` member
+    here, since the *absence* of a value already represents that case
+    without needing its own enum value to mean the same thing twice.
+    """
+
+    EXPERIMENT_START = "EXPERIMENT_START"
+    PERTURBATION_ONSET = "PERTURBATION_ONSET"
+
+
+class ContextCompatibility(StrEnum):
+    """A minimal, deterministic vocabulary for comparing two ``ExperimentalContext``
+    records (task's own "Context compatibility," §6).
+
+    Added in Agent 1.x Increment "Experimental Context and Quantitative
+    Observation Framework". Deliberately not a numeric/weighted score --
+    see ``app.normalization.quantitative_observation
+    .classify_context_compatibility`` for the one, deterministic,
+    unweighted classifier this increment implements (field-subset
+    equality only; never fuzzy, never learned, never tuned). This is a
+    comparison *result*, computed on demand between two contexts -- never
+    persisted as a column on either ``ExperimentalContext`` or
+    ``QuantitativeObservation``, since compatibility is a property of a
+    *pair*, not of one record alone.
+    """
+
+    EXACT_CONTEXT = "EXACT_CONTEXT"
+    COMPATIBLE_REFERENCE = "COMPATIBLE_REFERENCE"
+    CONTEXT_MISMATCH = "CONTEXT_MISMATCH"
+    CONTEXT_UNKNOWN = "CONTEXT_UNKNOWN"
+
+
 class SourceType(StrEnum):
     """External scientific source that a record or piece of evidence came from.
 
@@ -216,12 +303,16 @@ __all__ = [
     "AllostericEffect",
     "ClaimStatus",
     "ConfidenceClass",
+    "ContextCompatibility",
     "CurationState",
     "EnzymeStateTransitionType",
     "EnzymeStateType",
     "EvidenceType",
+    "ExperimentalContextClassification",
     "ModificationType",
+    "QuantitativeEvidenceClass",
     "ReactionParticipantRole",
     "RegulatoryEffect",
     "SourceType",
+    "TimeReferenceBasis",
 ]

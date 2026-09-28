@@ -249,6 +249,56 @@ LIGAND_RELEASE
 OTHER
 ```
 
+## QuantitativeEvidenceClass
+
+Added in Agent 1.x Increment "Experimental Context and Quantitative
+Observation Framework" (migration `0017_exp_context_qobs`) -- see
+`docs/27_experimental_context_and_quantitative_observation_framework.md`.
+A `DERIVED`/`MODEL_PREDICTED` value is never represented as
+`EXPERIMENT_SPECIFIC`/`REFERENCE_BASELINE`.
+
+```text
+EXPERIMENT_SPECIFIC
+REFERENCE_BASELINE
+MODEL_PREDICTED
+DERIVED
+```
+
+## ExperimentalContextClassification
+
+Added in the same increment. Classifies one `ExperimentalContext` record
+itself (reference/baseline condition vs. experiment-specific), distinct
+from `QuantitativeEvidenceClass`, which classifies one observation.
+
+```text
+REFERENCE
+EXPERIMENT_SPECIFIC
+```
+
+## TimeReferenceBasis
+
+Added in the same increment. `NULL` on `quantitative_observation.time_reference_basis`
+itself (never a member of this enum) means "no time / a reference value."
+
+```text
+EXPERIMENT_START
+PERTURBATION_ONSET
+```
+
+## ContextCompatibility
+
+Added in the same increment. A deterministic, unweighted comparison
+*result* between two `experimental_context` rows -- never persisted as a
+column on any table; computed on demand by
+`app.normalization.quantitative_observation.classify_context_compatibility`.
+
+```text
+EXACT_CONTEXT
+COMPATIBLE_REFERENCE
+CONTEXT_MISMATCH
+CONTEXT_UNKNOWN
+```
+
 ---
 
 # Table: organism
@@ -1196,6 +1246,205 @@ reviewer_type = DETERMINISTIC_VALIDATOR
 ```
 
 This table provides an audit trail of curation decisions.
+
+---
+
+# Table: experimental_context
+
+Added in Agent 1.x Increment "Experimental Context and Quantitative
+Observation Framework" (migration `0017_exp_context_qobs`) -- see
+`docs/27_experimental_context_and_quantitative_observation_framework.md`
+for the full design rationale. Distinct from the pre-existing
+`experimental_condition` table (used only by the Claims/Evidence
+pipeline) -- neither is deprecated by the other.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+organism_id             UUID REFERENCES organism(id)
+
+strain                  VARCHAR
+genotype                TEXT
+
+medium                  VARCHAR
+carbon_source           VARCHAR
+
+temperature_c           NUMERIC
+ph                      NUMERIC
+
+growth_phase            VARCHAR
+growth_condition        VARCHAR
+
+classification          ExperimentalContextClassification
+
+source                  SourceType
+source_id               VARCHAR
+publication_id          UUID REFERENCES publication(id)
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+No natural-key uniqueness constraint -- two independently curated
+descriptions of "the same" condition may persist as independent rows,
+mirroring `kinetic_measurement`'s own identical policy.
+
+---
+
+# Table: perturbation
+
+Added in the same increment. `perturbation_type` is a deliberately open
+`VARCHAR`, never a closed enum (supports genetic, chemical, nutrient/
+environmental, induction/repression, temperature/pH, and future
+perturbation kinds without a migration).
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+perturbation_type       VARCHAR NOT NULL
+target                  VARCHAR
+
+magnitude               NUMERIC
+magnitude_unit          VARCHAR
+
+start_time_value        NUMERIC
+start_time_unit         VARCHAR
+start_time_canonical_s  NUMERIC
+
+duration_value          NUMERIC
+duration_unit           VARCHAR
+duration_canonical_s    NUMERIC
+
+description             TEXT
+
+source                  SourceType
+source_id               VARCHAR
+publication_id          UUID REFERENCES publication(id)
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+An explicit end time is never stored as its own column -- it is always
+`start_time_canonical_s + duration_canonical_s` once both are known.
+
+---
+
+# Table: quantitative_observation
+
+Added in the same increment: the common ingestion model for reference,
+experiment-specific, and time-series quantitative biological data (protein
+abundance, protein/metabolite concentration, reaction flux, cell volume,
+growth rate, and future observation types). `observation_type` is a
+deliberately open `VARCHAR`, mirroring `kinetic_measurement.parameter_type`'s
+own policy exactly.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+observation_type        VARCHAR NOT NULL
+reported_observation_type
+                        VARCHAR
+
+value                   NUMERIC NOT NULL
+unit                    VARCHAR NOT NULL
+normalized_value        NUMERIC
+normalized_unit         VARCHAR
+
+uncertainty             NUMERIC
+lower_bound             NUMERIC
+upper_bound             NUMERIC
+
+measurement_method      VARCHAR
+
+evidence_class          QuantitativeEvidenceClass NOT NULL
+
+time_reference_basis    TimeReferenceBasis
+time_value              NUMERIC
+time_unit               VARCHAR
+time_canonical_s        NUMERIC
+
+experimental_context_id UUID REFERENCES experimental_context(id)
+perturbation_id         UUID REFERENCES perturbation(id)
+
+biological_replicate_id VARCHAR
+technical_replicate_id  VARCHAR
+
+protein_id              UUID REFERENCES protein(id)
+compound_id             UUID REFERENCES compound(id)
+reaction_id             UUID REFERENCES reaction(id)
+organism_id             UUID REFERENCES organism(id)
+unresolved_identity_kind
+                        VARCHAR
+unresolved_identity_text
+                        TEXT
+
+source                  SourceType
+source_id               VARCHAR
+publication_id          UUID REFERENCES publication(id)
+dataset_id              VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+A partial unique index on `(source, source_id)` (both non-null) makes
+re-ingesting the identical source record idempotent, mirroring
+`kinetic_measurement`'s own identical index. A `CHECK` requires that a
+non-null `time_reference_basis` always be accompanied by an actual time
+value.
+
+Every identity link is deterministic only -- never fuzzy-inferred; an
+unresolved source identity is preserved on
+`unresolved_identity_kind`/`unresolved_identity_text` rather than
+fabricated or dropped.
+
+---
+
+# Table: quantitative_observation_dependency
+
+Added in the same increment: records that one `DERIVED`
+`quantitative_observation` depends on one or more other, already-persisted
+`quantitative_observation` rows as inputs (e.g. an enzyme-concentration
+value derived from a protein-abundance value and a cell-volume value).
+Represents dependency/provenance only -- no derivation is computed by this
+increment.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+derived_observation_id  UUID NOT NULL REFERENCES quantitative_observation(id)
+input_observation_id    UUID NOT NULL REFERENCES quantitative_observation(id)
+
+role                    VARCHAR
+assumption_notes        TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+The combination `(derived_observation_id, input_observation_id)` must be
+unique. `derived_observation_id` must differ from `input_observation_id`.
+`derived_observation_id` cascades on delete (no independent meaning apart
+from the derived observation it describes); `input_observation_id`
+restricts (an independent scientific observation).
 
 ---
 
