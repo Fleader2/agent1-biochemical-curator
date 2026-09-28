@@ -297,6 +297,31 @@ class SqlAlchemyCompoundLookup:
         return self._candidates(stmt)
 
 
+class SqlAlchemyCompoundNameIndexLookup:
+    """Real ``CompoundNameIndexLookup`` implementation (Agent 1.x Increment C.10).
+
+    Unfiltered ``SELECT``s over every ``compound``/``compound_synonym`` row -- the exact
+    normalization comparison ``app.normalization.compound.resolve_brenda_ligand_to_compound``
+    performs cannot be pushed into SQL without duplicating that normalization logic in two
+    places (and risking them drifting out of sync), so this adapter deliberately returns the
+    raw rows for that module to normalize and compare in Python, exactly like every other
+    ``*Lookup`` adapter's own "thin, read-only, no policy" contract (module docstring).
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def all_canonical_names(self) -> Sequence[tuple[UUID, str]]:
+        rows = self._session.execute(select(Compound.id, Compound.canonical_name)).all()
+        return tuple((row.id, row.canonical_name) for row in rows)
+
+    def all_synonyms(self) -> Sequence[tuple[UUID, str]]:
+        rows = self._session.execute(
+            select(CompoundSynonym.compound_id, CompoundSynonym.synonym)
+        ).all()
+        return tuple((row.compound_id, row.synonym) for row in rows)
+
+
 class SqlAlchemyCompartmentLookup:
     """Real ``CompartmentLookup`` implementation over ``app.models.compartment.Compartment``."""
 
@@ -441,6 +466,7 @@ class SqlAlchemyReactionEnzymeLookup:
 __all__ = [
     "SqlAlchemyCompartmentLookup",
     "SqlAlchemyCompoundLookup",
+    "SqlAlchemyCompoundNameIndexLookup",
     "SqlAlchemyGeneLookup",
     "SqlAlchemyOrganismLookup",
     "SqlAlchemyProteinLookup",

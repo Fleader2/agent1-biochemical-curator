@@ -180,11 +180,19 @@ class SourceType(StrEnum):
     (https://openenzymedb.platform.moleculemaker.org), which itself
     aggregates data originating from BRENDA/SABIO-RK (see
     ``docs/24_kinetic_data_curation_and_handoff.md`` §7 for the
-    source-lineage policy this enables). Adding a value to this native
-    PostgreSQL ``ENUM`` requires migration ``0013_kinetic_measurement_sources``
-    (``ALTER TYPE ... ADD VALUE``, which Postgres cannot reverse -- see that
-    migration's own docstring for its downgrade policy). No existing value
-    was renamed or removed.
+    source-lineage policy this enables). ``GOTENZYMES`` added in Agent 1.x
+    Increment C.11: GotEnzymes2 (https://metabolicatlas.org/gotenzymes),
+    an AI-predicted (never experimentally measured) kinetic-parameter
+    database -- see migration ``0016_gotenzymes_source``'s own docstring
+    for why this one value is itself the "never confused with a curated
+    experimental measurement" provenance marker Increment C.11's own
+    instructions ask for, with no separate column needed. Adding a value
+    to this native PostgreSQL ``ENUM`` requires a migration
+    (``0013_kinetic_measurement_sources`` for ``SABIORK``/``OED``,
+    ``0016_gotenzymes_source`` for ``GOTENZYMES``; ``ALTER TYPE ... ADD
+    VALUE``, which Postgres cannot reverse -- see each migration's own
+    docstring for its downgrade policy). No existing value was renamed or
+    removed.
     """
 
     PUBMED = "PUBMED"
@@ -200,6 +208,7 @@ class SourceType(StrEnum):
     NCBI = "NCBI"
     SABIORK = "SABIORK"
     OED = "OED"
+    GOTENZYMES = "GOTENZYMES"
     OTHER = "OTHER"
 
 

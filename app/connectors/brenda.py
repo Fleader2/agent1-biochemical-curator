@@ -1,18 +1,18 @@
 """BRENDA connector: retrieval and parsing only, no persistence or curation policy.
 
-**Verified against official BRENDA documentation and one live authentication
-check.** This module was written from BRENDA's current official SOAP
-documentation (https://www.brenda-enzymes.org/soap.php), its live WSDL
-(https://www.brenda-enzymes.org/soap/brenda.wsdl, fetched directly, not from
+**Verified against official BRENDA documentation, one live authentication-failure
+check, and, as of Agent 1.x Increment C.9, live successful retrieval with a real,
+registered account.** This module was originally written from BRENDA's current
+official SOAP documentation (https://www.brenda-enzymes.org/soap.php), its live
+WSDL (https://www.brenda-enzymes.org/soap/brenda.wsdl, fetched directly, not from
 memory), and its official data-field unit reference
 (https://www.brenda-enzymes.org/datafields.php) -- not from remembered or
-inferred legacy behavior, per this increment's instructions. One live SOAP
-request was made, with obviously-fake credentials, to observe BRENDA's
-actual authentication-failure response shape (see
-``ConnectorAuthenticationError`` below); no valid BRENDA account was
-available, so the *successful* response shape is documentation-verified
-only, not live-confirmed. That distinction is called out everywhere it
-matters below and in ``tests/connectors/test_brenda.py``.
+inferred legacy behavior. One live SOAP request was made with obviously-fake
+credentials to observe BRENDA's actual authentication-failure response shape
+(see ``ConnectorAuthenticationError`` below). Agent 1.x Increment C.9 then
+confirmed the *successful* response shape live, with a real registered account,
+against real `sce00061` EC numbers -- and found one live-only surprise the
+documentation above does not mention: see ``_NO_VALUE_SENTINEL`` below.
 
 **Current interface: still SOAP**, confirmed live and via documentation --
 BRENDA has not moved to REST/JSON. No modern replacement was found.
@@ -43,13 +43,10 @@ BRENDA has not moved to REST/JSON. No modern replacement was found.
   comma/`` # ``/``*``-structured string: ``"{email},{sha256_password},
   key1*value1#key2*value2#"``. See ``_build_soap_envelope()``.
 * A successful call's SOAP response wraps a ``<return>`` string. For the
-  kinetic-parameter methods (documented and WSDL-confirmed), that string is
-  itself structured: zero or more records separated by ``!``, each a set of
+  kinetic-parameter methods (documented, WSDL-confirmed, and, as of
+  Increment C.9, live-confirmed with a real account), that string is itself
+  structured: zero or more records separated by ``!``, each a set of
   ``key*value`` fields separated by ``#``. See ``parse_delimited_records()``.
-  This exact shape was **not** independently reproduced with real data this
-  increment (no valid credentials); it is asserted here as documented,
-  self-consistent behavior confirmed for the *request* side, not observed
-  for a *successful response*.
 * An authentication failure (live-confirmed) is an HTTP 500 response whose
   body is a SOAP 1.1 Fault: ``<faultcode>401</faultcode><faultstring>Username
   or password is wrong, or account was not activated.</faultstring>``. See
@@ -378,6 +375,29 @@ def _none_if_blank(value: str | None) -> str | None:
     return stripped or None
 
 
+# Confirmed live this increment (Agent 1.x Increment C.9), not documented at
+# https://www.brenda-enzymes.org/datafields.php: BRENDA reports the literal string
+# ``"-999"`` for a kinetic-parameter value/value-maximum field when the underlying record
+# carries no actual reported number -- observed repeatedly for real Km and Ki records
+# against real sce00061 EC numbers (e.g. EC 6.4.1.2's own real Ki records:
+# ``["-999", "0.0049", "0.5"]``), always paired with a non-numeric ``commentary`` (e.g.
+# "kinetics of recombinant wild-type and mutant enzymes") and a placeholder qualifier
+# value of ``"more"`` rather than a real substrate/inhibitor name. Every parameter type
+# this connector maps (Km, Ki, kcat, kcat/Km, pH optimum, temperature optimum, specific
+# activity) is a physical quantity that can never legitimately be a literal ``-999`` --
+# even temperature optimum, in principle negative for a psychrophilic organism, can never
+# reach -999 degrees Celsius (below absolute zero, -273.15 degC) -- so this string is
+# never a real reported number for any method this connector exposes, only ever this
+# sentinel. Treated identically to a blank value (never parsed as ``Decimal("-999")`` and
+# persisted as a fabricated, physically-impossible kinetic parameter).
+_NO_VALUE_SENTINEL = "-999"
+
+
+def _none_if_blank_or_sentinel(value: str | None) -> str | None:
+    stripped = _none_if_blank(value)
+    return None if stripped == _NO_VALUE_SENTINEL else stripped
+
+
 def normalize_kinetic_records(
     records: Iterable[Mapping[str, str]], *, method: str
 ) -> list[BrendaKineticMeasurement]:
@@ -406,8 +426,10 @@ def normalize_kinetic_records(
         measurements.append(
             BrendaKineticMeasurement(
                 parameter_type=spec.parameter_type,
-                parameter_value=_none_if_blank(record.get(spec.value_field)),
-                parameter_value_maximum=_none_if_blank(record.get(spec.value_maximum_field)),
+                parameter_value=_none_if_blank_or_sentinel(record.get(spec.value_field)),
+                parameter_value_maximum=_none_if_blank_or_sentinel(
+                    record.get(spec.value_maximum_field)
+                ),
                 unit=spec.unit,
                 ec_number=_none_if_blank(record.get("ecNumber")),
                 organism=_none_if_blank(record.get("organism")),

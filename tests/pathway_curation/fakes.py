@@ -14,6 +14,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.connectors.brenda import BrendaKineticMeasurement
+from app.connectors.gotenzymes import (
+    GotEnzymesGeneCrossReferences,
+    GotEnzymesRecord,
+    normalize_enzymes_record,
+)
 from app.connectors.kegg import (
     KeggCompoundRecord,
     KeggFlatFileRecord,
@@ -576,7 +582,155 @@ def make_oed_row(*, ec_number: str, kcat: str | None = None, km: str | None = No
     )
 
 
+@dataclass
+class FakeBrendaConnector:
+    """Deterministic fake matching BRENDA's per-method kinetic-fetch shape
+    (Agent 1.x Increment C.9): ``fetch_km``/``fetch_ki``/``fetch_turnover_number``/
+    ``fetch_kcat_km``/``fetch_ph_optimum``/``fetch_temperature_optimum``/
+    ``fetch_specific_activity``, each keyed by EC number, mirroring the real
+    ``app.connectors.brenda.BrendaConnector``'s seven-method shape exactly (never a
+    single ``search()``/``fetch()`` pair, unlike SABIO-RK/OED)."""
+
+    km: dict[str, list[BrendaKineticMeasurement]] = field(default_factory=dict)
+    ki: dict[str, list[BrendaKineticMeasurement]] = field(default_factory=dict)
+    turnover_number: dict[str, list[BrendaKineticMeasurement]] = field(default_factory=dict)
+    kcat_km: dict[str, list[BrendaKineticMeasurement]] = field(default_factory=dict)
+    ph_optimum: dict[str, list[BrendaKineticMeasurement]] = field(default_factory=dict)
+    temperature_optimum: dict[str, list[BrendaKineticMeasurement]] = field(default_factory=dict)
+    specific_activity: dict[str, list[BrendaKineticMeasurement]] = field(default_factory=dict)
+    calls: list[tuple[str, tuple]] = field(default_factory=list)
+
+    def fetch_km(self, ec_number: str, *, organism: str | None = None):
+        self.calls.append(("fetch_km", (ec_number, organism)))
+        return list(self.km.get(ec_number, ()))
+
+    def fetch_ki(self, ec_number: str, *, organism: str | None = None):
+        self.calls.append(("fetch_ki", (ec_number, organism)))
+        return list(self.ki.get(ec_number, ()))
+
+    def fetch_turnover_number(self, ec_number: str, *, organism: str | None = None):
+        self.calls.append(("fetch_turnover_number", (ec_number, organism)))
+        return list(self.turnover_number.get(ec_number, ()))
+
+    def fetch_kcat_km(self, ec_number: str, *, organism: str | None = None):
+        self.calls.append(("fetch_kcat_km", (ec_number, organism)))
+        return list(self.kcat_km.get(ec_number, ()))
+
+    def fetch_ph_optimum(self, ec_number: str, *, organism: str | None = None):
+        self.calls.append(("fetch_ph_optimum", (ec_number, organism)))
+        return list(self.ph_optimum.get(ec_number, ()))
+
+    def fetch_temperature_optimum(self, ec_number: str, *, organism: str | None = None):
+        self.calls.append(("fetch_temperature_optimum", (ec_number, organism)))
+        return list(self.temperature_optimum.get(ec_number, ()))
+
+    def fetch_specific_activity(self, ec_number: str, *, organism: str | None = None):
+        self.calls.append(("fetch_specific_activity", (ec_number, organism)))
+        return list(self.specific_activity.get(ec_number, ()))
+
+
+def make_brenda_measurement(
+    *,
+    parameter_type: str,
+    value: str | None,
+    unit: str | None = "mM",
+    ec_number: str | None = None,
+    organism: str | None = "Saccharomyces cerevisiae",
+    substrate: str | None = None,
+    inhibitor: str | None = None,
+    commentary: str | None = None,
+    literature_ids: tuple[str, ...] = (),
+    value_maximum: str | None = None,
+) -> BrendaKineticMeasurement:
+    return BrendaKineticMeasurement(
+        parameter_type=parameter_type,
+        parameter_value=value,
+        parameter_value_maximum=value_maximum,
+        unit=unit,
+        ec_number=ec_number,
+        organism=organism,
+        substrate=substrate,
+        inhibitor=inhibitor,
+        commentary=commentary,
+        literature_ids=literature_ids,
+        raw={},
+    )
+
+
+@dataclass
+class FakeGotEnzymesConnector:
+    """Deterministic fake matching GotEnzymes2's ``search``/``fetch``/``normalize`` shape
+    (Agent 1.x Increment C.11): ``search`` returns whatever rows are registered for the
+    queried EC number (organism-filtered, mirroring the real API's own behavior);
+    ``fetch`` returns whatever cross-references are registered for the queried gene."""
+
+    records_by_ec: dict[str, list[GotEnzymesRecord]] = field(default_factory=dict)
+    cross_references_by_gene: dict[str, GotEnzymesGeneCrossReferences] = field(
+        default_factory=dict
+    )
+    calls: list[tuple[str, tuple]] = field(default_factory=list)
+
+    def search(
+        self,
+        *,
+        gene: str | None = None,
+        ec_number: str | None = None,
+        compound: str | None = None,
+        organism: str | None = None,
+        reaction_id: str | None = None,
+        domain: str | None = None,
+        page_size: int = 500,
+    ) -> list[GotEnzymesRecord]:
+        self.calls.append(("search", (gene, ec_number, compound, organism, reaction_id)))
+        rows = self.records_by_ec.get(ec_number or "", [])
+        return [r for r in rows if organism is None or r.organism == organism]
+
+    def fetch(self, gene_id: str, *, organism: str) -> GotEnzymesGeneCrossReferences:
+        self.calls.append(("fetch", (gene_id, organism)))
+        result = self.cross_references_by_gene.get(gene_id)
+        if result is None:
+            return GotEnzymesGeneCrossReferences(gene=gene_id, uniprot_ids=(), raw={})
+        return result
+
+    def normalize(self, raw: GotEnzymesRecord):
+        self.calls.append(("normalize", (raw.gene, raw.compound)))
+        return normalize_enzymes_record(raw)
+
+
+def make_gotenzymes_record(
+    *,
+    gene: str,
+    organism: str = "sce",
+    ec_number: str | None = None,
+    reaction_id: str | None = None,
+    compound: str | None = None,
+    kcat_value: float | None = None,
+    km_value: float | None = None,
+    kcat_km_value: float | None = None,
+) -> GotEnzymesRecord:
+    return GotEnzymesRecord(
+        gene=gene,
+        organism=organism,
+        domain="E",
+        reaction_id=reaction_id,
+        ec_number=ec_number,
+        compound=compound,
+        kcat_value=kcat_value,
+        km_value=km_value,
+        kcat_km_value=kcat_km_value,
+        raw={},
+    )
+
+
+def make_gotenzymes_cross_references(
+    *, gene: str, uniprot_ids: tuple[str, ...] = ()
+) -> GotEnzymesGeneCrossReferences:
+    return GotEnzymesGeneCrossReferences(gene=gene, uniprot_ids=uniprot_ids, raw={})
+
+
 __all__ = [
+    "FakeBrendaConnector",
+    "FakeGotEnzymesConnector",
     "FakeKeggConnector",
     "FakeKgmlEntrySpec",
     "FakeOedConnector",
@@ -584,6 +738,9 @@ __all__ = [
     "FakeSabiorkConnector",
     "FakeSgdConnector",
     "FakeUniProtConnector",
+    "make_brenda_measurement",
+    "make_gotenzymes_cross_references",
+    "make_gotenzymes_record",
     "make_kegg_compound",
     "make_kegg_reaction",
     "make_oed_row",

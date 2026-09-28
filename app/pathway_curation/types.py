@@ -119,7 +119,7 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: ``discover_kinetics_sabiork`` gained one new optional parameter
 #: (``resolve_substrate``, defaulted to ``None``, exactly mirroring
 #: ``resolve_publication``'s own v1.6 addition).
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.7"
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.10"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase
@@ -391,6 +391,23 @@ class PathwayCurationRequest:
     field -- organism resolution's own existing strain-aware identity
     matching (``(scientific_name, strain)``) is reused exactly as already
     implemented for every other caller of ``normalize_organism``.
+
+    ``gotenzymes_organism_code`` (Agent 1.x Increment C.11) is optional,
+    explicit KEGG-style organism-code context (e.g. ``"sce"`` for
+    *Saccharomyces cerevisiae*) GotEnzymes2's own real API requires to scope
+    a search. **Never derived automatically from ``organism_id``**:
+    ``Organism.kegg_code`` (``app/models/organism.py``) is a real schema
+    column but is not populated for this repository's own already-curated
+    organisms today (confirmed directly -- the real, curated yeast
+    ``Organism`` row's own ``kegg_code`` is ``NULL``), and resolving it
+    automatically would be a separate, KEGG-organism-code-resolution
+    increment this one does not attempt (Increment C.11 instructions, §1:
+    "determine the smallest architecture change needed" -- inventing a new
+    resolution pathway for a field no current source actually needs
+    resolved is not that). Leaving this ``None`` simply means
+    GotEnzymes2 cannot contribute for that run, exactly like leaving any
+    other connector field unset on ``PathwayConnectorBundle`` -- never an
+    error, never a guessed code.
     """
 
     request_id: str
@@ -405,6 +422,7 @@ class PathwayCurationRequest:
     source_pathway_id: str | None = None
     seed_entity_texts: tuple[str, ...] = ()
     include_entity_kinds: tuple[EntityKind, ...] = ()
+    gotenzymes_organism_code: str | None = None
 
     include_kinetics: bool = False
     include_regulation: bool = False

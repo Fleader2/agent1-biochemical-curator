@@ -33,7 +33,14 @@ from app.entity_resolution.adapters import (
 )
 from app.knowledge_gaps.analysis import analyze_knowledge_gaps
 from app.models.enums import ReactionParticipantRole, SourceType
-from app.normalization.compound import compound_identity_from_sabiork, normalize_compound
+from app.normalization.compound import (
+    BrendaLigandResolutionStatus,
+    CompoundIdentity,
+    brenda_ligand_text,
+    compound_identity_from_sabiork,
+    normalize_compound,
+    resolve_brenda_ligand_to_compound,
+)
 from app.normalization.reaction import ReactionParticipantIdentity
 from app.normalization.types import NormalizationStatus
 from app.pathway_curation import strategies
@@ -42,6 +49,7 @@ from app.pathway_curation.errors import CurationExecutionError
 from app.pathway_curation.lookups import (
     SqlAlchemyCompartmentLookup,
     SqlAlchemyCompoundLookup,
+    SqlAlchemyCompoundNameIndexLookup,
     SqlAlchemyGeneLookup,
     SqlAlchemyOrganismLookup,
     SqlAlchemyProteinLookup,
@@ -79,7 +87,7 @@ class PathwayConnectorBundle:
     never a fabricated fallback. Mirrors
     ``app.entity_resolution.resolver.ConnectorBundle``'s identical
     "every field optional, no global default" convention, extended with
-    the two kinetics sources that resolver has no use for.
+    the three kinetics sources that resolver has no use for.
     """
 
     kegg: strategies.KeggPathwayCurationConnector | None = None
@@ -88,6 +96,8 @@ class PathwayConnectorBundle:
     pubmed: PubMedSearchAndFetch | None = None
     sabiork: object | None = None
     oed: object | None = None
+    brenda: object | None = None
+    gotenzymes: object | None = None
 
 
 def execute_pathway_curation(
@@ -108,6 +118,7 @@ def execute_pathway_curation(
     protein_lookup = SqlAlchemyProteinLookup(session)
     publication_lookup = SqlAlchemyPublicationLookup(session)
     compound_lookup = SqlAlchemyCompoundLookup(session)
+    compound_name_index_lookup = SqlAlchemyCompoundNameIndexLookup(session)
     compartment_lookup = SqlAlchemyCompartmentLookup(session)
     reaction_enzyme_lookup = SqlAlchemyReactionEnzymeLookup(session)
 
@@ -292,9 +303,12 @@ def execute_pathway_curation(
                     connectors=connectors,
                     organism_text=effective_request.organism_text,
                     organism_id=organism_id,
+                    gotenzymes_organism_code=effective_request.gotenzymes_organism_code,
                     resolved_protein_ec_numbers=resolved_protein_ec_numbers,
                     publication_lookup=publication_lookup,
                     compound_lookup=compound_lookup,
+                    compound_name_index_lookup=compound_name_index_lookup,
+                    protein_lookup=protein_lookup,
                     session=session,
                     state=state,
                 )
@@ -1988,9 +2002,12 @@ def _discover_kinetics(
     connectors: PathwayConnectorBundle,
     organism_text: str,
     organism_id: UUID,
+    gotenzymes_organism_code: str | None = None,
     resolved_protein_ec_numbers: list[tuple[UUID, str]],
     publication_lookup,
     compound_lookup,
+    compound_name_index_lookup,
+    protein_lookup,
     session: Session,
     state: CurationRunState,
 ) -> None:
@@ -2000,13 +2017,18 @@ def _discover_kinetics(
     persisted measurement so it is actually linked, never an orphaned row invisible to
     ``app.agent1.service.get_agent1_knowledge_package``'s own organism scoping.
 
-    **SABIO-RK and Open Enzyme Database are both tried, independently** (Increment C
-    pre-commit revision -- previously OED was built but never wired in here). A configured
-    connector's own failure never destroys structural pathway curation and never blocks the
-    other kinetics source: each is attempted, and each failure is recorded as its own
-    warning, never raised. A completely unconfigured connector (either or both fields left
-    ``None`` on ``PathwayConnectorBundle``) is likewise never an error -- it simply cannot
-    contribute, and this function still runs whichever source(s) *are* configured.
+    **SABIO-RK, Open Enzyme Database, and BRENDA are all tried, independently** (BRENDA added
+    Agent 1.x Increment C.9 -- previously built as a connector but never wired in here, exactly
+    like OED's own history one increment earlier). A configured connector's own failure never
+    destroys structural pathway curation and never blocks another kinetics source: each is
+    attempted, and each failure is recorded as its own warning, never raised. A completely
+    unconfigured connector (any of the three fields left ``None`` on ``PathwayConnectorBundle``)
+    is likewise never an error -- it simply cannot contribute, and this function still runs
+    whichever source(s) *are* configured. BRENDA specifically requires a registered account
+    (``app.connectors.brenda``'s own module docstring); an environment with no BRENDA
+    credentials configured simply never constructs a ``connectors.brenda``, and this function
+    behaves exactly as if BRENDA did not exist for that run -- never a fabricated empty
+    success.
 
     **Increment C.5**: ``strategies.discover_kinetics_sabiork`` now also reports, alongside
     its successfully-parsed identities, any individual SABIO-RK record it had to skip
@@ -2052,6 +2074,103 @@ def _discover_kinetics(
     """
     pmid_publication_cache: dict[str, UUID | None] = {}
     substrate_compound_cache: dict[str, UUID | None] = {}
+    brenda_ligand_cache: dict[str, UUID | None] = {}
+
+    def _resolve_substrate_for_brenda_measurement(record) -> UUID | None:
+        """Agent 1.x Increment C.10: resolve a BRENDA record's own ligand (substrate/
+        inhibitor) name against already-curated compounds only -- never creates one. Cached
+        by normalized ligand text so the same real, repeated ligand name (e.g. "ATP", seen
+        across several EC numbers/methods in one run) is resolved once, not once per record.
+        """
+        ligand_text = brenda_ligand_text(record)
+        resolution = resolve_brenda_ligand_to_compound(
+            ligand_text,
+            lookup=compound_name_index_lookup,
+            ligand_structure_id=record.raw.get("ligandStructureId"),
+        )
+        if resolution is None:
+            return None
+        if resolution.normalized_ligand_text in brenda_ligand_cache:
+            return brenda_ligand_cache[resolution.normalized_ligand_text]
+        if resolution.status is BrendaLigandResolutionStatus.AMBIGUOUS:
+            state.warn(
+                f"BRENDA ligand {resolution.raw_ligand_text!r} is ambiguous against "
+                f"existing compounds, not resolved: {resolution.reason}"
+            )
+        resolved = (
+            resolution.matched_compound_id
+            if resolution.status is BrendaLigandResolutionStatus.RESOLVED
+            else None
+        )
+        if resolved is not None:
+            state.record_entity(resolved)
+        brenda_ligand_cache[resolution.normalized_ligand_text] = resolved
+        return resolved
+
+    gotenzymes_compound_cache: dict[str, UUID | None] = {}
+    gotenzymes_gene_cache: dict[str, UUID | None] = {}
+
+    def _resolve_substrate_for_gotenzymes_compound(kegg_compound_id: str) -> UUID | None:
+        """Agent 1.x Increment C.11: resolve a GotEnzymes2 record's own real, structured
+        KEGG compound id against already-curated compounds via the existing, unmodified
+        ``CompoundLookup.by_kegg_compound_id`` -- a genuine structured identifier, unlike
+        BRENDA's free-text names, so this reuses ``normalize_compound`` directly rather
+        than Increment C.10's own name-based hierarchy."""
+        if kegg_compound_id in gotenzymes_compound_cache:
+            return gotenzymes_compound_cache[kegg_compound_id]
+        identity = CompoundIdentity(
+            source=SourceType.GOTENZYMES,
+            source_identifier=kegg_compound_id,
+            kegg_compound_id=kegg_compound_id,
+        )
+        result = normalize_compound(identity, lookup=compound_lookup)
+        if result.status in (NormalizationStatus.AMBIGUOUS, NormalizationStatus.CONFLICTED):
+            state.warn(
+                f"GotEnzymes2 compound {kegg_compound_id} is {result.status.value}, "
+                f"not resolved: {result.reason}"
+            )
+        resolved = (
+            result.matched_entity_id if result.status is NormalizationStatus.MATCHED else None
+        )
+        if resolved is not None:
+            state.record_entity(resolved)
+        gotenzymes_compound_cache[kegg_compound_id] = resolved
+        return resolved
+
+    def _resolve_protein_for_gotenzymes_gene(gene: str, organism_code: str) -> UUID | None:
+        """Agent 1.x Increment C.11: resolve a GotEnzymes2 record's own reported gene to
+        exactly one existing Agent 1 protein, via GotEnzymes2's own UniProt cross-reference
+        (``connectors.gotenzymes.fetch``) and the existing, unmodified
+        ``ProteinLookup.by_uniprot_id`` -- never a name/gene-symbol guess. Cached by gene,
+        since the same gene is looked up once per EC number it shares with another real
+        protein, at most.
+        """
+        if gene in gotenzymes_gene_cache:
+            return gotenzymes_gene_cache[gene]
+        if connectors.gotenzymes is None:
+            gotenzymes_gene_cache[gene] = None
+            return None
+        try:
+            cross_refs = connectors.gotenzymes.fetch(gene, organism=organism_code)
+        except ConnectorError as exc:
+            state.warn(f"GotEnzymes2 gene cross-reference lookup failed for {gene}: {exc}")
+            gotenzymes_gene_cache[gene] = None
+            return None
+        if cross_refs.uniprot_id is None:
+            if len(cross_refs.uniprot_ids) > 1:
+                state.warn(
+                    f"GotEnzymes2 gene {gene} reports more than one UniProt cross-reference "
+                    f"({cross_refs.uniprot_ids}) -- not resolved to a single protein"
+                )
+            gotenzymes_gene_cache[gene] = None
+            return None
+        candidates = protein_lookup.by_uniprot_id(cross_refs.uniprot_id)
+        if len(candidates) != 1:
+            gotenzymes_gene_cache[gene] = None
+            return None
+        resolved = candidates[0].id
+        gotenzymes_gene_cache[gene] = resolved
+        return resolved
 
     def _resolve_substrate_for_sabiork_parameter(record, parameter) -> UUID | None:
         identity = compound_identity_from_sabiork(record, parameter)
@@ -2110,7 +2229,12 @@ def _discover_kinetics(
         pmid_publication_cache[pmid] = outcome.entity_id
         return outcome.entity_id
 
-    if connectors.sabiork is None and connectors.oed is None:
+    if (
+        connectors.sabiork is None
+        and connectors.oed is None
+        and connectors.brenda is None
+        and connectors.gotenzymes is None
+    ):
         state.add_frontier(
             CurationFrontierItem(
                 frontier_id=build_frontier_id(
@@ -2122,7 +2246,10 @@ def _discover_kinetics(
                 reason=FrontierReason.NO_CONNECTOR_AVAILABLE,
                 priority=6,
                 entity_text="kinetics",
-                notes="no SABIO-RK or Open Enzyme Database connector configured",
+                notes=(
+                    "no SABIO-RK, Open Enzyme Database, BRENDA, or GotEnzymes2 connector "
+                    "configured"
+                ),
             )
         )
         return
@@ -2201,6 +2328,97 @@ def _discover_kinetics(
                     identities = ()
                 state.record_connector_call()
                 state.record_query(identity, display_text=f"OED search: EC {ec_number}")
+                found_any = found_any or bool(identities)
+                for kinetic_identity in identities:
+                    try:
+                        persist_kinetic_measurement(kinetic_identity, session=session)
+                    except (TypeError, ValueError) as exc:  # pragma: no cover -- defensive
+                        raise CurationExecutionError(
+                            f"failed to persist kinetic measurement for EC {ec_number}: {exc}"
+                        ) from exc
+
+        if connectors.brenda is not None:
+            identity = query_identity(
+                connector=SourceType.BRENDA,
+                action="discover_kinetics",
+                ec_number=ec_number,
+                protein_id=str(protein_id),
+            )
+            if not state.has_run_query(identity):
+                attempted_sources.append(SourceType.BRENDA)
+                try:
+                    brenda_result = strategies.discover_kinetics_brenda(
+                        connectors.brenda,
+                        ec_number,
+                        organism=organism_text,
+                        protein_id=protein_id,
+                        organism_id=organism_id,
+                        resolve_publication=_resolve_publication_for_pmid,
+                        resolve_substrate=_resolve_substrate_for_brenda_measurement,
+                    )
+                except ConnectorError as exc:
+                    state.warn(f"BRENDA kinetics discovery failed for EC {ec_number}: {exc}")
+                    identities = ()
+                else:
+                    identities = brenda_result.identities
+                    # Agent 1.x Increment C.9: one failed kinetic SOAP method (e.g. a
+                    # confirmed authentication failure, or a malformed response for one
+                    # specific method) is disclosed, never silently dropped, and never
+                    # allowed to block the other methods (already reflected in
+                    # `identities`) queried for the same EC number.
+                    for skipped in brenda_result.skipped_methods:
+                        state.warn(
+                            f"BRENDA {skipped.method} for EC {ec_number} failed and was "
+                            f"skipped -- other BRENDA methods for the same EC number were "
+                            f"still attempted: {skipped.reason}"
+                        )
+                state.record_connector_call()
+                state.record_query(identity, display_text=f"BRENDA kinetics: EC {ec_number}")
+                found_any = found_any or bool(identities)
+                for kinetic_identity in identities:
+                    try:
+                        persist_kinetic_measurement(kinetic_identity, session=session)
+                    except (TypeError, ValueError) as exc:  # pragma: no cover -- defensive
+                        raise CurationExecutionError(
+                            f"failed to persist kinetic measurement for EC {ec_number}: {exc}"
+                        ) from exc
+
+        if connectors.gotenzymes is not None and gotenzymes_organism_code is not None:
+            identity = query_identity(
+                connector=SourceType.GOTENZYMES,
+                action="discover_kinetics",
+                ec_number=ec_number,
+                protein_id=str(protein_id),
+            )
+            if not state.has_run_query(identity):
+                attempted_sources.append(SourceType.GOTENZYMES)
+                try:
+                    gotenzymes_result = strategies.discover_kinetics_gotenzymes(
+                        connectors.gotenzymes,
+                        ec_number,
+                        organism_kegg_code=gotenzymes_organism_code,
+                        protein_id=protein_id,
+                        organism_id=organism_id,
+                        resolve_protein_for_gene=_resolve_protein_for_gotenzymes_gene,
+                        resolve_substrate=_resolve_substrate_for_gotenzymes_compound,
+                    )
+                except ConnectorError as exc:
+                    state.warn(f"GotEnzymes2 kinetics discovery failed for EC {ec_number}: {exc}")
+                    identities = ()
+                else:
+                    identities = gotenzymes_result.identities
+                    # Agent 1.x Increment C.11: a record whose own gene does not resolve,
+                    # via GotEnzymes2's own UniProt cross-reference, to this exact protein
+                    # (e.g. a paralog independently sharing the same EC number) is
+                    # disclosed here, never silently dropped and never attached to the
+                    # wrong protein.
+                    for skipped in gotenzymes_result.skipped_records:
+                        state.warn(
+                            f"GotEnzymes2 gene {skipped.gene} for EC {ec_number} was not "
+                            f"attributed to protein {protein_id}: {skipped.reason}"
+                        )
+                state.record_connector_call()
+                state.record_query(identity, display_text=f"GotEnzymes2 kinetics: EC {ec_number}")
                 found_any = found_any or bool(identities)
                 for kinetic_identity in identities:
                     try:

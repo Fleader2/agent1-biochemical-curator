@@ -267,6 +267,57 @@ def test_brenda_parameter_units_preserved() -> None:
     assert ph[0].unit is None  # pH is dimensionless -- no unit is correct, not missing data
 
 
+# --- Sentinel "no reported value" (Agent 1.x Increment C.9, confirmed live with a real
+# registered account against real sce00061 EC numbers) --------------------------------
+
+
+def test_brenda_no_value_sentinel_is_treated_as_no_value() -> None:
+    """BRENDA's literal ``"-999"`` value/value-maximum sentinel (confirmed live, e.g. EC
+    6.4.1.2's own real Ki records: ``["-999", "0.0049", "0.5"]``) is never parsed as a
+    real, physically-impossible negative kinetic parameter."""
+    measurements = normalize_kinetic_records(
+        [{"ecNumber": "6.4.1.2", "kiValue": "-999", "inhibitor": "more"}], method="getKiValue"
+    )
+
+    assert len(measurements) == 1
+    assert measurements[0].parameter_value is None
+
+
+def test_brenda_no_value_sentinel_applies_to_value_maximum_too() -> None:
+    measurements = normalize_kinetic_records(
+        [{"ecNumber": "1.1.1.1", "kmValue": "0.5", "kmValueMaximum": "-999"}],
+        method="getKmValue",
+    )
+
+    assert measurements[0].parameter_value == "0.5"
+    assert measurements[0].parameter_value_maximum is None
+
+
+def test_brenda_no_value_sentinel_does_not_affect_a_genuine_real_value() -> None:
+    """A real value in the same batch as a sentinel record is completely unaffected."""
+    measurements = normalize_kinetic_records(
+        [
+            {"ecNumber": "6.4.1.2", "kiValue": "-999", "inhibitor": "more"},
+            {"ecNumber": "6.4.1.2", "kiValue": "0.0049", "inhibitor": "citrate"},
+        ],
+        method="getKiValue",
+    )
+
+    assert [m.parameter_value for m in measurements] == [None, "0.0049"]
+
+
+def test_brenda_no_value_sentinel_record_never_reaches_a_persistable_identity() -> None:
+    """kinetic_identity_from_brenda already returns None for a blank parameter_value --
+    this confirms the sentinel is treated identically, end to end, never persisted."""
+    from app.normalization.kinetic_measurement import kinetic_identity_from_brenda
+
+    (measurement,) = normalize_kinetic_records(
+        [{"ecNumber": "6.4.1.2", "kiValue": "-999", "inhibitor": "more"}], method="getKiValue"
+    )
+
+    assert kinetic_identity_from_brenda(measurement) is None
+
+
 def test_brenda_multiple_measurements_preserved() -> None:
     """Multiple BRENDA records for the same EC number stay separate, never merged/averaged."""
     measurements = normalize_kinetic_records(

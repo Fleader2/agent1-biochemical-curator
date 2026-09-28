@@ -105,6 +105,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.connectors.brenda import BrendaKineticMeasurement
+from app.connectors.gotenzymes import GotEnzymesPrediction, gotenzymes_prediction_source_id
 from app.connectors.open_enzyme_database import OedKineticParameter
 from app.connectors.sabiork import SabioKineticParameter, SabioKineticRecord
 from app.models.enums import SourceType
@@ -427,10 +428,74 @@ def kinetic_identity_from_oed(
     )
 
 
+def kinetic_identity_from_gotenzymes(
+    prediction: GotEnzymesPrediction,
+    *,
+    reaction_id: UUID | None = None,
+    protein_id: UUID | None = None,
+    complex_id: UUID | None = None,
+    substrate_id: UUID | None = None,
+    organism_id: UUID | None = None,
+) -> KineticMeasurementIdentity:
+    """Pure adapter: one GotEnzymes2 AI-predicted parameter -> a source-neutral identity
+    (Agent 1.x Increment C.11).
+
+    Unlike every other adapter in this module, never returns ``None``:
+    ``app.connectors.gotenzymes.normalize_enzymes_record`` already filters out every
+    ``null`` parameter value before a ``GotEnzymesPrediction`` is ever constructed, so
+    ``parameter_value`` here is always a real, present number.
+
+    **Never carries a ``publication_id``** -- GotEnzymes2 predictions have no associated
+    literature reference at all (they are model outputs, not literature-derived
+    measurements); this field is not merely unresolved here, it categorically does not
+    apply, and is never populated by a future increment's publication-resolution closure
+    the way SABIO-RK's/BRENDA's own PMID fields are.
+
+    ``value`` is parsed from ``str(prediction.parameter_value)``, never
+    ``Decimal(prediction.parameter_value)`` directly: GotEnzymes2's own JSON API reports
+    native JSON numbers (unlike every other source integrated so far, which reports
+    numeric values as strings), and constructing a ``Decimal`` directly from a ``float``
+    would capture that float's own binary floating-point representation artifacts (e.g.
+    ``Decimal(3.9841)`` is not exactly ``3.9841``) -- exactly what this module's own
+    "Decimal only, never float" policy (module docstring) exists to prevent.
+    ``str()`` first reproduces Python's own shortest round-tripping decimal text for that
+    float, which ``Decimal()`` then parses exactly, consistent with every other source's
+    adapter parsing a reported string.
+
+    ``notes`` discloses the prediction's own model name (there is no per-record
+    confidence score or version to also preserve -- confirmed absent from the live API,
+    see ``app.connectors.gotenzymes``'s own module docstring) -- this is the one place
+    Agent 1.x Increment C.11's own "preserve the prediction source/model/version where
+    available" requirement is satisfied, since ``KineticMeasurement`` has no dedicated
+    column for it (the same "no column, fold into notes" precedent
+    ``app.persistence.kinetic_measurement._build_notes`` already established for BRENDA's
+    own reported range maximum).
+    """
+    return KineticMeasurementIdentity(
+        source=SourceType.GOTENZYMES,
+        source_id=gotenzymes_prediction_source_id(prediction),
+        parameter_type=map_parameter_type(prediction.parameter_type),
+        reported_parameter_type=prediction.parameter_type,
+        value=Decimal(str(prediction.parameter_value)),
+        unit=prediction.unit,
+        reaction_id=reaction_id,
+        protein_id=protein_id,
+        complex_id=complex_id,
+        substrate_id=substrate_id,
+        organism_id=organism_id,
+        publication_id=None,
+        notes=(
+            f"AI-predicted by GotEnzymes2 (model: {prediction.model}) -- never a curated "
+            "experimental measurement."
+        ),
+    )
+
+
 __all__ = [
     "KineticMeasurementIdentity",
     "KineticParameterType",
     "kinetic_identity_from_brenda",
+    "kinetic_identity_from_gotenzymes",
     "kinetic_identity_from_oed",
     "kinetic_identity_from_sabiork",
     "map_parameter_type",

@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     credential is required by OED's public API; no default is supplied here,
     matching ``kegg_base_url``/``sgd_base_url``/``uniprot_base_url``."""
 
+    gotenzymes_base_url: str | None = None
+    """GotEnzymes2 (Metabolic Atlas) REST API base URL (Agent 1.x Increment
+    C.11). No credential is required by its public API; no default is
+    supplied here, matching every other ``*_base_url`` setting above."""
+
     @property
     def sqlalchemy_url(self) -> str:
         """Database URL with an explicit driver.

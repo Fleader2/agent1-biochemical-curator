@@ -33,6 +33,8 @@ from app.pathway_curation.types import (
     PathwayCurationRequest,
 )
 from tests.pathway_curation.fakes import (
+    FakeBrendaConnector,
+    FakeGotEnzymesConnector,
     FakeKeggConnector,
     FakeKgmlEntrySpec,
     FakeOedConnector,
@@ -40,6 +42,9 @@ from tests.pathway_curation.fakes import (
     FakeSabiorkConnector,
     FakeSgdConnector,
     FakeUniProtConnector,
+    make_brenda_measurement,
+    make_gotenzymes_cross_references,
+    make_gotenzymes_record,
     make_kegg_compound,
     make_kegg_reaction,
     make_oed_row,
@@ -115,6 +120,44 @@ class _RaisingSabiorkConnector(FakeSabiorkConnector):
 
     def search(self, query: str, *, organism: str | None = None):
         raise ConnectorError("SABIO-RK is unreachable in this test")
+
+
+@dataclass
+class _RaisingBrendaConnector(FakeBrendaConnector):
+    """A ``FakeBrendaConnector`` every one of whose seven kinetic methods fails -- the
+    real-world shape of a confirmed BRENDA authentication failure (Agent 1.x Increment
+    C.9): every call authenticates independently, so every method fails identically."""
+
+    def fetch_km(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA rejected the configured credentials")
+
+    def fetch_ki(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA rejected the configured credentials")
+
+    def fetch_turnover_number(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA rejected the configured credentials")
+
+    def fetch_kcat_km(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA rejected the configured credentials")
+
+    def fetch_ph_optimum(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA rejected the configured credentials")
+
+    def fetch_temperature_optimum(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA rejected the configured credentials")
+
+    def fetch_specific_activity(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA rejected the configured credentials")
+
+
+@dataclass
+class _KmOnlyRaisingBrendaConnector(FakeBrendaConnector):
+    """A ``FakeBrendaConnector`` whose ``fetch_km`` alone fails -- the other six methods
+    still run normally, exercising per-method isolation (Agent 1.x Increment C.9,
+    mirroring ``discover_kinetics_sabiork``'s own record-level isolation, Increment C.5)."""
+
+    def fetch_km(self, ec_number: str, *, organism: str | None = None):
+        raise ConnectorError("BRENDA getKmValue failed in this test")
 
 
 # --- One-reaction / linear / branched pathway discovery ----------------------------------------
@@ -995,6 +1038,759 @@ def test_sabiork_failure_does_not_block_oed_kinetics(db_session: Session) -> Non
     assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
     assert result.agent1_knowledge_package.kinetic_measurements[0].source is SourceType.OED
     assert result.warnings
+
+
+def _acc1_kegg_sgd_uniprot() -> tuple[FakeKeggConnector, FakeSgdConnector, FakeUniProtConnector]:
+    kegg = _kegg_with_reactions(("R00742",))
+    sgd = FakeSgdConnector(
+        loci={
+            "ACC1": make_sgd_locus(
+                sgd_id="S000000002", systematic_name="YNR016C", standard_name="ACC1"
+            )
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "ACC1": make_uniprot_entry(
+                accession="Q00955",
+                recommended_name="Acetyl-CoA carboxylase",
+                gene_names=("ACC1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("6.4.1.2",),
+            )
+        }
+    )
+    return kegg, sgd, uniprot
+
+
+def test_brenda_wiring_persists_a_kinetic_measurement_when_sabiork_and_oed_are_absent(
+    db_session: Session,
+) -> None:
+    """Agent 1.x Increment C.9: BRENDA is wired into the same kinetics-discovery loop as
+    SABIO-RK/OED, and can contribute a measurement entirely on its own."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = FakeBrendaConnector(
+        km={
+            "6.4.1.2": [
+                make_brenda_measurement(
+                    parameter_type="Km", value="0.05", ec_number="6.4.1.2", substrate="acetyl-CoA"
+                )
+            ]
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
+    measurement = result.agent1_knowledge_package.kinetic_measurements[0]
+    assert measurement.source is SourceType.BRENDA
+    assert measurement.parameter_type == "KM"
+
+
+def test_brenda_queries_all_seven_kinetic_methods_for_one_ec_number(
+    db_session: Session,
+) -> None:
+    """Every one of BRENDA's seven confirmed kinetic SOAP methods is attempted per EC
+    number -- not just Km (Agent 1.x Increment C.9)."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = FakeBrendaConnector(
+        km={"6.4.1.2": [make_brenda_measurement(parameter_type="Km", value="0.05")]},
+        turnover_number={
+            "6.4.1.2": [make_brenda_measurement(parameter_type="kcat", value="3.2", unit="1/s")]
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-all-methods",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    called_methods = {call[0] for call in brenda.calls}
+    assert called_methods == {
+        "fetch_km",
+        "fetch_ki",
+        "fetch_turnover_number",
+        "fetch_kcat_km",
+        "fetch_ph_optimum",
+        "fetch_temperature_optimum",
+        "fetch_specific_activity",
+    }
+    parameter_types = {
+        m.parameter_type for m in result.agent1_knowledge_package.kinetic_measurements
+    }
+    assert parameter_types == {"KM", "KCAT"}
+
+
+def test_brenda_failure_does_not_block_sabiork_kinetics(db_session: Session) -> None:
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    raising_brenda = _RaisingBrendaConnector()
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1", ec_number="6.4.1.2", parameter_type="Km", value="1.0", unit="mM"
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-failure",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=raising_brenda, sabiork=sabiork
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
+    assert result.agent1_knowledge_package.kinetic_measurements[0].source is SourceType.SABIORK
+    assert result.warnings
+
+
+def test_one_failed_brenda_method_does_not_block_the_others(db_session: Session) -> None:
+    """Agent 1.x Increment C.9: a failure in one BRENDA kinetic method (e.g. ``getKmValue``)
+    never discards records another method (e.g. ``getKiValue``) for the same EC number
+    already retrieved -- mirrors ``discover_kinetics_sabiork``'s own per-record isolation."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = _KmOnlyRaisingBrendaConnector(
+        ki={"6.4.1.2": [make_brenda_measurement(parameter_type="Ki", value="0.2")]}
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-partial-method-failure",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
+    assert result.agent1_knowledge_package.kinetic_measurements[0].parameter_type == "KI"
+    assert result.warnings
+
+
+def test_brenda_record_with_multiple_literature_ids_leaves_publication_unresolved(
+    db_session: Session,
+) -> None:
+    """Agent 1.x Increment C.9: a BRENDA record naming more than one literature id never has
+    one arbitrarily chosen as its ``publication_id`` -- it stays unresolved rather than
+    misattributing the measurement to a single paper among several."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    pubmed = FakePubMedConnector(
+        articles={"11111111": make_pubmed_article(pmid="11111111", title="Paper A")}
+    )
+    brenda = FakeBrendaConnector(
+        km={
+            "6.4.1.2": [
+                make_brenda_measurement(
+                    parameter_type="Km", value="0.05", literature_ids=("11111111", "22222222")
+                )
+            ]
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-multi-pub",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda, pubmed=pubmed
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 1
+    assert result.agent1_knowledge_package.kinetic_measurements[0].publication_id is None
+
+
+# --- BRENDA ligand-to-compound resolution (Agent 1.x Increment C.10) ---------------------------
+
+
+def test_brenda_km_ligand_resolves_to_existing_compound_and_survives_handoff(
+    db_session: Session,
+) -> None:
+    """Real, live-shaped scenario: BRENDA reports 'ATP' (exact case match to the curated
+    compound); the resulting substrate_id survives all the way into the curated handoff
+    view, and no new Compound row is created."""
+    existing = Compound(canonical_name="ATP")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = FakeBrendaConnector(
+        km={
+            "6.4.1.2": [
+                make_brenda_measurement(parameter_type="Km", value="0.05", substrate="ATP")
+            ]
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-c10-atp",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 1
+    assert measurements[0].substrate_id == existing.id
+
+    view_measurements = result.curated_knowledge_view.kinetic_measurements
+    assert len(view_measurements) == 1
+    assert view_measurements[0].substrate_id == existing.id
+
+    assert db_session.query(Compound).count() == 1  # never created a new one
+
+
+def test_brenda_ligand_case_insensitive_match_resolves(db_session: Session) -> None:
+    """Real, live data: BRENDA reports 'malonyl-CoA' (lowercase m); the curated compound is
+    'Malonyl-CoA'. Case-only difference resolves via conservative normalization."""
+    existing = Compound(canonical_name="Malonyl-CoA")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = FakeBrendaConnector(
+        km={
+            "6.4.1.2": [
+                make_brenda_measurement(parameter_type="Km", value="0.075", substrate="malonyl-CoA")
+            ]
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-c10-case",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    assert result.agent1_knowledge_package.kinetic_measurements[0].substrate_id == existing.id
+
+
+def test_brenda_ligand_never_matches_by_substring(db_session: Session) -> None:
+    """The central guarantee: a real, curated 'CoA' compound must never absorb a BRENDA
+    'octanoyl-CoA' record merely because 'CoA' is a substring of it."""
+    coa = Compound(canonical_name="CoA")
+    db_session.add(coa)
+    db_session.flush()
+
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = FakeBrendaConnector(
+        km={
+            "6.4.1.2": [
+                make_brenda_measurement(
+                    parameter_type="Km", value="0.13", substrate="octanoyl-CoA"
+                )
+            ]
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-c10-no-substring",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    assert result.agent1_knowledge_package.kinetic_measurements[0].substrate_id is None
+    assert db_session.query(Compound).count() == 1  # never created "octanoyl-CoA" either
+
+
+def test_brenda_ligand_ambiguous_match_leaves_unresolved_and_warns(db_session: Session) -> None:
+    first = Compound(canonical_name="Generic Substrate")
+    second = Compound(canonical_name="Generic Substrate")
+    db_session.add_all([first, second])
+    db_session.flush()
+
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = FakeBrendaConnector(
+        km={
+            "6.4.1.2": [
+                make_brenda_measurement(
+                    parameter_type="Km", value="0.2", substrate="Generic Substrate"
+                )
+            ]
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-c10-ambiguous",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    assert result.agent1_knowledge_package.kinetic_measurements[0].substrate_id is None
+    assert result.warnings
+
+
+def test_brenda_ph_optimum_never_gets_a_ligand_context(db_session: Session) -> None:
+    """pH optimum carries no substrate/inhibitor field at all -- never a compound attached,
+    regardless of what compounds exist."""
+    existing = Compound(canonical_name="ATP")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    brenda = FakeBrendaConnector(
+        ph_optimum={
+            "6.4.1.2": [
+                make_brenda_measurement(parameter_type="pH optimum", value="7.5", unit=None)
+            ]
+        }
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-brenda-c10-ph",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+    )
+
+    assert result.agent1_knowledge_package.kinetic_measurements[0].substrate_id is None
+
+
+def test_brenda_ligand_repeated_execution_does_not_duplicate_or_change_resolution(
+    db_session: Session,
+) -> None:
+    """Idempotent: re-running the identical BRENDA discovery against the same existing
+    compound reuses the same measurement row and the same resolved substrate_id."""
+    existing = Compound(canonical_name="ATP")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+
+    def _run():
+        brenda = FakeBrendaConnector(
+            km={
+                "6.4.1.2": [
+                    make_brenda_measurement(parameter_type="Km", value="0.05", substrate="ATP")
+                ]
+            }
+        )
+        return execute_pathway_curation(
+            _request(
+                request_id="req-brenda-c10-idempotent",
+                seed_entity_texts=("ACC1",),
+                include_publications=False,
+                include_kinetics=True,
+            ),
+            session=db_session,
+            connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, brenda=brenda),
+        )
+
+    first = _run()
+    second = _run()
+
+    assert len(first.agent1_knowledge_package.kinetic_measurements) == 1
+    assert len(second.agent1_knowledge_package.kinetic_measurements) == 1
+    assert (
+        first.agent1_knowledge_package.kinetic_measurements[0].id
+        == second.agent1_knowledge_package.kinetic_measurements[0].id
+    )
+    assert second.agent1_knowledge_package.kinetic_measurements[0].substrate_id == existing.id
+
+
+# --- GotEnzymes2 AI-predicted kinetics (Agent 1.x Increment C.11) ------------------------------
+
+
+def test_gotenzymes_wiring_persists_a_measurement_for_the_correctly_resolved_protein(
+    db_session: Session,
+) -> None:
+    """Real-shaped scenario: GotEnzymes2 reports a prediction for the real ACC1 gene
+    (YNR016C), whose own UniProt cross-reference (Q00955) matches the real, already-
+    resolved ACC1 protein exactly."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YNR016C",
+                    organism="sce",
+                    ec_number="6.4.1.2",
+                    reaction_id="R00742",
+                    compound="C00024",
+                    kcat_value=3.9841,
+                    km_value=0.043,
+                    kcat_km_value=72.14,
+                )
+            ]
+        },
+        cross_references_by_gene={
+            "YNR016C": make_gotenzymes_cross_references(gene="YNR016C", uniprot_ids=("Q00955",))
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-acc1",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+            gotenzymes_organism_code="sce",
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    measurements = result.agent1_knowledge_package.kinetic_measurements
+    assert len(measurements) == 3  # kcat, Km, kcat/Km
+    assert {m.source for m in measurements} == {SourceType.GOTENZYMES}
+    assert {m.parameter_type for m in measurements} == {"KCAT", "KM", "KCAT_OVER_KM"}
+
+
+def test_gotenzymes_no_uniprot_cross_reference_leaves_prediction_unattached(
+    db_session: Session,
+) -> None:
+    """No UniProt cross-reference at all for the reported gene -- protein identity cannot
+    be confirmed, so the prediction is never attached (Increment C.11 instructions, §3)."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YNR016C", organism="sce", ec_number="6.4.1.2", kcat_value=3.9841
+                )
+            ]
+        },
+        cross_references_by_gene={},  # no cross-reference registered at all
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-no-xref",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+            gotenzymes_organism_code="sce",
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 0
+
+
+def test_gotenzymes_ambiguous_uniprot_cross_reference_leaves_prediction_unattached(
+    db_session: Session,
+) -> None:
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YNR016C", organism="sce", ec_number="6.4.1.2", kcat_value=3.9841
+                )
+            ]
+        },
+        cross_references_by_gene={
+            "YNR016C": make_gotenzymes_cross_references(
+                gene="YNR016C", uniprot_ids=("Q00955", "P99999")
+            )
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-ambiguous-xref",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+            gotenzymes_organism_code="sce",
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 0
+    assert result.warnings
+
+
+def test_gotenzymes_gene_resolving_to_a_different_protein_is_never_attached(
+    db_session: Session,
+) -> None:
+    """A paralog independently sharing the same EC number, whose own UniProt id does not
+    match the protein this search was scoped to, is never attributed to it."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YMR190C",  # a different, real HFA1-like gene -- not ACC1
+                    organism="sce",
+                    ec_number="6.4.1.2",
+                    kcat_value=1.0,
+                )
+            ]
+        },
+        cross_references_by_gene={
+            "YMR190C": make_gotenzymes_cross_references(gene="YMR190C", uniprot_ids=("P32874",))
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-wrong-protein",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+            gotenzymes_organism_code="sce",
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 0
+    assert result.warnings
+
+
+def test_gotenzymes_substrate_resolves_via_structured_kegg_compound_id(
+    db_session: Session,
+) -> None:
+    """GotEnzymes2 reports a real, structured KEGG compound id -- resolved via the
+    existing, unmodified CompoundLookup.by_kegg_compound_id, never a name guess."""
+    existing = Compound(canonical_name="Acetyl-CoA", kegg_compound_id="C00024")
+    db_session.add(existing)
+    db_session.flush()
+
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YNR016C",
+                    organism="sce",
+                    ec_number="6.4.1.2",
+                    compound="C00024",
+                    km_value=0.043,
+                )
+            ]
+        },
+        cross_references_by_gene={
+            "YNR016C": make_gotenzymes_cross_references(gene="YNR016C", uniprot_ids=("Q00955",))
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-substrate",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+            gotenzymes_organism_code="sce",
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    (measurement,) = result.agent1_knowledge_package.kinetic_measurements
+    assert measurement.substrate_id == existing.id
+    assert db_session.query(Compound).count() == 1  # never created
+
+
+def test_gotenzymes_prediction_never_labeled_experimental(db_session: Session) -> None:
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YNR016C", organism="sce", ec_number="6.4.1.2", kcat_value=3.9841
+                )
+            ]
+        },
+        cross_references_by_gene={
+            "YNR016C": make_gotenzymes_cross_references(gene="YNR016C", uniprot_ids=("Q00955",))
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-never-experimental",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+            gotenzymes_organism_code="sce",
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    (measurement,) = result.agent1_knowledge_package.kinetic_measurements
+    assert measurement.source is SourceType.GOTENZYMES
+    assert measurement.source is not SourceType.SABIORK
+    assert measurement.source is not SourceType.BRENDA
+    assert "AI-predicted" in (measurement.notes or "")
+
+
+def test_gotenzymes_prediction_survives_handoff(db_session: Session) -> None:
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YNR016C", organism="sce", ec_number="6.4.1.2", kcat_value=3.9841
+                )
+            ]
+        },
+        cross_references_by_gene={
+            "YNR016C": make_gotenzymes_cross_references(gene="YNR016C", uniprot_ids=("Q00955",))
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-handoff",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+            gotenzymes_organism_code="sce",
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    (view_measurement,) = result.curated_knowledge_view.kinetic_measurements
+    assert view_measurement.source == "GOTENZYMES"
+    assert view_measurement.parameter_type == "KCAT"
+
+
+def test_gotenzymes_repeated_execution_does_not_duplicate(db_session: Session) -> None:
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+
+    def _run():
+        gotenzymes = FakeGotEnzymesConnector(
+            records_by_ec={
+                "6.4.1.2": [
+                    make_gotenzymes_record(
+                        gene="YNR016C", organism="sce", ec_number="6.4.1.2", kcat_value=3.9841
+                    )
+                ]
+            },
+            cross_references_by_gene={
+                "YNR016C": make_gotenzymes_cross_references(
+                    gene="YNR016C", uniprot_ids=("Q00955",)
+                )
+            },
+        )
+        return execute_pathway_curation(
+            _request(
+                request_id="req-gotenzymes-idempotent",
+                seed_entity_texts=("ACC1",),
+                include_publications=False,
+                include_kinetics=True,
+                gotenzymes_organism_code="sce",
+            ),
+            session=db_session,
+            connectors=PathwayConnectorBundle(
+                kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+            ),
+        )
+
+    first = _run()
+    second = _run()
+
+    assert len(first.agent1_knowledge_package.kinetic_measurements) == 1
+    assert len(second.agent1_knowledge_package.kinetic_measurements) == 1
+    assert (
+        first.agent1_knowledge_package.kinetic_measurements[0].id
+        == second.agent1_knowledge_package.kinetic_measurements[0].id
+    )
+
+
+def test_gotenzymes_without_organism_code_never_attempted(db_session: Session) -> None:
+    """No gotenzymes_organism_code supplied -- GotEnzymes2 simply cannot contribute, never
+    an error, exactly like an unconfigured connector."""
+    kegg, sgd, uniprot = _acc1_kegg_sgd_uniprot()
+    gotenzymes = FakeGotEnzymesConnector(
+        records_by_ec={
+            "6.4.1.2": [
+                make_gotenzymes_record(
+                    gene="YNR016C", organism="sce", ec_number="6.4.1.2", kcat_value=3.9841
+                )
+            ]
+        },
+        cross_references_by_gene={
+            "YNR016C": make_gotenzymes_cross_references(gene="YNR016C", uniprot_ids=("Q00955",))
+        },
+    )
+
+    result = execute_pathway_curation(
+        _request(
+            request_id="req-gotenzymes-no-organism-code",
+            seed_entity_texts=("ACC1",),
+            include_publications=False,
+            include_kinetics=True,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=kegg, sgd=sgd, uniprot=uniprot, gotenzymes=gotenzymes
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 0
+    assert gotenzymes.calls == []
 
 
 # --- Regulation/kinetics disclosure signals (Increment C pre-commit revision) -------------------

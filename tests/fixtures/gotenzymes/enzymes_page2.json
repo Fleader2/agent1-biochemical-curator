@@ -1,0 +1,18 @@
+{
+  "enzymes": [
+    {
+      "gene": "SYNTH1",
+      "organism": "sce",
+      "domain": "E",
+      "reaction_id": "R99991",
+      "ec_number": "9.9.9.1",
+      "compound": "C99993",
+      "kcat_values": null,
+      "km_values": 0.3,
+      "kcat_km_values": null,
+      "topt": 30.0,
+      "tm": 45.0
+    }
+  ],
+  "totalCount": "3"
+}

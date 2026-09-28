@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.connectors.brenda import BrendaKineticMeasurement
 from app.connectors.kegg import KeggCompoundRecord, KeggFlatFileRecord
 from app.connectors.sabiork import (
     SabioCompoundExternalIdentity,
@@ -27,12 +28,17 @@ from app.connectors.sabiork import (
 )
 from app.models.enums import SourceType
 from app.normalization.compound import (
+    BrendaLigandMatchMethod,
+    BrendaLigandResolutionStatus,
     CompoundCandidate,
     CompoundIdentity,
     CompoundLookup,
+    brenda_ligand_text,
     compound_identity_from_kegg,
     compound_identity_from_sabiork,
     normalize_compound,
+    resolve_brenda_ligand_to_compound,
+    structured_compound_identity_from_brenda_ligand,
 )
 from app.normalization.types import MatchMethod, NormalizationStatus
 
@@ -1157,3 +1163,223 @@ def test_compound_identity_from_sabiork_absent_compound_does_not_match() -> None
     result = normalize_compound(identity, lookup=lookup)
 
     assert result.status is not NormalizationStatus.MATCHED
+
+
+# --- BRENDA ligand-to-compound resolution (Agent 1.x Increment C.10) ---------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class FakeCompoundNameIndexLookup:
+    """In-memory ``CompoundNameIndexLookup``: fixed ``(id, name)`` pairs, no database."""
+
+    canonical_names: Sequence[tuple[UUID, str]] = ()
+    synonyms: Sequence[tuple[UUID, str]] = ()
+
+    def all_canonical_names(self) -> Sequence[tuple[UUID, str]]:
+        return self.canonical_names
+
+    def all_synonyms(self) -> Sequence[tuple[UUID, str]]:
+        return self.synonyms
+
+
+def test_brenda_ligand_exact_canonical_name_match_resolves() -> None:
+    atp_id = uuid4()
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((atp_id, "ATP"),))
+
+    resolution = resolve_brenda_ligand_to_compound("ATP", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.RESOLVED
+    assert resolution.matched_compound_id == atp_id
+    assert resolution.match_method is BrendaLigandMatchMethod.CANONICAL_NAME
+
+
+def test_brenda_ligand_case_and_whitespace_normalization() -> None:
+    """Real, live data: BRENDA reports 'malonyl-CoA' (lowercase m); the real curated compound
+    is 'Malonyl-CoA'. Surrounding whitespace is also conservatively normalized."""
+    compound_id = uuid4()
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((compound_id, "Malonyl-CoA"),))
+
+    resolution = resolve_brenda_ligand_to_compound("  malonyl-coa  ", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.RESOLVED
+    assert resolution.matched_compound_id == compound_id
+
+
+def test_brenda_ligand_safe_hyphen_variant_normalization() -> None:
+    """A Unicode en-dash/minus-sign variant of the same hyphenated name still matches --
+    never a different chemical claim, purely a character-encoding difference."""
+    compound_id = uuid4()
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((compound_id, "Palmitoyl-CoA"),))
+
+    en_dash = chr(0x2013)
+    resolution = resolve_brenda_ligand_to_compound(f"Palmitoyl{en_dash}CoA", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.RESOLVED
+    assert resolution.matched_compound_id == compound_id
+
+
+def test_brenda_ligand_exact_synonym_match_resolves() -> None:
+    compound_id = uuid4()
+    lookup = FakeCompoundNameIndexLookup(
+        canonical_names=((compound_id, "Coenzyme A"),),
+        synonyms=((compound_id, "CoA"),),
+    )
+
+    resolution = resolve_brenda_ligand_to_compound("CoA", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.RESOLVED
+    assert resolution.match_method is BrendaLigandMatchMethod.SYNONYM
+    assert resolution.matched_compound_id == compound_id
+
+
+def test_brenda_ligand_never_matches_by_substring_containment() -> None:
+    """The single most important guarantee this increment adds: 'CoA' (a real reactant of
+    several real pathway reactions) must never match 'octanoyl-CoA'/'acetyl-CoA' merely
+    because the shorter string is a literal substring of the longer one."""
+    coa_id = uuid4()
+    lookup = FakeCompoundNameIndexLookup(
+        canonical_names=(
+            (coa_id, "CoA"),
+            (uuid4(), "octanoyl-CoA"),
+            (uuid4(), "acetyl-CoA"),
+            (uuid4(), "palmitoyl-CoA"),
+        )
+    )
+
+    resolution = resolve_brenda_ligand_to_compound("CoA", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.RESOLVED
+    assert resolution.matched_compound_id == coa_id  # never one of the longer names
+
+
+def test_brenda_ligand_reverse_substring_direction_also_never_matches() -> None:
+    """The converse direction: a BRENDA ligand name that happens to *contain* an existing
+    compound's shorter name must not match that shorter compound either."""
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((uuid4(), "CoA"),))
+
+    resolution = resolve_brenda_ligand_to_compound("octanoyl-CoA", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.UNRESOLVED
+    assert resolution.matched_compound_id is None
+
+
+def test_brenda_ligand_zero_matches_is_unresolved() -> None:
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((uuid4(), "Something Else"),))
+
+    resolution = resolve_brenda_ligand_to_compound("oleate", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.UNRESOLVED
+    assert resolution.matched_compound_id is None
+
+
+def test_brenda_ligand_multiple_canonical_name_matches_is_ambiguous_never_first_picked() -> None:
+    first_id, second_id = uuid4(), uuid4()
+    lookup = FakeCompoundNameIndexLookup(
+        canonical_names=((first_id, "Generic Substrate"), (second_id, "Generic Substrate"))
+    )
+
+    resolution = resolve_brenda_ligand_to_compound("generic substrate", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.AMBIGUOUS
+    assert resolution.matched_compound_id is None
+    assert set(resolution.candidate_compound_ids) == {first_id, second_id}
+
+
+def test_brenda_ligand_ambiguous_name_never_falls_through_to_synonym() -> None:
+    """An ambiguous canonical-name result stops the hierarchy -- it never also tries
+    synonyms, even if a synonym match would otherwise have been unique."""
+    first_id, second_id, synonym_id = uuid4(), uuid4(), uuid4()
+    lookup = FakeCompoundNameIndexLookup(
+        canonical_names=((first_id, "X"), (second_id, "X"), (synonym_id, "Y")),
+        synonyms=((synonym_id, "X"),),
+    )
+
+    resolution = resolve_brenda_ligand_to_compound("X", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.AMBIGUOUS
+    assert set(resolution.candidate_compound_ids) == {first_id, second_id}
+
+
+def test_brenda_ligand_multiple_synonym_matches_is_ambiguous() -> None:
+    first_id, second_id = uuid4(), uuid4()
+    lookup = FakeCompoundNameIndexLookup(
+        synonyms=((first_id, "Shared Alias"), (second_id, "Shared Alias"))
+    )
+
+    resolution = resolve_brenda_ligand_to_compound("shared alias", lookup=lookup)
+
+    assert resolution.status is BrendaLigandResolutionStatus.AMBIGUOUS
+    assert set(resolution.candidate_compound_ids) == {first_id, second_id}
+
+
+def test_brenda_ligand_resolution_never_creates_only_reuses_existing() -> None:
+    """BrendaLigandResolution has no notion of creation at all -- confirmed structurally:
+    a resolved outcome's matched_compound_id is always one of the lookup's own existing ids,
+    never a freshly-minted one."""
+    existing_id = uuid4()
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((existing_id, "ATP"),))
+
+    resolution = resolve_brenda_ligand_to_compound("ATP", lookup=lookup)
+
+    assert resolution.matched_compound_id == existing_id
+    assert not hasattr(resolution, "created")
+
+
+def test_brenda_ligand_blank_or_none_ligand_text_returns_none_not_unresolved() -> None:
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((uuid4(), "ATP"),))
+
+    assert resolve_brenda_ligand_to_compound(None, lookup=lookup) is None
+    assert resolve_brenda_ligand_to_compound("   ", lookup=lookup) is None
+
+
+def test_brenda_ligand_raw_text_preserved_regardless_of_outcome() -> None:
+    lookup = FakeCompoundNameIndexLookup()
+
+    resolution = resolve_brenda_ligand_to_compound("  Some-Ligand  ", lookup=lookup)
+
+    assert resolution.raw_ligand_text == "  Some-Ligand  "
+
+
+def test_structured_compound_identity_from_brenda_ligand_always_none() -> None:
+    """No crosswalk exists in this repository between BRENDA's internal ligandStructureId
+    and any of Agent 1's own Level 1 compound identifiers -- confirmed, never guessed."""
+    assert structured_compound_identity_from_brenda_ligand("7") is None
+    assert structured_compound_identity_from_brenda_ligand(None) is None
+
+
+def _brenda_measurement(*, substrate: str | None = None, inhibitor: str | None = None):
+    return BrendaKineticMeasurement(
+        parameter_type="Km",
+        parameter_value="0.5",
+        parameter_value_maximum=None,
+        unit="mM",
+        ec_number="1.1.1.1",
+        organism="Saccharomyces cerevisiae",
+        substrate=substrate,
+        inhibitor=inhibitor,
+        commentary=None,
+        literature_ids=(),
+        raw={},
+    )
+
+
+def test_brenda_ligand_text_prefers_substrate_never_both() -> None:
+    km_record = _brenda_measurement(substrate="ATP", inhibitor=None)
+    ki_record = _brenda_measurement(substrate=None, inhibitor="pyrazole")
+    ph_record = _brenda_measurement(substrate=None, inhibitor=None)
+
+    assert brenda_ligand_text(km_record) == "ATP"
+    assert brenda_ligand_text(ki_record) == "pyrazole"
+    assert brenda_ligand_text(ph_record) is None
+
+
+def test_brenda_ligand_resolution_is_deterministic() -> None:
+    """Same input, same lookup -> identical resolution every time (idempotent decision-making,
+    mirrors persist_kinetic_measurement's own idempotent-by-source-id persistence)."""
+    compound_id = uuid4()
+    lookup = FakeCompoundNameIndexLookup(canonical_names=((compound_id, "ATP"),))
+
+    first = resolve_brenda_ligand_to_compound("ATP", lookup=lookup)
+    second = resolve_brenda_ligand_to_compound("ATP", lookup=lookup)
+
+    assert first == second

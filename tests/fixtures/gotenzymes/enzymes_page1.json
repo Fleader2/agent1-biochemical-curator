@@ -1,0 +1,31 @@
+{
+  "enzymes": [
+    {
+      "gene": "SYNTH1",
+      "organism": "sce",
+      "domain": "E",
+      "reaction_id": "R99991",
+      "ec_number": "9.9.9.1",
+      "compound": "C99991",
+      "kcat_values": 1.0,
+      "km_values": 0.1,
+      "kcat_km_values": 10.0,
+      "topt": 30.0,
+      "tm": 45.0
+    },
+    {
+      "gene": "SYNTH1",
+      "organism": "sce",
+      "domain": "E",
+      "reaction_id": "R99991",
+      "ec_number": "9.9.9.1",
+      "compound": "C99992",
+      "kcat_values": 2.0,
+      "km_values": null,
+      "kcat_km_values": null,
+      "topt": 30.0,
+      "tm": 45.0
+    }
+  ],
+  "totalCount": "3"
+}

@@ -53,7 +53,9 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.claim_generation.types import EntityKind
-from app.connectors.exceptions import ConnectorParseError
+from app.connectors.brenda import BrendaKineticMeasurement
+from app.connectors.exceptions import ConnectorError, ConnectorParseError
+from app.connectors.gotenzymes import GotEnzymesRecord
 from app.connectors.kegg import (
     KeggCompoundRecord,
     KeggFlatFileRecord,
@@ -80,12 +82,15 @@ from app.models.enums import SourceType
 from app.normalization.compartment import CompartmentLookup
 from app.normalization.compound import (
     CompoundLookup,
+    brenda_ligand_text,
     compound_identity_from_kegg,
     normalize_compound,
 )
 from app.normalization.gene import GeneLookup
 from app.normalization.kinetic_measurement import (
     KineticMeasurementIdentity,
+    kinetic_identity_from_brenda,
+    kinetic_identity_from_gotenzymes,
     kinetic_identity_from_oed,
     kinetic_identity_from_sabiork,
 )
@@ -131,11 +136,15 @@ __all__ = [
     "GENE_ANCHORED_CONFIRMED",
     "GENE_ANCHORED_CONFLICTING",
     "GENE_ANCHORED_INSUFFICIENT",
+    "BrendaKineticDiscoveryResult",
     "DirectCatalystEvidence",
+    "GotEnzymesKineticDiscoveryResult",
     "KeggPathwayCurationConnector",
     "KgmlCatalystContext",
     "ResolutionOutcome",
     "SabiorkKineticDiscoveryResult",
+    "SkippedBrendaMethod",
+    "SkippedGotEnzymesRecord",
     "SkippedSabiorkRecord",
     "associate_catalyst",
     "classify_and_persist_protein_candidates",
@@ -144,6 +153,8 @@ __all__ = [
     "discover_catalyst_candidates_for_one_ec",
     "discover_catalyst_context",
     "discover_gene_anchored_protein_candidates",
+    "discover_kinetics_brenda",
+    "discover_kinetics_gotenzymes",
     "discover_kinetics_oed",
     "discover_kinetics_sabiork",
     "discover_pathway",
@@ -1563,3 +1574,245 @@ def discover_kinetics_oed(
             if identity is not None:
                 identities.append(identity)
     return tuple(identities)
+
+
+# --- Kinetics (BRENDA) ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedBrendaMethod:
+    """One BRENDA kinetic SOAP method call (Agent 1.x Increment C.9) that failed for one EC
+    number. A ``ConnectorError`` from one method (e.g. ``getKiValue``) never discards records
+    another method (e.g. ``getKmValue``) for the same EC number already retrieved -- the same
+    per-call isolation principle ``discover_kinetics_sabiork`` established at record
+    granularity (Increment C.5), applied here at method granularity since BRENDA has no single
+    call that reports every parameter type at once."""
+
+    method: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class BrendaKineticDiscoveryResult:
+    """``discover_kinetics_brenda``'s own result: every successfully-parsed identity, plus
+    every kinetic SOAP method call that failed for this EC number. BRENDA's protocol
+    authenticates on every call (there is no separate connect step, per
+    ``app.connectors.brenda``'s own module docstring), so a confirmed
+    ``ConnectorAuthenticationError`` -- e.g. no valid account configured -- surfaces here
+    identically to any other per-method failure, once per attempted method, never raised."""
+
+    identities: tuple[KineticMeasurementIdentity, ...]
+    skipped_methods: tuple[SkippedBrendaMethod, ...]
+
+
+# Every kinetic-parameter method `app.connectors.brenda.BrendaConnector` exposes
+# (`_METHOD_SPECS`, confirmed against BRENDA's live WSDL). Deliberately excludes `search()`
+# (an EC-number-to-name lookup, not a kinetic record) and `fetch()` (an alias for
+# `fetch_km()` already covered by `"fetch_km"` below).
+_BRENDA_KINETIC_METHODS: tuple[str, ...] = (
+    "fetch_km",
+    "fetch_ki",
+    "fetch_turnover_number",
+    "fetch_kcat_km",
+    "fetch_ph_optimum",
+    "fetch_temperature_optimum",
+    "fetch_specific_activity",
+)
+
+
+def discover_kinetics_brenda(
+    connector,
+    ec_number: str,
+    *,
+    organism: str | None,
+    protein_id: UUID | None = None,
+    organism_id: UUID | None = None,
+    resolve_publication: Callable[[str], UUID | None] | None = None,
+    resolve_substrate: Callable[[BrendaKineticMeasurement], UUID | None] | None = None,
+) -> BrendaKineticDiscoveryResult:
+    """Query every one of BRENDA's seven confirmed kinetic SOAP methods for ``ec_number``
+    (Agent 1.x Increment C.9) and build one ``KineticMeasurementIdentity`` per reported
+    record (never persisted here -- mirrors ``discover_kinetics_sabiork``/
+    ``discover_kinetics_oed``: the caller/executor persists each one).
+    ``kinetic_identity_from_brenda`` returns ``None`` for a record with no reported point
+    value -- never invented, simply skipped, exactly like every other source's adapter.
+
+    **Compound-context resolution against already-curated compounds only** (Agent 1.x
+    Increment C.10, extending Increment C.9's own deliberately unresolved
+    ``KineticMeasurementIdentity.substrate_id``): ``resolve_substrate``, when supplied, is
+    called with the full ``BrendaKineticMeasurement`` record, but only when
+    ``app.normalization.compound.brenda_ligand_text(record)`` is not ``None`` -- a record with
+    neither a reported ``substrate`` nor an ``inhibitor`` (every real pH optimum/temperature
+    optimum/specific-activity record) never even asks the caller to resolve one (Increment
+    C.10 instructions, §4). This function never resolves a compound itself (no ``session``/
+    lookup here, by design -- the same separation already established for
+    ``resolve_publication``/``discover_kinetics_sabiork``'s own ``resolve_substrate``); the
+    caller's closure owns the actual name-matching policy
+    (``app.normalization.compound.resolve_brenda_ligand_to_compound``). When omitted
+    (``None``, the default), every measurement's ``substrate_id`` stays ``None``, exactly as
+    before this increment -- existing callers/tests need no change.
+
+    **Publication resolution is exact-PMID-only, exactly like SABIO-RK's own
+    ``resolve_publication``** -- but only when a record reports **exactly one** literature id.
+    BRENDA can report several independent literature references for a single record
+    (``BrendaKineticMeasurement.literature_ids``); arbitrarily picking one of several to stand
+    in as "the" publication would misattribute the measurement, so ``publication_id`` stays
+    unresolved whenever a record names zero or more than one literature id -- a disclosed
+    limitation of fitting BRENDA's one-to-many literature references into
+    ``KineticMeasurementIdentity``'s existing single ``publication_id`` field, not a new
+    schema change (Agent 1.x Increment C.9 instructions, §9: no redesign of already-validated
+    behavior).
+    """
+    identities: list[KineticMeasurementIdentity] = []
+    skipped_methods: list[SkippedBrendaMethod] = []
+    for method_name in _BRENDA_KINETIC_METHODS:
+        try:
+            records = getattr(connector, method_name)(ec_number, organism=organism)
+        except ConnectorError as exc:
+            skipped_methods.append(SkippedBrendaMethod(method=method_name, reason=str(exc)))
+            continue
+        for record in records:
+            publication_id = (
+                resolve_publication(record.literature_ids[0])
+                if resolve_publication is not None and len(record.literature_ids) == 1
+                else None
+            )
+            substrate_id = (
+                resolve_substrate(record)
+                if resolve_substrate is not None and brenda_ligand_text(record) is not None
+                else None
+            )
+            identity = kinetic_identity_from_brenda(
+                record,
+                protein_id=protein_id,
+                organism_id=organism_id,
+                publication_id=publication_id,
+                substrate_id=substrate_id,
+            )
+            if identity is not None:
+                identities.append(identity)
+    return BrendaKineticDiscoveryResult(
+        identities=tuple(identities), skipped_methods=tuple(skipped_methods)
+    )
+
+
+# --- Kinetics (GotEnzymes2 AI-predicted, Agent 1.x Increment C.11) ------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedGotEnzymesRecord:
+    """One GotEnzymes2 row (Agent 1.x Increment C.11) whose own reported gene did not
+    resolve, via GotEnzymes2's own UniProt cross-reference, to *this exact* protein --
+    e.g. a paralog independently sharing the same EC number. Never attached to the wrong
+    protein, never silently dropped without a trace."""
+
+    gene: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class GotEnzymesKineticDiscoveryResult:
+    """``discover_kinetics_gotenzymes``'s own result: every successfully-attributed
+    prediction, plus every record this EC-scoped search returned that did not attribute
+    to the specific protein being searched for."""
+
+    identities: tuple[KineticMeasurementIdentity, ...]
+    skipped_records: tuple[SkippedGotEnzymesRecord, ...]
+
+
+def discover_kinetics_gotenzymes(
+    connector,
+    ec_number: str,
+    *,
+    organism_kegg_code: str,
+    protein_id: UUID,
+    organism_id: UUID | None = None,
+    resolve_protein_for_gene: Callable[[str, str], UUID | None],
+    resolve_substrate: Callable[[str], UUID | None] | None = None,
+) -> GotEnzymesKineticDiscoveryResult:
+    """Search GotEnzymes2 for ``ec_number`` (organism-scoped) and build
+    ``KineticMeasurementIdentity`` records for every prediction that attributes, via exact
+    UniProt identity, to *this specific* ``protein_id`` (Agent 1.x Increment C.11) -- never
+    persisted here, mirrors every other kinetics discovery function in this module.
+
+    **Protein identity is the anchor, not the search filter alone.** GotEnzymes2's own
+    EC-scoped search can return rows for more than one gene sharing that EC number (a real
+    possibility this repository has already confirmed for other sources, e.g. FAS1/FAS2
+    sharing EC 2.3.1.86) -- unlike BRENDA/SABIO-RK, which carry no gene-level field at all
+    and so must trust the searching protein's own EC scoping alone, GotEnzymes2 reports a
+    real ``gene`` per row, letting this function verify it independently.
+    ``resolve_protein_for_gene`` (supplied by the caller -- no session/lookup here, by
+    design, the same separation ``resolve_publication``/``resolve_substrate`` already
+    establish throughout this module) is called with ``(record.gene, record.organism)``
+    and must return the already-resolved, unique Agent 1 protein UUID that gene's own
+    UniProt cross-reference identifies, or ``None`` if zero or more than one exists. A
+    record whose resolved protein does not equal ``protein_id`` is recorded in
+    ``skipped_records`` (never attached to the wrong protein) -- this is not a connector
+    failure, so it is disclosed distinctly from one.
+
+    A record whose own ``organism`` does not match ``organism_kegg_code`` is likewise
+    skipped -- defensive, since the search itself is already organism-filtered, but never
+    trusted blindly.
+
+    ``resolve_substrate``, when supplied, is called with the record's own real KEGG
+    ``compound`` id (never a free-text name -- GotEnzymes2 reports a structured identifier
+    directly, unlike BRENDA) only when ``record.compound`` is not ``None``, and must
+    return an already-resolved compound UUID or ``None``. Ambiguous/no-match substrate
+    identity never blocks the prediction itself from being attached (mirrors
+    ``discover_kinetics_sabiork``/``discover_kinetics_brenda``'s own identical policy) --
+    only unresolved *protein* identity does, per this increment's own instructions, §3:
+    "If protein or substrate identity is ambiguous, do not attach the prediction" read
+    together with every other adapter's own established "substrate context is always
+    best-effort, protein context is the load-bearing identity" precedent.
+    """
+    records = connector.search(ec_number=ec_number, organism=organism_kegg_code)
+    identities: list[KineticMeasurementIdentity] = []
+    skipped: list[SkippedGotEnzymesRecord] = []
+    resolved_gene_cache: dict[str, UUID | None] = {}
+
+    for record in records:
+        if not isinstance(record, GotEnzymesRecord):  # pragma: no cover -- defensive
+            continue
+        if record.organism != organism_kegg_code:
+            skipped.append(
+                SkippedGotEnzymesRecord(
+                    gene=record.gene,
+                    reason=f"organism {record.organism!r} does not match the requested "
+                    f"{organism_kegg_code!r}",
+                )
+            )
+            continue
+        if record.gene not in resolved_gene_cache:
+            resolved_gene_cache[record.gene] = resolve_protein_for_gene(
+                record.gene, record.organism
+            )
+        matched_protein_id = resolved_gene_cache[record.gene]
+        if matched_protein_id != protein_id:
+            skipped.append(
+                SkippedGotEnzymesRecord(
+                    gene=record.gene,
+                    reason=(
+                        f"gene {record.gene!r} resolved to protein {matched_protein_id!r}, "
+                        f"not the protein {protein_id!r} this search was scoped to"
+                    ),
+                )
+            )
+            continue
+
+        substrate_id = (
+            resolve_substrate(record.compound)
+            if resolve_substrate is not None and record.compound is not None
+            else None
+        )
+        for prediction in connector.normalize(record):
+            identity = kinetic_identity_from_gotenzymes(
+                prediction,
+                protein_id=protein_id,
+                organism_id=organism_id,
+                substrate_id=substrate_id,
+            )
+            identities.append(identity)
+
+    return GotEnzymesKineticDiscoveryResult(
+        identities=tuple(identities), skipped_records=tuple(skipped)
+    )

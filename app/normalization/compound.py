@@ -152,8 +152,11 @@ behavior exactly, not a hardcoded parameter-type exclusion.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -167,6 +170,7 @@ from app.normalization.identifiers import (
 from app.normalization.types import MatchMethod, NormalizationResult, NormalizationStatus
 
 if TYPE_CHECKING:
+    from app.connectors.brenda import BrendaKineticMeasurement
     from app.connectors.kegg import KeggCompoundRecord
     from app.connectors.sabiork import SabioKineticParameter, SabioKineticRecord
 
@@ -676,11 +680,287 @@ def compound_identity_from_sabiork(
     )
 
 
+# --- BRENDA ligand-to-compound resolution (Agent 1.x Increment C.10) ---------------------------
+#
+# A deliberately separate, narrower policy from ``normalize_compound`` above, not a variant of
+# it: ``normalize_compound`` answers "does this source's claim describe an existing compound,
+# or a new one Agent 1 should create" -- and, by this module's own Level 1/2/3 hierarchy, a
+# name/synonym-only claim (Level 3) can only ever be Level-3-candidate-generation, reported as
+# ``AMBIGUOUS`` even for a single candidate, because a bare name is never, by itself, strong
+# enough to justify *creating* or confidently identifying a brand-new entity across sources.
+#
+# BRENDA ligand resolution is a different, narrower question: "does this free-text ligand name
+# match *exactly one* compound Agent 1 has *already curated* for this specific pathway" --
+# never a decision about creating anything (Increment C.10 instructions, §2/§3: "Do not create
+# new compounds from BRENDA names"). Because creation is categorically off the table, an exact,
+# unique name/synonym match against an already-curated compound is safe to resolve outright
+# here, where it would not be safe to treat as ``MATCHED`` in the cross-source
+# identity-creation context ``normalize_compound`` serves. The two functions intentionally
+# reach different conclusions from a similar-looking input for this reason -- not an
+# inconsistency, a different question.
+#
+# Conservative, mechanical text normalization only (case, whitespace, Unicode form, and
+# hyphen/dash-variant unification) is applied before comparison, since the real, live BRENDA
+# data behind this increment differs from Agent 1's own curated ``canonical_name``/synonym
+# strings only in casing (e.g. real: BRENDA's ``"malonyl-CoA"`` vs. the curated
+# ``"Malonyl-CoA"``; BRENDA's ``"palmitoyl-CoA"`` vs. the curated ``"Palmitoyl-CoA"``) --
+# **never** substring, "contains," fuzzy, token-overlap, edit-distance, or biochemical-synonym
+# matching (Increment C.10 instructions, §2): ``"CoA"`` (the real reactant of several real
+# pathway reactions) must never match ``"octanoyl-CoA"``/``"acetyl-CoA"``/etc. merely because
+# the shorter string is a literal substring of the longer one -- confirmed by this increment's
+# own tests, which assert exactly this non-match on real data.
+
+
+class BrendaLigandMatchMethod(StrEnum):
+    """How a BRENDA ligand name resolved to an existing compound, or that it did not."""
+
+    CANONICAL_NAME = "CANONICAL_NAME"
+    SYNONYM = "SYNONYM"
+    NONE = "NONE"
+
+
+class BrendaLigandResolutionStatus(StrEnum):
+    """The outcome of one BRENDA ligand-to-compound resolution attempt.
+
+    Deliberately not ``app.normalization.types.NormalizationStatus``: ``NEW``/``CONFLICTED``
+    can never occur here (nothing is ever created, and there is no supplied structured
+    identifier to conflict against), so reusing that four-way status would carry two
+    permanently-dead branches. ``RESOLVED`` here corresponds to ``MATCHED`` there.
+    """
+
+    RESOLVED = "RESOLVED"
+    AMBIGUOUS = "AMBIGUOUS"
+    UNRESOLVED = "UNRESOLVED"
+
+
+@dataclass(frozen=True, slots=True)
+class BrendaLigandResolution:
+    """The outcome of resolving one BRENDA-reported ligand name against Agent 1's own,
+    already-curated compounds only -- never a decision to create one.
+
+    ``raw_ligand_text`` is BRENDA's own reported string, preserved verbatim regardless of
+    outcome (Increment C.10 instructions, §3: "Preserve the raw BRENDA ligand name regardless
+    of resolution outcome") -- callers needing it on the persisted record read it from here,
+    never by re-deriving it from ``matched_compound_id``.
+    """
+
+    raw_ligand_text: str
+    normalized_ligand_text: str
+    status: BrendaLigandResolutionStatus
+    matched_compound_id: UUID | None = None
+    match_method: BrendaLigandMatchMethod = BrendaLigandMatchMethod.NONE
+    candidate_compound_ids: tuple[UUID, ...] = ()
+    reason: str = ""
+
+
+@runtime_checkable
+class CompoundNameIndexLookup(Protocol):
+    """Read-only listing of every existing compound's own ``canonical_name`` and every
+    existing ``compound_synonym`` row, for exact *normalized* (never fuzzy) comparison in
+    Python -- something ``CompoundLookup.by_canonical_name``/``.by_synonym`` cannot express
+    directly, since those perform an exact, case-sensitive, literal-string database
+    comparison (confirmed against ``app.pathway_curation.lookups
+    .SqlAlchemyCompoundLookup``'s own real ``==`` queries). Used only by
+    ``resolve_brenda_ligand_to_compound`` -- every existing ``CompoundLookup`` consumer keeps
+    using its own exact, literal queries unchanged.
+    """
+
+    def all_canonical_names(self) -> Sequence[tuple[UUID, str]]:
+        """Every existing compound's ``(id, canonical_name)``, unfiltered."""
+        ...
+
+    def all_synonyms(self) -> Sequence[tuple[UUID, str]]:
+        """Every existing ``compound_synonym`` row's ``(compound_id, synonym)``, unfiltered."""
+        ...
+
+
+_HYPHEN_LIKE = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2212]")
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def _normalize_ligand_name(text: str) -> str:
+    """Conservative, mechanical text normalization only -- never biochemical inference.
+
+    In order: Unicode NFKC normalization (folds compatibility characters, e.g. full-width
+    forms, to their ordinary equivalents), Unicode dash/hyphen variants (en dash, em dash,
+    minus sign, non-breaking/figure hyphens) unified to the ASCII hyphen-minus, surrounding
+    whitespace stripped and internal whitespace runs collapsed to one space, then case-folded.
+    Never strips brackets, punctuation generally, or any substring -- doing so would risk
+    exactly the kind of accidental cross-compound collision (Increment C.10 instructions, §2)
+    this function exists to avoid.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = _HYPHEN_LIKE.sub("-", text)
+    text = _WHITESPACE_RUN.sub(" ", text.strip())
+    return text.casefold()
+
+
+def structured_compound_identity_from_brenda_ligand(
+    ligand_structure_id: str | None,
+) -> UUID | None:
+    """Always returns ``None`` -- BRENDA's own ``ligandStructureId`` field does not qualify
+    as a deterministically mappable structured identifier.
+
+    Confirmed this increment: ``ligandStructureId`` (present on every real Km/Ki/kcat/
+    kcat-over-Km record this repository has observed live, e.g. ``"7"`` for ATP, ``"72"`` for
+    malonyl-CoA) is BRENDA's own internal ligand-catalog id -- not a ChEBI, KEGG compound,
+    PubChem CID, MetaCyc, or InChIKey value, and no crosswalk table between BRENDA's internal
+    ids and any of those five exists anywhere in this repository. Treating an opaque internal
+    id as if it were one of Agent 1's own Level 1 identifiers would be exactly the kind of
+    unverified, invented mapping ``.cursor/rules/01-scientific-integrity.mdc`` forbids. This
+    function exists so that finding is a real, callable, testable decision (Increment C.10
+    instructions, §2, hierarchy step 1: "if available and deterministically mappable") -- not
+    a bare, unexplained absence -- mirroring
+    ``app.normalization.reaction_reversibility.reversibility_evidence_from_sabiork_kineticlaw``'s
+    identical "always None, with a real, tested reason" precedent. A future increment that
+    established a genuine BRENDA-ligand-id -> Level-1-identifier crosswalk (e.g. from a
+    BRENDA compound-download file, if one is ever integrated) would replace this function's
+    body -- never its signature or its callers' expectations.
+    """
+    return None
+
+
+def resolve_brenda_ligand_to_compound(
+    ligand_text: str | None,
+    *,
+    lookup: CompoundNameIndexLookup,
+    ligand_structure_id: str | None = None,
+) -> BrendaLigandResolution | None:
+    """Resolve one BRENDA-reported ligand (substrate/inhibitor) name against Agent 1's
+    already-curated compounds only (Agent 1.x Increment C.10). Never creates a compound.
+
+    Returns ``None`` -- not an ``UNRESOLVED`` resolution -- when ``ligand_text`` is itself
+    blank or absent: there is nothing to resolve, and a record with no reported ligand at all
+    (every real pH optimum/temperature optimum/specific-activity record observed live, and any
+    Km/Ki/kcat/kcat-over-Km record BRENDA happens to report with no substrate/inhibitor) must
+    never manufacture a disclosed-but-empty resolution attempt (Increment C.10 instructions,
+    §4: "Do not attach a compound to ... pH optimum; temperature optimum; ...").
+
+    Hierarchy, applied in strict order, each step attempted only if the previous step found
+    zero candidates (never merged, never falling back after an *ambiguous* result at an
+    earlier step -- an ambiguous canonical-name match stops here, it does not also try
+    synonyms):
+
+    1. ``structured_compound_identity_from_brenda_ligand`` -- always ``None`` today (see its
+       own docstring); included so a future crosswalk needs no change to this function's own
+       control flow, only to that one function's body.
+    2. Exact, normalized ``canonical_name`` match. Zero candidates falls through to step 3;
+       exactly one resolves; two or more is ``AMBIGUOUS`` and stops (step 3 is never tried).
+    3. Exact, normalized ``compound_synonym`` match (only reached when step 2 found zero).
+       Zero candidates is ``UNRESOLVED``; exactly one resolves; two or more is ``AMBIGUOUS``.
+
+    Never substring, "contains," fuzzy, token-overlap, or edit-distance matching at any step
+    -- every comparison is whole-string equality after ``_normalize_ligand_name``'s own
+    conservative, mechanical normalization only.
+    """
+    if ligand_text is None or not ligand_text.strip():
+        return None
+
+    normalized = _normalize_ligand_name(ligand_text)
+
+    structured_match = structured_compound_identity_from_brenda_ligand(ligand_structure_id)
+    if structured_match is not None:  # pragma: no cover -- always None today, see docstring
+        return BrendaLigandResolution(
+            raw_ligand_text=ligand_text,
+            normalized_ligand_text=normalized,
+            status=BrendaLigandResolutionStatus.RESOLVED,
+            matched_compound_id=structured_match,
+            match_method=BrendaLigandMatchMethod.CANONICAL_NAME,
+            reason="resolved via a structured BRENDA ligand identifier",
+        )
+
+    name_candidate_ids = tuple(
+        sorted(
+            {
+                compound_id
+                for compound_id, canonical_name in lookup.all_canonical_names()
+                if _normalize_ligand_name(canonical_name) == normalized
+            }
+        )
+    )
+    name_state = classify_candidates(name_candidate_ids)
+    if name_state is CandidateSetState.SINGLE_MATCH:
+        return BrendaLigandResolution(
+            raw_ligand_text=ligand_text,
+            normalized_ligand_text=normalized,
+            status=BrendaLigandResolutionStatus.RESOLVED,
+            matched_compound_id=name_candidate_ids[0],
+            match_method=BrendaLigandMatchMethod.CANONICAL_NAME,
+            reason="exact normalized canonical_name match against exactly one existing compound",
+        )
+    if name_state is CandidateSetState.AMBIGUOUS:
+        return BrendaLigandResolution(
+            raw_ligand_text=ligand_text,
+            normalized_ligand_text=normalized,
+            status=BrendaLigandResolutionStatus.AMBIGUOUS,
+            candidate_compound_ids=name_candidate_ids,
+            reason="the normalized ligand name matches more than one existing compound's "
+            "canonical_name",
+        )
+
+    synonym_candidate_ids = tuple(
+        sorted(
+            {
+                compound_id
+                for compound_id, synonym in lookup.all_synonyms()
+                if _normalize_ligand_name(synonym) == normalized
+            }
+        )
+    )
+    synonym_state = classify_candidates(synonym_candidate_ids)
+    if synonym_state is CandidateSetState.SINGLE_MATCH:
+        return BrendaLigandResolution(
+            raw_ligand_text=ligand_text,
+            normalized_ligand_text=normalized,
+            status=BrendaLigandResolutionStatus.RESOLVED,
+            matched_compound_id=synonym_candidate_ids[0],
+            match_method=BrendaLigandMatchMethod.SYNONYM,
+            reason="exact normalized synonym match against exactly one existing compound",
+        )
+    if synonym_state is CandidateSetState.AMBIGUOUS:
+        return BrendaLigandResolution(
+            raw_ligand_text=ligand_text,
+            normalized_ligand_text=normalized,
+            status=BrendaLigandResolutionStatus.AMBIGUOUS,
+            candidate_compound_ids=synonym_candidate_ids,
+            reason="the normalized ligand name matches more than one existing compound's "
+            "synonym",
+        )
+
+    return BrendaLigandResolution(
+        raw_ligand_text=ligand_text,
+        normalized_ligand_text=normalized,
+        status=BrendaLigandResolutionStatus.UNRESOLVED,
+        reason="no existing compound's canonical_name or synonym matches this ligand name, "
+        "after conservative normalization -- never created",
+    )
+
+
+def brenda_ligand_text(record: BrendaKineticMeasurement) -> str | None:
+    """The one ligand field a BRENDA kinetic record's own parameter type can carry, if any.
+
+    Exactly one of ``record.substrate``/``.inhibitor`` is ever non-``None`` on a real
+    ``BrendaKineticMeasurement`` (``app.connectors.brenda._METHOD_SPECS``'s own
+    ``qualifier_field``: ``"substrate"`` for Km/kcat/kcat-over-Km, ``"inhibitor"`` for Ki,
+    ``None`` for pH optimum/temperature optimum/specific activity) -- never both, and never a
+    field this module invents when the source itself reports neither (Increment C.10
+    instructions, §4).
+    """
+    return record.substrate if record.substrate is not None else record.inhibitor
+
+
 __all__ = [
+    "BrendaLigandMatchMethod",
+    "BrendaLigandResolution",
+    "BrendaLigandResolutionStatus",
     "CompoundCandidate",
     "CompoundIdentity",
     "CompoundLookup",
+    "CompoundNameIndexLookup",
+    "brenda_ligand_text",
     "compound_identity_from_kegg",
     "compound_identity_from_sabiork",
     "normalize_compound",
+    "resolve_brenda_ligand_to_compound",
+    "structured_compound_identity_from_brenda_ligand",
 ]

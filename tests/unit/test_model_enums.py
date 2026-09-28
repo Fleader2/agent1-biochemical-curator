@@ -90,6 +90,8 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
     # SABIORK/OED added in Agent 1.x Increment A (migration
     # 0013_kinetic_measurement_sources) -- see docs/02_database_schema.md's
     # "SourceType" section and docs/24_kinetic_data_curation_and_handoff.md.
+    # GOTENZYMES added in Agent 1.x Increment C.11 (migration
+    # 0016_gotenzymes_source) -- see that migration's own docstring.
     SourceType: frozenset(
         {
             "PUBMED",
@@ -105,6 +107,7 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
             "NCBI",
             "SABIORK",
             "OED",
+            "GOTENZYMES",
             "OTHER",
         }
     ),

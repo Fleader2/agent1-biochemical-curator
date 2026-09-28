@@ -1,0 +1,19 @@
+{
+    "info": {
+        "kegg": "YNR016C"
+    },
+    "crossReferences": {
+        "NCBI Protein": [
+            {
+                "id": "NP_014413",
+                "url": "https://identifiers.org/ncbiprotein:NP_014413"
+            }
+        ],
+        "UniProtKB": [
+            {
+                "id": "Q00955",
+                "url": "https://identifiers.org/uniprot:Q00955"
+            }
+        ]
+    }
+}

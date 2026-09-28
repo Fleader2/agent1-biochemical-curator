@@ -2104,7 +2104,434 @@ token, still resolves to `reversible=None`) -- the same "no behavior to
 track" bump criterion this file's own Increment 7 consistency-revision
 entry already established for an analogous case.
 
-## 54. Final architectural rule
+## 54. Increment C.9 — Expanded kinetic evidence retrieval from BRENDA and SGD
+
+Motivated by the real gap Pilot 2 Run 5/Run 6 exposed: 40 of Agent 2's 41
+declared parameters remain `PLACEHOLDER`. This increment audits exactly how
+much of that gap BRENDA and SGD can actually close today, using live,
+read-only inspection rather than assumption, and implements only the
+retrieval this inspection confirms is real.
+
+**BRENDA capability (confirmed, unchanged by this increment)**:
+`app.connectors.brenda.BrendaConnector` already exposes seven real,
+WSDL-confirmed kinetic SOAP methods (`fetch_km`/`fetch_ki`/
+`fetch_turnover_number`/`fetch_kcat_km`/`fetch_ph_optimum`/
+`fetch_temperature_optimum`/`fetch_specific_activity`) and
+`app.normalization.kinetic_measurement.kinetic_identity_from_brenda`
+already existed to map a result onto a persistable identity — but neither
+was ever wired into `app.pathway_curation`'s own kinetics-discovery loop
+(`executor._discover_kinetics`), which previously only tried SABIO-RK and
+Open Enzyme Database. **This environment has no BRENDA account
+configured** (`Settings.brenda_username`/`.brenda_password` both `None`) —
+BRENDA's SOAP interface authenticates on every call with no unauthenticated
+fallback, confirmed live this increment with one deliberately-invalid-
+credential request against the real server (HTTP 500, SOAP fault
+`faultcode=401`, `"Username or password is wrong, or account was not
+activated."` — identical to the fault Agent 1.x's original BRENDA
+connector work already documented). BRENDA's real structured kinetic
+capability is genuine; this specific environment cannot reach it.
+
+**SGD capability (confirmed live, 13/13 real `sce00061` proteins)**:
+`app.connectors.sgd.SgdConnector` exposes gene/locus metadata and GO
+annotations only — no Km/kcat/Vmax/Ki field exists anywhere in its schema
+(confirmed live: 26 real queries — one `fetch()` plus one
+`fetch_go_details()` per protein — returned zero records containing any
+kinetic-like field). All 13 real loci resolved successfully; 12 of 13
+carried at least one EC-number cross-reference as an alias (`HTD2`'s own
+partial EC, `4.2.1.-`, did not, live-confirmed); all 13 carried GO
+localization annotations. SGD's already-established role
+(`resolve_gene_via_sgd`, gene/protein identity resolution) already uses
+this capability; there is no numeric kinetic parameter to add.
+
+**Deliverable**: `app.pathway_curation.strategies.discover_kinetics_brenda`
+(new) queries all seven BRENDA kinetic methods per EC number, mirroring
+`discover_kinetics_oed`'s "no separate fetch step" shape but adding
+`discover_kinetics_sabiork`'s own per-call failure isolation one level up
+(one method's `ConnectorError` — including a confirmed
+`ConnectorAuthenticationError` — never discards another method's results
+for the same EC number, recorded via `SkippedBrendaMethod`). Wired into
+`executor._discover_kinetics` via a new `PathwayConnectorBundle.brenda`
+field, attempted independently of, and never blocking, SABIO-RK/OED. Two
+conservative attribution decisions, both disclosed in
+`discover_kinetics_brenda`'s own docstring: BRENDA's `substrate`/
+`inhibitor` fields are free-text names only (no structured compound
+identifier exists on any of the seven record types), so
+`KineticMeasurementIdentity.substrate_id` is always left `None` for a
+BRENDA-sourced record, consistent with this repository's "structured
+identifiers over names" policy; and a record naming more than one
+literature id never has one arbitrarily chosen as `publication_id` — it
+stays unresolved rather than misattributing the measurement to a single
+paper among several. `persist_kinetic_measurement`'s existing `(source,
+source_id)` deduplication (Increment A) required no change: BRENDA's own
+deterministic SHA-256 source-id computation already guarantees two
+independent records are never collapsed merely because their reported
+values are equal.
+
+**Real `sce00061` evaluation, first pass** (the same 13 real proteins/EC
+numbers Pilot 1/2 already resolved, from Pilot 2 Run 5's own saved
+gene/protein resolution table — no new Agent 1 curation run performed; the
+real curated data itself was unrelated-cleanup-truncated between Run 5 and
+this increment, see Agent 1.x Increment C.8's completion report): BRENDA
+contributed 0 records (no credentials configured in this environment at
+the time — 1 live confirmatory request, 0 retrieved); SGD contributed 0
+kinetic records (by design, confirmed live across all 13 proteins);
+SABIO-RK's own real baseline (14 measurements: 7 Km + 7 Vmax, 2 proteins, 3
+with compound context, 1 uniquely reaction-resolved downstream by Agent 2)
+is unchanged — this increment touched neither SABIO-RK code nor its
+persisted data.
+
+**A real BRENDA account was registered immediately afterward, same
+increment.** Retested live against the real `sce00061` EC numbers: BRENDA
+returned substantial real data (e.g. 7 real Km records for EC 6.4.1.2
+alone, organism-filtered to *Saccharomyces cerevisiae*, naming real
+substrates -- ATP, malonyl-CoA, CoA, oleate, NADPH, acetoacetyl-CoA, and
+several real fatty-acyl-CoA chain lengths for FAS -- each tied to a real
+literature id). This live retrieval also surfaced a genuine data-integrity
+finding the documentation gives no warning of: BRENDA reports the literal
+string `"-999"` for a kinetic value/value-maximum field with no actual
+reported number (confirmed repeatedly, e.g. EC 6.4.1.2's own real Ki
+records: `["-999", "0.0049", "0.5"]`), which `normalize_kinetic_records`
+would otherwise have parsed as a real, physically-impossible negative
+kinetic parameter and persisted as fabricated evidence. Fixed in
+`app.connectors.brenda` (`_NO_VALUE_SENTINEL`/
+`_none_if_blank_or_sentinel`, applied to both the value and value-maximum
+fields, all seven kinetic methods) before any real BRENDA record was
+persisted -- confirmed live, post-fix, that the sentinel now normalizes to
+`None` (dropped, exactly like a blank value) while every genuine real
+value in the same batch is unaffected. **The "Estimated Agent 2 placeholder
+parameters newly backed by usable evidence: 0" conclusion above reflected
+the credential-less environment only** and is superseded by the corrected
+pass below.
+
+**Real `sce00061` evaluation, corrected pass** (post sentinel fix, live,
+credentialed, connector-level only -- no persistence attempted; see
+"Known limitations" below for why): querying all seven BRENDA kinetic
+methods for each of the real pathway's 8 unique EC numbers, organism-
+filtered to *Saccharomyces cerevisiae*: 56 connector queries, 65 raw
+records returned, 7 correctly rejected as the `"-999"` no-value sentinel,
+**58 real, normalized kinetic measurements** (21 Km, 10 kcat, 2 Ki, 14
+specific activity, 8 temperature optimum, 3 pH optimum). 9 of the 13 real
+proteins (`ACC1`, `FAA1`-`FAA4`, `FAS1`, `FAS2`, `HFA1`, `OAR1`) now have
+at least one real BRENDA kinetic record -- up from 2 under the SABIO-RK-
+only baseline; `ETR1`, `CEM1`, `HTD2`, `MCT1` still have none from BRENDA
+for the real EC numbers/methods queried. All 58 measurements carry exactly
+one literature id -- 100% resolvable via the existing
+`resolve_publication_by_pmid` machinery, none hitting the multi-PMID
+unresolved case. Every substrate/inhibitor name remains a free-text label,
+never resolved to a `substrate_id` (policy, §4 above) -- but the real
+names themselves (ATP, CoA, malonyl-CoA, oleate, NADPH, acetoacetyl-CoA,
+and several real fatty-acyl-CoA chain lengths) are informative and
+preserved on each record.
+
+**Cross-referenced against Pilot 2 Run 6's real 40 `PLACEHOLDER` Agent 2
+parameters**, using only Agent 2's own existing, unmodified mapping (a
+parameter's `reaction_id` -> that reaction's own curated reactant
+compounds -> exact, case-insensitive name equality against a real BRENDA
+substrate, after stripping bracket qualifiers like `[acyl-carrier
+protein]`/`[acp]` -- never a fuzzy or partial-substring match, which a
+first attempt at this analysis showed produces false positives, e.g.
+"CoA" as a bare substring of "octanoyl-CoA": chemically a different
+compound, not a match): **3 of the 40 placeholders now have real,
+reactant-specific curated evidence**, all currently `MASS_ACTION`-assigned
+reactions (not a direct kcat/Km slot itself, but exactly the kind of
+evidence that could motivate Agent 2 reassigning one from a tentative
+mass-action default to a substrate-anchored Michaelis-Menten law, mirroring
+the precedent the real malonyl-CoA case already established):
+
+* `k_8419b4a4-...` (ACC1/HFA1's real acetyl-CoA-carboxylase reaction) --
+  real ATP Km (four values, wild-type and three mutants) and real ATP kcat
+  (four matching values), no competing anchor on either of the reaction's
+  other two reactants (acetyl-CoA, HCO3-). The cleanest single-reactant-
+  anchor case, structurally identical to the existing malonyl-CoA
+  precedent.
+* `k_0663d778-...` and `k_85590c8d-...` (two real FAA-family long-chain-
+  fatty-acid-CoA-ligase reactions) -- real ATP Km (0.0516 mM) and real CoA
+  Km (0.0183 mM), both from the same live yeast-specific record set,
+  **naming two different reactants of the same reaction simultaneously**
+  -- whether that satisfies or violates Agent 2's own existing
+  single-anchor substrate-anchored-MM eligibility rule is Agent 2's
+  decision, correctly out of this increment's scope (§9: "do not change
+  kinetic-law eligibility").
+
+A looser bound -- any placeholder whose catalyzing protein has *any* real
+BRENDA record for its EC number, regardless of which specific reactant --
+touches 38 of 40 placeholders across 36 of 38 reactions. This number is
+reported only for transparency about the gap between "the enzyme has some
+data" and "the data is attributable to this specific reaction's own
+reactant": it is not the answer to Step 8's question and is not used as
+the estimate above, since it does not reflect this repository's own
+structured-identifier/exact-attribution policy (§4).
+
+**No persistence attempted in this evaluation.** `agent1_test` currently
+holds no organism/gene/protein/reaction rows to link a persisted
+`KineticMeasurement` against (the real curated data was truncated by
+Increment C.8's own unrelated cleanup, and re-populating it is a full
+Agent 1 curation run, out of this increment's own scope, §9: "do not ...
+run Agent 4" and its own "no new Agent 1 curation run" framing above).
+This evaluation is therefore connector-level only: real retrieval,
+parsing, and normalization, confirmed against `execute_pathway_curation`'s
+own already-tested wiring (`test_brenda_wiring_persists_a_kinetic_
+measurement_when_sabiork_and_oed_are_absent` and its sibling tests, run
+against fakes) rather than a live database. The wiring itself is real and
+tested; only this specific bounded evaluation run stopped short of
+persisting, by disclosed necessity, not by design.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to
+`"pathway-curation-v1.8"` — a genuine, observable capability change:
+`PathwayConnectorBundle` did not even accept a `brenda` field before this
+increment, and `_discover_kinetics` now attempts a third independent
+kinetics source whenever one is configured. `AGENT1_CONTRACT_VERSION` is
+unchanged — no field of `Agent1CuratedKnowledgeView`/
+`Agent1CuratedKnowledgeViewContract` changed shape; `SourceType.BRENDA`
+already existed (migration `0013_kinetic_measurement_sources`, Increment
+A), so no new migration was needed either.
+
+## 55. Increment C.10 — Conservative BRENDA ligand-to-compound resolution
+
+Motivated directly by Increment C.9's own disclosed gap: every real BRENDA measurement
+carried `substrate_id=None`, because BRENDA's `substrate`/`inhibitor` fields are free-text
+names, and this repository's attribution policy has always preferred structured identifiers
+over names. This increment resolves those names against **already-curated compounds only** --
+never creating one -- so real BRENDA evidence can reach Agent 2's own existing
+reaction-context machinery.
+
+**Deliverable**: `app.normalization.compound.resolve_brenda_ligand_to_compound` (new),
+`brenda_ligand_text` (new, picks whichever of `substrate`/`inhibitor` a record actually
+carries -- never both, never invented for pH optimum/temperature optimum/specific activity,
+which carry neither), and `structured_compound_identity_from_brenda_ligand` (new, always
+`None` -- BRENDA's own `ligandStructureId` is an opaque internal id with no known crosswalk to
+`chebi_id`/`kegg_compound_id`/`pubchem_cid`/`metacyc_id`/`inchikey` anywhere in this
+repository, mirroring `reversibility_evidence_from_sabiork_kineticlaw`'s identical
+"always-None-with-a-real-tested-reason" precedent). A **strict, ordered hierarchy**: exact
+normalized `canonical_name` match against exactly one existing compound; if none, exact
+normalized `compound_synonym` match against exactly one; otherwise unresolved -- an ambiguous
+result at either level stops there and is never subsequently retried at the next level.
+Comparison is exact string equality after conservative, mechanical normalization only
+(`_normalize_ligand_name`: Unicode NFKC, dash/hyphen-variant unification, whitespace
+collapse, case-fold) -- confirmed by test that this can never become substring/"contains"
+matching (`"CoA"` vs `"octanoyl-CoA"`, in both directions, never matches).
+
+A new, narrow `CompoundNameIndexLookup` protocol (`all_canonical_names`/`all_synonyms`,
+unfiltered listings) was added specifically for this, backed by a real
+`SqlAlchemyCompoundNameIndexLookup` (`app.pathway_curation.lookups`) -- deliberately separate
+from the existing `CompoundLookup`/`normalize_compound`, which answers a different question
+("does this claim describe an existing compound or a new one") and, by its own Level 1/2/3
+policy, can only ever report a name/synonym-only match as `AMBIGUOUS`, never `MATCHED` --
+correct there (creation is on the table), not applicable here (creation is categorically
+excluded, so a genuinely unique name match is safe to resolve outright).
+
+Wired into `discover_kinetics_brenda` (new `resolve_substrate` parameter, called only when
+`brenda_ligand_text` is non-`None`) and `executor._discover_kinetics` (a new
+`_resolve_substrate_for_brenda_measurement` closure, cached by normalized ligand text,
+mirroring `_resolve_substrate_for_sabiork_parameter`'s identical shape). `persist_kinetic_
+measurement`'s deduplication is untouched -- resolution only changes what `substrate_id` a
+`KineticMeasurementIdentity` carries, never `(source, source_id)` identity.
+
+**Real, live evaluation** (post C.9's sentinel fix, same real 8 EC numbers, connector-level
+only -- `agent1_test` still has no organism/compound rows to persist against, unchanged
+limitation from C.9; a read-only export of Pilot 2 Run 5's own real curated compound set
+stands in, per this increment's own §7 instruction): of 58 real BRENDA measurements, 33 carry
+a ligand field at all (Km/kcat/kcat-over-Km/Ki; the other 25 -- pH optimum, temperature
+optimum, specific activity -- correctly never even attempt resolution). 13 distinct real
+ligand names attempted; **20 exact canonical-name matches, 0 alias matches** (no
+`compound_synonym` rows exist in this real, currently-available fixture -- a disclosed data
+limitation of this bounded evaluation, not a code gap), 0 ambiguous, 13 unresolved (real,
+correctly-unmatched names: oleate, several real acyl-CoA chain-length variants with no
+curated CoA-thioester compound row, and two real inhibitor names, CP-640186 and Haloxyfop).
+5 unique compounds resolved (ATP, CoA, Malonyl-CoA, NADPH, Palmitoyl-CoA). 9 of 13 pathway
+proteins covered by at least one resolved measurement -- unchanged from C.9's own protein
+coverage, since every protein with real BRENDA evidence at all also had at least one
+resolvable ligand name.
+
+**Downstream reaction-context outcome, computed by running the 20 substrate-resolved
+measurements through Agent 2's own real, unmodified `resolve_kinetic_measurement_reaction_
+context`** (never modified, never reinterpreted by hand): **2 uniquely reaction-attributable,
+6 multiply compatible, 5 no-match, 7 insufficient source evidence** (20 total). Both
+`UNIQUE_MATCH` measurements are real Km values for malonyl-CoA (0.075 mM, 0.75 mM) attributed
+to the *same* reaction (`1c79b614-...`, the malonyl-CoA:[acp] S-malonyltransferase step) the
+real SABIO-RK measurement (18.0 uM) already anchors -- **not a new placeholder gaining
+evidence, but two independent, real, corroborating measurements for the one parameter that
+was already non-`PLACEHOLDER`.** (The roughly 24x-100x difference between BRENDA's and
+SABIO-RK's own reported values for the same reaction is a real, disclosed observation --
+never reconciled, averaged, or adjudicated here, which is explicitly Agent 2/Agent 4's
+territory, not Agent 1's.) The 6 `MULTIPLE_COMPATIBLE` measurements are real ATP/CoA Km
+values that resolve to a real compound but participate as a reactant in more than one real
+curated reaction (ATP: 3 candidate reactions) -- Agent 2's own resolver correctly declines to
+guess which one, exactly the same conservative behavior the existing SABIO-RK-fed real
+malonyl-CoA case already established. The 7 `INSUFFICIENT_SOURCE_EVIDENCE` measurements are
+real kcat values -- consistent with kcat/Vmax-type parameters never carrying the
+reactant-participation context this resolver needs, the same real pattern SABIO-RK's own
+Vmax measurements already showed (Increment C.7).
+
+**Revised estimate: 0 of the current 40 Agent 2 `PLACEHOLDER` parameters gain new, uniquely
+attributable BRENDA evidence from this real dataset** -- a downward, more rigorous revision
+of Increment C.9's own completion-report estimate of 3, which was computed by hand-matching
+reactant names (a heuristic explicitly flagged there as needing Agent 2's own real
+eligibility rules to confirm), not by running Agent 2's actual code. Running the real code
+shows two of those three hand-matched candidates (the two FAA-family CoA-ligase reactions,
+each naming both a real ATP and a real CoA anchor simultaneously) are genuinely
+`MULTIPLE_COMPATIBLE`, not uniquely attributable, and the third (ACC1/HFA1's real ATP
+Km/kcat) is `MULTIPLE_COMPATIBLE`/`INSUFFICIENT_SOURCE_EVIDENCE` as well, since ATP
+participates in more than one real curated reaction network-wide. This is the honest,
+disclosed outcome of applying real, unmodified, equally-conservative rules at both ends of
+the pipeline -- never relaxed to produce a larger number (Increment C.10 instructions, §8).
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to `"pathway-curation-v1.9"` -- a
+genuine, observable capability change: BRENDA-sourced kinetic measurements can now carry a
+real `substrate_id` where before this increment every one was unconditionally `None`, for the
+identical real input. `AGENT1_CONTRACT_VERSION` is unchanged -- no field of
+`Agent1CuratedKnowledgeView`/`Agent1CuratedKnowledgeViewContract` changed shape;
+`KineticMeasurementIdentity.substrate_id` already existed (Increment A) and was already
+populated for other sources (SABIO-RK, Increment C.7) -- this increment only supplies BRENDA
+its own new way of computing a value for an already-existing field.
+
+## 56. Increment C.11 — GotEnzymes2 AI-predicted kinetic parameter integration
+
+Motivated by C.9/C.10's own real ceiling: even with BRENDA fully wired and
+conservatively compound-resolved, real experimental evidence covers only
+9 of 13 real pathway proteins and unblocks 0 of the 40 current Agent 2
+`PLACEHOLDER` parameters. This increment integrates GotEnzymes2
+(https://metabolicatlas.org/gotenzymes) -- an AI-predicted, never
+experimentally measured, kinetic-parameter database -- as a distinct,
+clearly-labeled, non-experimental evidence class.
+
+**Access, confirmed live, not assumed** (no official access documentation
+was accessible beyond a paywalled abstract): a real, public REST API at
+`https://metabolicatlas.org/api/v2`, discovered by following a live
+redirect chain (`/api` -> `/api/v2/swagger`) to its own embedded OpenAPI
+2.0 document, which names a dedicated `GotEnzymes` tag with six real
+endpoints. `GET /gotenzymes/enzymes` (paginated, filterable by
+`gene`/`ec_number`/`compound`/`organism`/`reaction_id`) returns real rows
+shaped `{"gene": "YNR016C", "organism": "sce", "reaction_id": "R00742",
+"ec_number": "6.4.1.2", "compound": "C00024", "kcat_values": 3.9841,
+"km_values": 0.043, "kcat_km_values": 72.14, ...}` -- `gene` is a KEGG
+systematic locus name, `compound`/`reaction_id` are real KEGG ids,
+confirmed live against the real, already-curated ACC1 gene (`YNR016C`,
+EC 6.4.1.2, `R00742` -- the same real reaction this repository has
+tracked since Pilot 1). `GET /gotenzymes/genes/{geneId}` returns real
+cross-references, including a genuine UniProt accession (confirmed live:
+`Q00955` for `YNR016C`, exactly this repository's own already-curated
+real ACC1 protein's `uniprot_id`). **No per-record confidence score, no
+model name, and no stable per-record id are present in either response**
+-- confirmed by direct inspection, not merely undocumented.
+
+**Units are only partially source-confirmed** -- the single most
+important disclosed limitation of this connector. `kcat` is confirmed,
+from the original GotEnzymes publication (NAR 2023), to be `1/s`.
+GotEnzymes2's own Km/kcat-over-Km units are not stated anywhere in the
+live API response or the accessible parts of its 2026 publication
+(partially paywalled); this connector assumes `mM` for Km and `mM/s` for
+kcat/Km, matching every other kinetic source already in this repository
+(BRENDA, SABIO-RK) -- a disclosed inference, never independently
+source-confirmed.
+
+**Provenance**: one new `SourceType.GOTENZYMES` value (migration
+`0016_gotenzymes_source`) -- deliberately **no second, parallel
+"is-this-predicted" column**: every GotEnzymes2 record is, by
+construction, an AI prediction, so `source == GOTENZYMES` already *is*
+the "never confused with a curated experimental measurement" marker this
+increment's own instructions ask for (their own suggested vocabulary,
+"AI_PREDICTED"). The single, database-wide model name GotEnzymes2's own
+publication names (`ProtT5&MolGen&ExtraTrees`) is preserved on
+`KineticMeasurementIdentity.notes` (the same "no dedicated column, fold
+into notes" precedent BRENDA's own range-maximum handling already
+established) -- there is no per-record confidence/version to also
+preserve, confirmed absent from the live API. `KineticMeasurementIdentity
+.value` is parsed via `Decimal(str(prediction.parameter_value))`, never
+`Decimal(prediction.parameter_value)` directly: GotEnzymes2's JSON API
+reports native numbers, unlike every string-reporting source integrated
+so far, and constructing a `Decimal` straight from a `float` would
+capture that float's own binary-representation artifacts.
+
+**Identity matching, conservative and deterministic throughout**:
+protein identity is the load-bearing anchor, verified via GotEnzymes2's
+own UniProt cross-reference against the existing, unmodified
+`ProteinLookup.by_uniprot_id` -- zero new lookup methods needed. A record
+whose gene does not resolve to exactly one existing protein, or resolves
+to a *different* protein than the one the EC-scoped search was scoped to
+(a real possibility: GotEnzymes2's own global EC-scoped search can return
+paralogs), is never attached. Substrate identity uses GotEnzymes2's own
+real, structured KEGG compound id against the existing, unmodified
+`CompoundLookup.by_kegg_compound_id` -- again zero new lookup methods,
+and a genuine improvement over BRENDA's free-text names (Increment C.10's
+own name-based hierarchy is not needed here at all). Ambiguous/no-match
+substrate identity never blocks the prediction itself (mirrors every
+other adapter's own established policy); only unresolved *protein*
+identity does. Organism identity requires an explicit, caller-supplied
+KEGG organism code (`PathwayCurationRequest.gotenzymes_organism_code`,
+new, optional, defaulted to `None`) -- never auto-derived, since
+`Organism.kegg_code` is a real schema column this repository has never
+actually populated for any of its own curated organisms.
+
+**Persistence**: no changes to `persist_kinetic_measurement` at all --
+already fully source-agnostic, confirmed by inspection. Experimental and
+predicted measurements for the same biological context coexist as
+independent rows under the existing `(source, source_id)` deduplication
+(a deterministic SHA-256 of the prediction's own already-specific fields,
+mirroring BRENDA's identical technique for a source with no native
+per-record id).
+
+**Real `sce00061` evaluation** (live, all 13 real proteins / 8 unique EC
+numbers, organism-scoped to `"sce"`; connector-level only, same disclosed
+"no populated target database" limitation as C.9/C.10): 26 connector
+queries (8 EC-number searches plus 18 distinct-gene cross-reference
+lookups), 409 raw prediction rows returned, 228 attributed to exactly one
+of the real 13 proteins via UniProt identity (181 rejected -- other
+organisms'/other genes' rows the EC-scoped search also returned, never
+attached to the wrong protein). **All 13 of 13 real pathway proteins now
+have at least one attributable AI-predicted value** -- up from 9 (BRENDA)
+and 2 (SABIO-RK alone). 144 total predictions (48 Km + 48 kcat + 48
+kcat/Km), covering 43 unique real curated compounds via structured KEGG
+compound-id resolution.
+
+**Downstream reaction-context outcome**, computed by running the 144
+attributable predictions through Agent 2's own real, unmodified
+`resolve_kinetic_measurement_reaction_context` (never modified,
+reinterpreted, or loosened): **12 uniquely reaction-attributable, 5
+multiply compatible, 31 no-match, 96 insufficient source evidence**. The
+12 `UNIQUE_MATCH` predictions span **three distinct real reactions**:
+the malonyl-CoA reaction (`1c79b614-...`, already non-`PLACEHOLDER` via
+SABIO-RK -- corroborating evidence, not a new unblock, the same outcome
+C.10 already found for BRENDA) **and two genuinely new ones**:
+`8419b4a4-...` (ACC1/HFA1's real acetyl-CoA-carboxylase reaction --
+real, uniquely-attributed Km *and* kcat *and* kcat/Km for its own real
+Acetyl-CoA reactant) and `85590c8d-...` (a real FAA-family long-chain
+fatty-acid-CoA-ligase reaction -- real, uniquely-attributed Km/kcat/
+kcat-over-Km for its own real palmitate/CoA-ligase context).
+
+**Revised estimate: 2 of the 40 current Agent 2 `PLACEHOLDER` parameters
+(`k_8419b4a4-...` and `k_85590c8d-...`, both currently tentative
+`MASS_ACTION` defaults) now have genuinely new, uniquely reaction-
+attributable evidence** -- direct Km coverage: 2 reactions; direct kcat
+coverage: 2 reactions (the same two); direct kcat/Km coverage: 2
+reactions (the same two, since GotEnzymes2 reports all three together
+per real gene/compound pair). One additional reaction
+(`1c79b614-...`) gains reaction-attribution-limited (corroborating, not
+newly-unblocking) evidence. The remaining 37 placeholders are
+completely uncovered by this real dataset's own uniquely-attributable
+evidence (some appear in the `MULTIPLE_COMPATIBLE`/`NO_MATCH` counts
+above, meaning real AI-predicted values exist for their catalyzing
+protein but not uniquely for their own specific reactant -- never
+counted as "covered" here, consistent with never loosening attribution
+rules to inflate the number, Increment C.11 instructions, §9). Both
+newly-covered reactions are currently `MASS_ACTION`-assigned -- this is
+exactly the kind of real, attributable evidence that could motivate
+Agent 2 (not modified here) reassigning them to a substrate-anchored
+Michaelis-Menten law, mirroring the precedent the real malonyl-CoA case
+already established, but that decision, and any actual initialization,
+is explicitly out of this increment's own scope.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to
+`"pathway-curation-v1.10"` -- a genuine, observable capability change:
+`PathwayConnectorBundle` did not accept a `gotenzymes` field before this
+increment, and `PathwayCurationRequest` gained a new, optional
+`gotenzymes_organism_code` field. `AGENT1_CONTRACT_VERSION` is unchanged
+-- no field of `Agent1CuratedKnowledgeView`/
+`Agent1CuratedKnowledgeViewContract` changed shape; `KineticMeasurement
+.source`/`.source_id`/every other field a GotEnzymes2-sourced identity
+needs already existed (Increment A).
+
+## 57. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.
