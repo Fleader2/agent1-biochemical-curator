@@ -196,9 +196,13 @@ class CuratedKineticMeasurement:
     ``value``/``unit`` are ``KineticMeasurement.parameter_value``/``.unit``
     (the as-reported figures; see ``app.persistence.kinetic_measurement``'s
     module docstring for why ``original_value``/``original_unit`` currently
-    always equal them). ``normalized_value``/``normalized_unit`` are always
-    ``None`` in this increment -- no unit-conversion framework exists yet
-    (``docs/24_kinetic_data_curation_and_handoff.md`` §11).
+    always equal them). ``normalized_value``/``normalized_unit`` (Agent 1.x
+    Increment C.12) are the canonical-unit conversion
+    ``app.normalization.kinetic_units.convert_to_canonical_unit`` computed
+    for this row -- ``nM`` for Km/Ki, ``per_sec`` for kcat, ``nM_per_s``
+    for Vmax, ``per_nMs`` for kcat/Km -- or both ``None`` when the reported
+    unit could not be recognized or was dimensionally incompatible with
+    the parameter type (never a fabricated canonical value).
     """
 
     kinetic_measurement_id: UUID

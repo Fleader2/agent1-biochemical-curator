@@ -181,7 +181,7 @@ def test_gotenzymes_normalize_units() -> None:
     predictions = normalize_enzymes_record(records[0])
 
     units = {p.parameter_type: p.unit for p in predictions}
-    assert units == {"kcat": "1/s", "Km": "mM", "kcat/Km": "mM/s"}
+    assert units == {"kcat": "1/s", "Km": "mM", "kcat/Km": "mM^-1 s^-1"}
 
 
 def test_gotenzymes_never_labeled_experimental() -> None:

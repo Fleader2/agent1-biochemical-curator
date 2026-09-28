@@ -51,18 +51,28 @@ Swagger description alone, which specifies no response schema):
   module treats any non-2xx response the shared HTTP layer raises as an
   ordinary ``ConnectorError``, never assumes a specific status code).
 
-**Units are only partially source-confirmed.** ``kcat_values`` is
-confirmed, from the original GotEnzymes publication (Kerkhoven lab, NAR
-2023), to be reported in ``1/s`` (turnover number). GotEnzymes2's own Km/
-kcat-over-Km units are **not stated anywhere in the live API response or
-in the accessible parts of its 2026 publication** (partially paywalled) --
-this module assumes ``mM`` for Km (matching every other kinetic source
-already integrated into this repository: BRENDA, SABIO-RK) and, derived
-from that same assumption, ``mM/s`` for kcat/Km (matching
-``app.connectors.brenda``'s own identical unit string for the same
-derived quantity) -- a disclosed inference, never independently source-
-confirmed, and the single most important limitation of this connector
-(see this increment's own completion report).
+**Units, corrected and re-confirmed in Agent 1.x Increment C.12.**
+``kcat_values`` is confirmed, from the original GotEnzymes publication
+(Kerkhoven lab, NAR 2023), to be reported in ``1/s`` (turnover number).
+GotEnzymes2's own live API exposes no unit metadata for any field, and its
+2026 publication is partially paywalled -- but GotEnzymes2's own abstract
+names its real underlying model for catalytic parameters
+(``ProtT5&MolGen&ExtraTrees``, benchmarked against, among others, UniKP),
+and **UniKP's own publication (Nature Communications, 2023) explicitly
+reports Km in ``mM`` and kcat/Km in ``mM⁻¹s⁻¹``/``s⁻¹·mM⁻¹``**
+(Table 1: e.g. "0.36 mM", "327.2 s⁻¹⋅mM⁻¹") -- confirmed via that
+publication, not merely assumed by analogy to BRENDA. This module
+accordingly uses ``mM`` for Km (unchanged from C.11) and the unambiguous
+``"mM^-1 s^-1"`` spelling for kcat/Km -- **corrected this increment from
+C.11's own ``"mM/s"``**, which borrowed BRENDA's own official (if
+unconventional) documented idiom for that field
+(https://www.brenda-enzymes.org/datafields.php: "The unit of this value is
+mM/s", confirmed live, meaning "per mM per second") without independent
+justification for GotEnzymes2 specifically, whose real underlying model
+does not use that spelling. See
+``app.normalization.kinetic_units``'s own module docstring for how both
+spellings are still recognized, correctly, for whichever source actually
+uses each one.
 
 Four separate transformations, per ``app/connectors/base.py``:
 
@@ -104,7 +114,7 @@ from app.models.enums import SourceType
 # stated anywhere source-confirmed -- see module docstring.
 _KCAT_UNIT = "1/s"
 _KM_UNIT = "mM"
-_KCAT_KM_UNIT = "mM/s"
+_KCAT_KM_UNIT = "mM^-1 s^-1"
 
 # The single, database-wide model name GotEnzymes2's own publication names for its
 # catalytic-parameter predictions (ProtT5&MolGen&ExtraTrees) -- a real, confirmed fact

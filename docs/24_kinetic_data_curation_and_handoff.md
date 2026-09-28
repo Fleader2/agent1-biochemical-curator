@@ -147,20 +147,37 @@ whose experimental status could not be established is silently treated as
 experimental anywhere in this increment; there is no such ambiguous case
 in either connector's actual output.
 
-## 11. No unit conversion policy
+## 11. Unit conversion policy
 
-Agent 1 has no trusted unit-normalization framework yet. Every adapter in
-`app/normalization/kinetic_measurement.py` copies a source's own reported
-unit string verbatim into `KineticMeasurementIdentity.unit`, and
-`normalized_value`/`normalized_unit` are left `None` for every source in
-this increment — including for SABIO-RK, whose own API additionally
-reports an SI-normalized pair (`n_start_value`/`unit.n_name`) that this
-connector deliberately does not surface as Agent 1's own normalized
-value, since SABIO-RK performed that conversion, not Agent 1. This is
-carried all the way through: `app.persistence.kinetic_measurement` also
-never populates `KineticMeasurement.normalized_value`/`.normalized_unit`,
-and Agent 2's `CuratedKineticMeasurement.normalized_value`/
-`.normalized_unit` are `None` for the same reason.
+**Superseded by Agent 1.x Increment C.12** (`app.normalization.kinetic_units`)
+— see `docs/26_autonomous_pathway_curation_planner.md`'s own Increment C.12
+section for the full design. The original policy this section described
+(reproduced below for history) no longer holds: every
+`KineticMeasurementIdentity`, regardless of source, now carries a
+canonical-unit conversion computed deterministically in its own
+`__post_init__`, and `KineticMeasurement.normalized_value`/
+`.normalized_unit` — always `NULL` before this increment — are now
+populated whenever the reported unit is recognized and dimensionally
+compatible with the parameter type (`nM` for Km/Ki, `per_sec` for kcat,
+`nM_per_s` for Vmax, `per_nMs` for kcat/Km), and left `NULL` otherwise —
+never a fabricated canonical value. `KineticMeasurementIdentity.unit`
+itself is still always the source's own reported string, copied verbatim
+and never overwritten by this conversion; SABIO-RK's own SI-normalized
+pair (`n_start_value`/`unit.n_name`) is still deliberately not surfaced as
+Agent 1's own normalized value, for the identical reason as before
+(SABIO-RK performed that specific conversion, not Agent 1 — this
+increment's own canonical conversion is a distinct, independently
+verified computation, not a reuse of a source's self-reported one).
+
+**Original policy (Increment A, superseded above):** "Agent 1 has no
+trusted unit-normalization framework yet. Every adapter ... copies a
+source's own reported unit string verbatim into
+`KineticMeasurementIdentity.unit`, and `normalized_value`/
+`normalized_unit` are left `None` for every source in this increment ...
+This is carried all the way through: `app.persistence.kinetic_measurement`
+also never populates `KineticMeasurement.normalized_value`/
+`.normalized_unit`, and Agent 2's `CuratedKineticMeasurement
+.normalized_value`/`.normalized_unit` are `None` for the same reason."
 
 ## 12. No rounding, no averaging, no range-combining
 

@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 
 from app.connectors.brenda import BrendaKineticMeasurement
+from app.connectors.gotenzymes import GotEnzymesPrediction
 from app.connectors.open_enzyme_database import OedKineticParameter
 from app.connectors.sabiork import parse_kinetic_law_json
 from app.models.enums import SourceType
@@ -19,6 +20,7 @@ from app.normalization.kinetic_measurement import (
     KineticMeasurementIdentity,
     KineticParameterType,
     kinetic_identity_from_brenda,
+    kinetic_identity_from_gotenzymes,
     kinetic_identity_from_oed,
     kinetic_identity_from_sabiork,
     map_parameter_type,
@@ -177,6 +179,37 @@ def test_brenda_adapter_maps_fields() -> None:
     assert identity.notes == "note"
 
 
+def test_brenda_adapter_km_gets_canonical_nm_value() -> None:
+    """Agent 1.x Increment C.12: every adapter, including BRENDA's, now carries a
+    canonical-unit conversion computed automatically -- 0.33 mM -> 330000 nM."""
+    identity = kinetic_identity_from_brenda(_brenda_record())
+    assert identity is not None
+    assert identity.normalized_value == Decimal("330000.0")
+    assert identity.normalized_unit == "nM"
+
+
+def test_brenda_adapter_kcat_over_km_documented_idiom_resolves() -> None:
+    """BRENDA's own official kcat/Km unit ("mM/s", confirmed live from
+    datafields.php) resolves via the documented per-mM-per-second idiom, never a
+    literal concentration-flux misinterpretation."""
+    record = _brenda_record(
+        parameter_type="kcat/Km", parameter_value="72.14", unit="mM/s"
+    )
+    identity = kinetic_identity_from_brenda(record)
+    assert identity is not None
+    assert identity.parameter_type == KineticParameterType.KCAT_OVER_KM
+    assert identity.normalized_value == Decimal("0.00007214")
+    assert identity.normalized_unit == "per_nMs"
+
+
+def test_brenda_adapter_unsupported_unit_leaves_normalized_fields_unresolved() -> None:
+    record = _brenda_record(parameter_type="specific activity", parameter_value="1")
+    identity = kinetic_identity_from_brenda(record)
+    assert identity is not None
+    assert identity.normalized_value is None
+    assert identity.normalized_unit is None
+
+
 def test_brenda_adapter_returns_none_for_blank_value() -> None:
     assert kinetic_identity_from_brenda(_brenda_record(parameter_value=None)) is None
 
@@ -260,16 +293,20 @@ def test_sabiork_adapter_maps_fields() -> None:
     assert identity.temperature_c == Decimal("25")
 
 
-def test_sabiork_adapter_never_populates_normalized_fields() -> None:
-    """No unit conversion in this increment -- see module docstring."""
+def test_sabiork_adapter_populates_canonical_normalized_fields() -> None:
+    """Agent 1.x Increment C.12: every KineticMeasurementIdentity, regardless of source,
+    now carries a canonical-unit conversion computed automatically in its own
+    __post_init__ -- 0.5 mM Km converts to 500000 nM."""
     import json
 
     record = parse_kinetic_law_json("42", json.dumps(_sabiork_entry_json()))
     identity = kinetic_identity_from_sabiork(record, record.parameters[0])
     assert identity is not None
-    # KineticMeasurementIdentity has no normalized_value/normalized_unit at all
-    # -- persistence is responsible for leaving those columns NULL.
-    assert not hasattr(identity, "normalized_value")
+    assert identity.normalized_value == Decimal("500000.0")
+    assert identity.normalized_unit == "nM"
+    # The original, as-reported value/unit are never touched by this conversion.
+    assert identity.value == Decimal("0.5")
+    assert identity.unit == "mM"
 
 
 def test_sabiork_adapter_one_entry_two_parameters_yields_independent_identities() -> None:
@@ -426,3 +463,69 @@ def test_oed_adapter_passes_through_explicit_lineage_if_ever_present() -> None:
     assert identity is not None
     assert identity.original_source == SourceType.SABIORK
     assert identity.original_source_identifier == "99:Km"
+
+
+def test_oed_adapter_kcat_gets_canonical_per_sec_value() -> None:
+    """Agent 1.x Increment C.12: OED's own default fixture (12.3, "1/s") is already
+    canonical -- passthrough, unchanged."""
+    identity = kinetic_identity_from_oed(_oed_parameter())
+    assert identity is not None
+    assert identity.normalized_value == Decimal("12.3")
+    assert identity.normalized_unit == "per_sec"
+
+
+# --- GotEnzymes2 (Agent 1.x Increment C.11/C.12) --------------------------------
+
+
+def _gotenzymes_prediction(**overrides: object) -> GotEnzymesPrediction:
+    base = {
+        "parameter_type": "Km",
+        "parameter_value": 0.043,
+        "unit": "mM",
+        "gene": "YNR016C",
+        "organism": "sce",
+        "ec_number": "6.4.1.2",
+        "reaction_id": "R00742",
+        "compound": "C00024",
+        "model": "ProtT5&MolGen&ExtraTrees",
+    }
+    base.update(overrides)
+    return GotEnzymesPrediction(**base)
+
+
+def test_gotenzymes_adapter_km_gets_canonical_nm_value() -> None:
+    """Real, live-confirmed ACC1 prediction: 0.043 mM -> 43000 nM."""
+    identity = kinetic_identity_from_gotenzymes(_gotenzymes_prediction())
+    assert identity is not None
+    assert identity.source == SourceType.GOTENZYMES
+    assert identity.normalized_value == Decimal("43000.0")
+    assert identity.normalized_unit == "nM"
+
+
+def test_gotenzymes_adapter_kcat_gets_canonical_per_sec_value() -> None:
+    identity = kinetic_identity_from_gotenzymes(
+        _gotenzymes_prediction(parameter_type="kcat", parameter_value=3.9841, unit="1/s")
+    )
+    assert identity is not None
+    assert identity.normalized_value == Decimal("3.9841")
+    assert identity.normalized_unit == "per_sec"
+
+
+def test_gotenzymes_adapter_kcat_over_km_corrected_unit_resolves() -> None:
+    """Agent 1.x Increment C.12: GotEnzymes2's own corrected kcat/Km unit ("mM^-1 s^-1",
+    fixed from C.11's borrowed "mM/s") resolves directly, unambiguously."""
+    identity = kinetic_identity_from_gotenzymes(
+        _gotenzymes_prediction(
+            parameter_type="kcat/Km", parameter_value=72.14, unit="mM^-1 s^-1"
+        )
+    )
+    assert identity is not None
+    assert identity.normalized_value == Decimal("0.00007214")
+    assert identity.normalized_unit == "per_nMs"
+
+
+def test_gotenzymes_adapter_never_populates_publication_and_still_normalizes() -> None:
+    identity = kinetic_identity_from_gotenzymes(_gotenzymes_prediction())
+    assert identity is not None
+    assert identity.publication_id is None
+    assert identity.normalized_value is not None

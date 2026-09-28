@@ -110,6 +110,7 @@ from app.connectors.open_enzyme_database import OedKineticParameter
 from app.connectors.sabiork import SabioKineticParameter, SabioKineticRecord
 from app.models.enums import SourceType
 from app.normalization.identifiers import require_non_empty
+from app.normalization.kinetic_units import UnitConversionStatus, convert_to_canonical_unit
 
 
 class KineticParameterType(StrEnum):
@@ -240,6 +241,13 @@ class KineticMeasurementIdentity:
 
     notes: str | None = None
 
+    # Always computed in __post_init__ from parameter_type/value/unit, below -- never
+    # accepted as a meaningful caller-supplied value (Agent 1.x Increment C.12). Defaulted
+    # to None only so the dataclass constructor signature does not otherwise change for
+    # any existing caller.
+    normalized_value: Decimal | None = None
+    normalized_unit: str | None = None
+
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "source_id", require_non_empty(self.source_id, field_name="source_id")
@@ -250,6 +258,20 @@ class KineticMeasurementIdentity:
             raise ValueError(
                 "KineticMeasurementIdentity requires original_source and "
                 "original_source_identifier together, or neither"
+            )
+
+        conversion = convert_to_canonical_unit(self.parameter_type.value, self.value, self.unit)
+        object.__setattr__(self, "normalized_value", conversion.canonical_value)
+        object.__setattr__(self, "normalized_unit", conversion.canonical_unit)
+        if conversion.status in (
+            UnitConversionStatus.UNRECOGNIZED_UNIT,
+            UnitConversionStatus.INCOMPATIBLE_DIMENSION,
+        ):
+            disclosure = f"Canonical unit conversion unresolved: {conversion.reason}."
+            object.__setattr__(
+                self,
+                "notes",
+                f"{self.notes} | {disclosure}" if self.notes else disclosure,
             )
 
 

@@ -36,17 +36,24 @@ through to ordinary creation, preserving ``identity.original_source``/
 them) -- a disclosed limitation, see
 ``docs/24_kinetic_data_curation_and_handoff.md`` §7.
 
-**No unit conversion, no value reinterpretation.** ``parameter_value``/
-``unit`` and ``original_value``/``original_unit`` are both set from
-``identity.value``/``identity.unit`` -- identical values, because this
-increment performs no separate conversion step (see
-``app.normalization.kinetic_measurement``'s module docstring). This is not
+**No unit *re*interpretation here -- conversion happens one layer down.**
+``parameter_value``/``unit`` and ``original_value``/``original_unit`` are
+all three set from ``identity.value``/``identity.unit`` -- identical
+values, since this module itself performs no conversion. This is not
 duplication-by-mistake: the schema's own docstring describes
 ``original_value``/``original_unit`` as the never-overwritten as-reported
 figures and ``parameter_value``/``unit`` as the working figures a later
-increment's normalization *may* someday update -- so both start out
-identical and this module never populates
-``normalized_value``/``normalized_unit`` (left ``NULL``).
+increment's normalization *may* someday update. **``normalized_value``/
+``normalized_unit`` (Agent 1.x Increment C.12)** are set from
+``identity.normalized_value``/``.normalized_unit`` -- already computed,
+deterministically and Decimal-safely, by
+``KineticMeasurementIdentity.__post_init__`` calling
+``app.normalization.kinetic_units.convert_to_canonical_unit`` -- this
+module only ever copies that already-decided value across, exactly like
+every other field here; it never calls the conversion function itself.
+Both remain ``NULL`` whenever that conversion could not resolve a
+canonical unit (unrecognized or dimensionally incompatible source unit) --
+never a fabricated canonical value.
 
 **BRENDA range maxima have no dedicated column.** ``KineticMeasurement`` has
 no ``parameter_value_maximum`` column (verified directly against
@@ -279,6 +286,8 @@ def persist_kinetic_measurement(
                 unit=identity.unit,
                 original_value=identity.value,
                 original_unit=identity.unit,
+                normalized_value=identity.normalized_value,
+                normalized_unit=identity.normalized_unit,
                 substrate_id=identity.substrate_id,
                 organism_id=identity.organism_id,
                 strain=identity.strain,

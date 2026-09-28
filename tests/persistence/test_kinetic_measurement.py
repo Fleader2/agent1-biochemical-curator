@@ -65,7 +65,12 @@ def test_create_new_measurement(db_session):
 
 
 def test_create_sets_original_value_equal_to_reported_value(db_session):
-    """No unit conversion this increment -- original and working values start identical."""
+    """``original_value``/``.unit`` and ``parameter_value``/``.unit`` always start
+    identical -- this module itself never reinterprets a reported figure. Here the
+    reported unit ("1/s") is dimensionally incompatible with this identity's own KM
+    parameter type, so normalized_value/unit are correctly left unresolved, never
+    fabricated -- see test_create_populates_canonical_normalized_fields below for the
+    resolved case."""
     identity = _identity(value=Decimal("1.5"), unit="1/s")
     result = persist_kinetic_measurement(identity, session=db_session)
     row = get_kinetic_measurement(db_session, result.kinetic_measurement_id)
@@ -73,6 +78,20 @@ def test_create_sets_original_value_equal_to_reported_value(db_session):
     assert row.original_unit == "1/s"
     assert row.normalized_value is None
     assert row.normalized_unit is None
+
+
+def test_create_populates_canonical_normalized_fields(db_session):
+    """Agent 1.x Increment C.12: persist_kinetic_measurement copies the already-computed
+    KineticMeasurementIdentity.normalized_value/.normalized_unit verbatim -- it never
+    calls the conversion function itself."""
+    identity = _identity(value=Decimal("0.33"), unit="mM")
+    result = persist_kinetic_measurement(identity, session=db_session)
+    row = get_kinetic_measurement(db_session, result.kinetic_measurement_id)
+    assert row.normalized_value == Decimal("330000.0")
+    assert row.normalized_unit == "nM"
+    # The original, as-reported figures are never touched by this conversion.
+    assert row.original_value == Decimal("0.33")
+    assert row.original_unit == "mM"
 
 
 def test_create_attaches_source_cross_reference(db_session):

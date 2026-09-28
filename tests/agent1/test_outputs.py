@@ -123,6 +123,14 @@ def _rich_fixture(session):
         parameter_type="KM",
         parameter_value=Decimal("0.5"),
         unit="mM",
+        # Set directly here (this fixture builds the ORM row itself, bypassing
+        # KineticMeasurementIdentity/persist_kinetic_measurement) so
+        # test_curated_knowledge_view_exposes_kinetic_measurement_unfiltered can verify
+        # the handoff's own pass-through of an already-canonical value (Agent 1.x
+        # Increment C.12) -- the conversion computation itself is tested separately, at
+        # the normalization/persistence layers.
+        normalized_value=Decimal("500000.0"),
+        normalized_unit="nM",
         source=SourceType.BRENDA,
         source_id=f"brenda:{uuid4()}",
     )
@@ -371,9 +379,10 @@ def test_curated_knowledge_view_exposes_kinetic_measurement_unfiltered(db_sessio
     assert curated.unit == "mM"
     assert curated.source == SourceType.BRENDA
     assert curated.reaction_id == fixture["reaction"].id
-    # No unit-conversion framework exists yet -- always None this increment.
-    assert curated.normalized_value is None
-    assert curated.normalized_unit is None
+    # Agent 1.x Increment C.12: the handoff exposes the canonical value/unit Agent 2 can
+    # use directly, alongside the never-overwritten as-reported figures above.
+    assert curated.normalized_value == Decimal("500000.0")
+    assert curated.normalized_unit == "nM"
 
 
 def test_curated_knowledge_view_exposes_state_specific_kinetic_measurement(db_session):

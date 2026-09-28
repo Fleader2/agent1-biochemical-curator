@@ -2531,7 +2531,83 @@ increment, and `PathwayCurationRequest` gained a new, optional
 .source`/`.source_id`/every other field a GotEnzymes2-sourced identity
 needs already existed (Increment A).
 
-## 57. Final architectural rule
+## 57. Increment C.12 — Canonical kinetic unit normalization
+
+Motivated by C.9/C.10/C.11's own cumulative real data: SABIO-RK/BRENDA/GotEnzymes2 each
+report Km/kcat/kcat-over-Km/Vmax in genuinely different real units (µM vs. mM, "1/s" vs.
+"mM^-1 s^-1", ...), making cross-source numeric comparison or downstream initialization
+impossible without a shared scale. This increment converts every numerically usable
+kinetic measurement into one of four canonical units -- `nM` (Km/Ki), `per_sec` (kcat),
+`nM_per_s` (Vmax), `per_nMs` (kcat/Km) -- while never touching the original reported
+figure.
+
+**The smallest possible schema change: none at all.** `KineticMeasurement.normalized_
+value`/`.normalized_unit` (migration `0013_kinetic_measurement_sources`, Increment A) and
+`CuratedKineticMeasurement.normalized_value`/`.normalized_unit` (Increment A) already
+existed on both sides of the handoff, always `NULL`/`None` since no conversion framework
+existed yet (`docs/24_kinetic_data_curation_and_handoff.md` §11, itself updated this
+increment to record this as superseded). This increment is precisely the one that fills
+in that long-anticipated gap -- `AGENT1_CONTRACT_VERSION` is unchanged, since no field of
+either type changed shape, only what value an already-existing field now holds.
+
+**Deliverable**: `app.normalization.kinetic_units` (new) -- `convert_to_canonical_unit
+(parameter_type, value, unit)`, a small, closed, explicit recognized-unit vocabulary
+(never a general parser), Decimal-safe throughout. Wired into
+`KineticMeasurementIdentity.__post_init__` itself (not into any individual source
+adapter), so every current and future source's identity automatically gets a canonical
+conversion with zero source-specific wiring; `app.persistence.kinetic_measurement` only
+ever copies the already-computed `normalized_value`/`.normalized_unit` across, exactly
+like every other field.
+
+**GotEnzymes2 unit correction (§4).** Live/documentation investigation this increment:
+`kcat` confirmed `1/s` (original GotEnzymes publication, NAR 2023); GotEnzymes2's own live
+API exposes no unit metadata for Km/kcat-over-Km at all, and its 2026 publication is
+partially paywalled -- but GotEnzymes2's own abstract names its real underlying catalytic
+model (benchmarked against, among others, UniKP), and **UniKP's own publication (Nature
+Communications, 2023) explicitly reports Km in `mM` and kcat/Km in `mM^-1 s^-1`/
+`s^-1*mM^-1`** (Table 1, e.g. "0.36 mM", "327.2 s^-1*mM^-1") -- confirmed via that
+publication, not merely assumed by analogy to BRENDA. **`app.connectors.gotenzymes`'s own
+C.11 kcat/Km unit string was corrected from `"mM/s"` to the unambiguous `"mM^-1 s^-1"`**:
+C.11 had borrowed BRENDA's own official documented idiom for that field
+(https://www.brenda-enzymes.org/datafields.php: "The unit of this value is mM/s",
+confirmed live, meaning "per mM per second") without independent justification for
+GotEnzymes2 specifically, whose real underlying model does not use that spelling.
+
+**The one deliberate, documented cross-source ambiguity**: `"mM/s"` means two physically
+different things depending on parameter type -- a genuine concentration flux for Vmax, or
+BRENDA's own documented per-mM-per-second idiom for kcat/Km. `convert_to_canonical_unit`
+resolves this unambiguously, since each of its four target-unit families is looked up
+independently by `parameter_type` alone -- there is no runtime ambiguity, only an unusual
+source convention, confirmed by a dedicated regression test.
+
+**Unsupported units, real and confirmed live**: SABIO-RK's own real Vmax measurements
+(Pilot 2 Run 5) are reported as `"nmol/(min*mg)"` -- a mass-normalized specific activity,
+dimensionally incompatible with a simple concentration-flux target, and never converted;
+these 7 real Vmax measurements remain numerically un-normalized, exactly as this
+increment's own conservative policy requires (§5: never fabricate a canonical value for
+an unrecognized or incompatible unit).
+
+**Real, live-data evaluation** (the same real datasets C.9/C.10/C.11 already
+established):
+
+| Source | Total | Resolved | Unresolved | Resolved breakdown |
+|---|---:|---:|---:|---|
+| SABIO-RK | 14 | 7 | 7 | 7 Km (all real, none Vmax -- specific-activity units) |
+| BRENDA | 58 | 33 | 25 | 21 Km + 10 kcat + 2 Ki (25 unresolved: 14 specific activity + 8 temperature optimum + 3 pH optimum, all `NOT_APPLICABLE_PARAMETER_TYPE`) |
+| GotEnzymes2 | 144 | 144 | 0 | 48 Km + 48 kcat + 48 kcat/Km (100% -- every value and unit is recognized once C.12's own GotEnzymes2 correction is applied) |
+
+**The real malonyl-CoA Km -- this whole project's own recurring real anchor -- converts
+from `18.0 uM` to exactly `18000.0 nM`**, confirmed directly against the real, saved Pilot
+2 Run 5 measurement, with its original `18.0`/`"uM"` untouched on
+`value`/`unit`.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to `"pathway-curation-v1.11"` -- a
+genuine, observable behavior change: every kinetic measurement Agent 1 persists, from any
+of the four integrated sources, now carries a real canonical value/unit wherever its
+reported unit is recognized and compatible, for the identical real input.
+`AGENT1_CONTRACT_VERSION` is unchanged (see above).
+
+## 58. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

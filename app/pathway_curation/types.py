@@ -119,7 +119,7 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: ``discover_kinetics_sabiork`` gained one new optional parameter
 #: (``resolve_substrate``, defaulted to ``None``, exactly mirroring
 #: ``resolve_publication``'s own v1.6 addition).
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.10"
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.11"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase
