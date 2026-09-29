@@ -1,0 +1,30 @@
+[
+  {
+    "id": 8675782,
+    "order_by": "Breker M, et al. (2013)_00__",
+    "reference": {"display_name": "Ho B, et al. (2018)", "link": "/reference/S000207593"},
+    "original_reference": {"display_name": "Breker M, et al. (2013)", "link": "/reference/S000152873"},
+    "locus": {"id": 1268219, "display_name": "CDC28", "format_name": "YBR160W", "link": "/locus/S000000364"},
+    "media": {"display_name": "SD"},
+    "treatment": {"chemical": "", "process": "", "time_value": null, "time_unit": null, "conc_value": null, "conc_unit": null},
+    "data_value": 4319,
+    "data_unit": "molecules/cell",
+    "fold_change": null,
+    "visualization": {"display_name": "confocal microscopy evidence"},
+    "strain": {"link": "/strain/S000203483", "display_name": "S288C"}
+  },
+  {
+    "id": 8675783,
+    "order_by": "Newman JR, et al. (2006)_00__",
+    "reference": {"display_name": "Ho B, et al. (2018)", "link": "/reference/S000207593"},
+    "original_reference": {"display_name": "Newman JR, et al. (2006)", "link": "/reference/S000073023"},
+    "locus": {"id": 1268219, "display_name": "CDC28", "format_name": "YBR160W", "link": "/locus/S000000364"},
+    "media": {"display_name": "SD"},
+    "treatment": {"chemical": "", "process": "", "time_value": null, "time_unit": null, "conc_value": null, "conc_unit": null},
+    "data_value": 6670,
+    "data_unit": "molecules/cell",
+    "fold_change": null,
+    "visualization": {"display_name": "flow cytometry evidence"},
+    "strain": {"link": "/strain/S000203483", "display_name": "S288C"}
+  }
+]

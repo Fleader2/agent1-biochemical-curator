@@ -12,9 +12,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.connectors.sgd import SgdProteinAbundance
 from app.models.enums import (
     ContextCompatibility,
     QuantitativeEvidenceClass,
+    SourceType,
     TimeReferenceBasis,
 )
 from app.normalization.kinetic_units import UnitConversionStatus
@@ -29,6 +31,7 @@ from app.normalization.quantitative_observation import (
     classify_context_compatibility,
     convert_quantitative_unit,
     convert_time_to_seconds,
+    quantitative_observation_identity_from_sgd_abundance,
 )
 
 pytestmark = pytest.mark.unit
@@ -326,3 +329,91 @@ def test_context_compatibility_is_deterministic():
     first = classify_context_compatibility(a, b)
     second = classify_context_compatibility(a, b)
     assert first == second == ContextCompatibility.EXACT_CONTEXT
+
+
+# --- quantitative_observation_identity_from_sgd_abundance (Agent 1.x Increment "SGD
+# Reference Protein Abundance Integration") -------------------------------------------------
+
+
+def test_sgd_abundance_identity_uses_real_confirmed_cdc28_values():
+    """Real, live-confirmed CDC28 figure: 6670 molecules/cell, MAD 1539."""
+    abundance = SgdProteinAbundance(
+        value=Decimal("6670"), median_absolute_deviation=Decimal("1539")
+    )
+    identity = quantitative_observation_identity_from_sgd_abundance(
+        abundance, sgd_id="S000000364"
+    )
+
+    assert identity.observation_type == QuantitativeObservationType.PROTEIN_ABUNDANCE.value
+    assert identity.value == Decimal("6670")
+    assert identity.unit == "molecules/cell"
+    assert identity.uncertainty == Decimal("1539")
+    assert identity.normalized_value == Decimal("6670")
+    assert identity.normalized_unit == CANONICAL_UNIT_MOLECULES_PER_CELL
+
+
+def test_sgd_abundance_identity_evidence_class_is_always_reference_baseline():
+    abundance = SgdProteinAbundance(value=Decimal("1000"), median_absolute_deviation=None)
+    identity = quantitative_observation_identity_from_sgd_abundance(
+        abundance, sgd_id="S000000001"
+    )
+
+    assert identity.evidence_class is QuantitativeEvidenceClass.REFERENCE_BASELINE
+
+
+def test_sgd_abundance_identity_source_and_deterministic_source_id():
+    abundance = SgdProteinAbundance(value=Decimal("1000"), median_absolute_deviation=None)
+    identity = quantitative_observation_identity_from_sgd_abundance(
+        abundance, sgd_id="S000000001"
+    )
+
+    assert identity.source is SourceType.SGD
+    assert identity.source_id == "sgd-protein-abundance:S000000001"
+
+    repeat = quantitative_observation_identity_from_sgd_abundance(
+        abundance, sgd_id="S000000001"
+    )
+    assert repeat.source_id == identity.source_id
+
+
+def test_sgd_abundance_identity_no_uncertainty_when_sgd_reports_none():
+    """A real, disclosed case (SGD's own MAD absent) -- never fabricated as zero."""
+    abundance = SgdProteinAbundance(value=Decimal("1000"), median_absolute_deviation=None)
+    identity = quantitative_observation_identity_from_sgd_abundance(
+        abundance, sgd_id="S000000001"
+    )
+
+    assert identity.uncertainty is None
+
+
+def test_sgd_abundance_identity_threads_through_already_resolved_identity_links():
+    abundance = SgdProteinAbundance(value=Decimal("1000"), median_absolute_deviation=None)
+    protein_id, organism_id, context_id, publication_id = uuid4(), uuid4(), uuid4(), uuid4()
+    identity = quantitative_observation_identity_from_sgd_abundance(
+        abundance,
+        sgd_id="S000000001",
+        protein_id=protein_id,
+        organism_id=organism_id,
+        experimental_context_id=context_id,
+        publication_id=publication_id,
+    )
+
+    assert identity.protein_id == protein_id
+    assert identity.organism_id == organism_id
+    assert identity.experimental_context_id == context_id
+    assert identity.publication_id == publication_id
+
+
+def test_sgd_abundance_identity_never_derives_a_concentration():
+    """Task's own explicit exclusion: no nM value, no 0.1 pL assumption anywhere."""
+    abundance = SgdProteinAbundance(
+        value=Decimal("6670"), median_absolute_deviation=Decimal("1539")
+    )
+    identity = quantitative_observation_identity_from_sgd_abundance(
+        abundance, sgd_id="S000000364"
+    )
+
+    assert identity.observation_type != QuantitativeObservationType.PROTEIN_CONCENTRATION.value
+    assert identity.unit != CANONICAL_UNIT_NM
+    assert "0.1 pL" not in (identity.notes or "")
+    assert "pL" not in identity.unit

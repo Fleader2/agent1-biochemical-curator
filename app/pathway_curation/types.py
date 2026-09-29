@@ -119,7 +119,26 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: ``discover_kinetics_sabiork`` gained one new optional parameter
 #: (``resolve_substrate``, defaulted to ``None``, exactly mirroring
 #: ``resolve_publication``'s own v1.6 addition).
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.11"
+#:
+#: Bumped to ``v1.12`` by Agent 1.x Increment "SGD Reference Protein Abundance
+#: Integration": a new, optional ``include_protein_abundance`` request field (default
+#: ``False`` -- existing callers/tests need no change) gates a new enrichment step,
+#: ``executor._discover_protein_abundance``, that queries SGD's own reference
+#: (cross-study median) protein abundance figure for every protein already resolved
+#: this run with a curated ``Gene.sgd_id``, and persists each as a
+#: ``QuantitativeObservation`` (``observation_type=PROTEIN_ABUNDANCE``,
+#: ``evidence_class=REFERENCE_BASELINE``) attached to one reusable, get-or-create SGD
+#: reference ``ExperimentalContext`` per organism -- never a ``KineticMeasurement``,
+#: never a concentration, never a 0.1 pL cell-volume assumption. Two new
+#: ``FrontierReason`` members (``MISSING_PROTEIN_ABUNDANCE``,
+#: ``PROTEIN_ABUNDANCE_REQUESTED_NOT_ATTEMPTED``) mirror ``MISSING_KINETICS``/
+#: ``KINETICS_REQUESTED_NOT_ATTEMPTED`` exactly, and are deliberately never added to
+#: any ``policy.required_frontier_reasons`` category -- missing abundance data is
+#: bounded, non-blocking enrichment (never gates ``COMPLETE``/``COMPLETE_WITH_GAPS``
+#: under any completion policy, and one malformed/missing record never aborts
+#: discovery for the rest of the run). No existing request/result field was removed
+#: or repurposed.
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.12"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase
@@ -278,6 +297,21 @@ class FrontierReason(StrEnum):
     #: never even attempted, distinct from ``MISSING_KINETICS`` (attempted, no measurements
     #: found). Added in the Increment C pre-commit revision.
     KINETICS_REQUESTED_NOT_ATTEMPTED = "KINETICS_REQUESTED_NOT_ATTEMPTED"
+    #: ``include_protein_abundance=True`` was requested, and a protein was queried
+    #: against SGD, but SGD reported no reference abundance figure for it at all (a
+    #: real, common, non-error outcome -- ``SgdProteinAbundance``'s own docstring) --
+    #: mirrors ``MISSING_KINETICS``'s identical "attempted, nothing found" shape. Added
+    #: in the "SGD Reference Protein Abundance Integration" increment. Deliberately
+    #: never added to any ``policy.required_frontier_reasons`` category -- missing
+    #: abundance data is bounded, non-blocking enrichment (task's own explicit
+    #: requirement) and never gates ``COMPLETE``/``COMPLETE_WITH_GAPS`` under any
+    #: completion policy.
+    MISSING_PROTEIN_ABUNDANCE = "MISSING_PROTEIN_ABUNDANCE"
+    #: ``include_protein_abundance=True`` was requested, but no protein was ever
+    #: resolved this run with an SGD gene identity to query -- abundance enrichment was
+    #: never even attempted, distinct from ``MISSING_PROTEIN_ABUNDANCE`` (attempted, no
+    #: data found). Mirrors ``KINETICS_REQUESTED_NOT_ATTEMPTED`` exactly.
+    PROTEIN_ABUNDANCE_REQUESTED_NOT_ATTEMPTED = "PROTEIN_ABUNDANCE_REQUESTED_NOT_ATTEMPTED"
     MISSING_REGULATION = "MISSING_REGULATION"
     #: ``include_regulation=True`` (or ``include_enzyme_states=True``) was requested, but
     #: this executor has no regulation/enzyme-state discovery route at all (§25 of
@@ -428,6 +462,15 @@ class PathwayCurationRequest:
     include_regulation: bool = False
     include_enzyme_states: bool = False
     include_publications: bool = True
+    #: Agent 1.x Increment "SGD Reference Protein Abundance Integration". Opt-in, defaults
+    #: ``False`` like every other ``include_*`` capability toggle -- an existing caller that
+    #: does not set this explicitly sees no behavior change at all. When ``True``, every
+    #: protein already resolved this run (via ``resolved_protein_ec_numbers``, the same set
+    #: kinetics enrichment already reuses) whose ``Gene.sgd_id`` is known is queried for SGD's
+    #: own reference protein-abundance figure -- bounded and non-blocking: a protein with no
+    #: abundance data, an unresolved gene link, or a live SGD failure is skipped, never
+    #: aborting the rest of the run (see ``docs/26_autonomous_pathway_curation_planner.md``).
+    include_protein_abundance: bool = False
 
     exclusions: tuple[str, ...] = ()
 
@@ -507,6 +550,7 @@ class PathwayCurationRequest:
             "include_regulation",
             "include_enzyme_states",
             "include_publications",
+            "include_protein_abundance",
         ):
             value = getattr(self, name)
             if not isinstance(value, bool):

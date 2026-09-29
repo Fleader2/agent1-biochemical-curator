@@ -84,6 +84,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
@@ -189,6 +190,69 @@ class SgdGoAnnotation:
 
 
 @dataclass(frozen=True, slots=True)
+class SgdProteinAbundance:
+    """SGD's own reference/median protein-abundance figure for one locus (Agent 1.x
+    Increment "SGD Reference Protein Abundance Integration").
+
+    Confirmed live (this increment): a locus record's ``protein_overview`` object
+    carries ``median_value``/``median_abs_dev_value`` -- SGD's own page for this data
+    (e.g. ``/locus/{id}/protein`` -> "Protein Abundance") states these are computed
+    **across over 20 independently reported studies, normalized and converted to a
+    common unit of molecules per cell** -- i.e. this is already SGD's own documented,
+    integrated/reference figure, never averaged or otherwise recomputed by this
+    connector. ``value``/``median_absolute_deviation`` are both in ``molecules/cell``
+    -- confirmed by cross-checking against the same locus's own
+    ``/locus/{id}/protein_abundance_details`` sub-resource (not otherwise consumed by
+    this connector), whose individual per-study rows explicitly carry
+    ``data_unit == "molecules/cell"`` and whose values are the same order of magnitude
+    as this summary figure.
+
+    ``median_absolute_deviation`` is ``None`` only in the (unobserved but
+    structurally possible) case SGD reports a median with no corresponding MAD --
+    never fabricated when absent.
+    """
+
+    value: Decimal
+    median_absolute_deviation: Decimal | None
+
+
+def _parse_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        try:
+            return Decimal(str(value))
+        except InvalidOperation:
+            return None
+    if isinstance(value, str) and value.strip():
+        try:
+            return Decimal(value.strip())
+        except InvalidOperation:
+            return None
+    return None
+
+
+def _parse_protein_abundance(data: Any) -> SgdProteinAbundance | None:
+    """Extract SGD's own reference abundance figure from a locus record's own
+    ``protein_overview`` object, or ``None`` when SGD has no such data for this locus
+    (a legitimate, common case -- confirmed live for several real, low-visibility
+    genes -- never an error).
+    """
+    if not isinstance(data, dict):
+        return None
+    overview = data.get("protein_overview")
+    if not isinstance(overview, dict):
+        return None
+    value = _parse_decimal(overview.get("median_value"))
+    if value is None:
+        return None
+    mad = _parse_decimal(overview.get("median_abs_dev_value"))
+    return SgdProteinAbundance(value=value, median_absolute_deviation=mad)
+
+
+@dataclass(frozen=True, slots=True)
 class SgdLocusRecord:
     """Source-native parsed record for one SGD locus -- nothing discarded.
 
@@ -199,6 +263,10 @@ class SgdLocusRecord:
     verification found none on this endpoint (SGD may expose genomic
     coordinates via a separate ``sequence_details`` endpoint, not
     implemented here).
+
+    ``protein_abundance`` (Agent 1.x Increment "SGD Reference Protein Abundance
+    Integration") is ``None`` when SGD has no reference abundance data for this
+    locus -- see ``SgdProteinAbundance``'s own docstring.
     """
 
     sgd_id: str
@@ -210,6 +278,11 @@ class SgdLocusRecord:
     uniprot_id: str | None
     external_links: tuple[SgdExternalLink, ...]
     raw: dict[str, Any]
+    #: Field added after every other field above, with a default, specifically so every
+    #: pre-existing keyword-argument construction call site across this codebase (tests,
+    #: other connectors' fakes) continues to work unmodified -- see this field's sibling
+    #: on ``SgdNormalizedRecord`` for the identical reasoning.
+    protein_abundance: SgdProteinAbundance | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +305,9 @@ class SgdNormalizedRecord:
     uniprot_id: str | None
     external_links: tuple[SgdExternalLink, ...]
     raw: SgdLocusRecord
+    #: Field added after every other field above, with a default -- see
+    #: ``SgdLocusRecord.protein_abundance``'s own identical comment.
+    protein_abundance: SgdProteinAbundance | None = None
 
 
 def _optional_str(value: Any) -> str | None:
@@ -302,6 +378,7 @@ def parse_locus_response(data: Any) -> SgdLocusRecord:
         aliases=_parse_aliases(data.get("aliases")),
         uniprot_id=_optional_str(data.get("uniprot_id")),
         external_links=_parse_external_links(data.get("urls")),
+        protein_abundance=_parse_protein_abundance(data),
         raw=data,
     )
 
@@ -420,6 +497,91 @@ def parse_go_details_response(data: Any) -> list[SgdGoAnnotation]:
     return annotations
 
 
+@dataclass(frozen=True, slots=True)
+class SgdReferenceRecord:
+    """One SGD literature reference (``/reference/{id}``), Agent 1.x Increment "SGD
+    Reference Protein Abundance Integration".
+
+    Added specifically so this connector can resolve the *publication* that SGD's own
+    reference protein-abundance figure (``SgdProteinAbundance``) is documented under --
+    confirmed live: every per-study row of a real locus's own
+    ``/locus/{id}/protein_abundance_details`` cites the identical meta-analysis
+    reference (SGD id ``S000207593``, Ho B, et al. (2018), "Unification of Protein
+    Abundance Datasets Yields a Quantitative Saccharomyces cerevisiae Proteome," Cell
+    Syst 6(2):192-205.e3), confirmed to carry ``pubmed_id: 29361465`` here. ``pubmed_id``
+    is ``None`` when SGD's own reference record does not carry one (a real, disclosed
+    case this connector does not invent a value for).
+    """
+
+    sgd_id: str
+    citation: str | None
+    pubmed_id: str | None
+    year: int | None
+
+
+def parse_reference_response(data: Any) -> SgdReferenceRecord:
+    """Parse a single SGD ``/reference/{id}`` JSON object. Pure: no HTTP or DB access."""
+    if not isinstance(data, dict):
+        raise ConnectorParseError(
+            f"malformed SGD reference response: expected a JSON object, got {type(data).__name__}"
+        )
+    sgd_id = data.get("sgdid")
+    if not isinstance(sgd_id, str) or not sgd_id.strip():
+        raise ConnectorParseError("malformed SGD reference response: missing or empty 'sgdid'")
+
+    pubmed_id = data.get("pubmed_id")
+    year = data.get("year")
+    return SgdReferenceRecord(
+        sgd_id=sgd_id.strip(),
+        citation=_optional_str(data.get("citation")),
+        pubmed_id=str(pubmed_id) if isinstance(pubmed_id, int | str) and pubmed_id else None,
+        year=year if isinstance(year, int) else None,
+    )
+
+
+def parse_protein_abundance_details_response(data: Any) -> str | None:
+    """Extract the shared meta-reference SGD id from a
+    ``/locus/{id}/protein_abundance_details`` response, Agent 1.x Increment "SGD
+    Reference Protein Abundance Integration".
+
+    Live-verified (CDC28/YBR160W, 30 rows from 19 distinct original studies): every
+    per-study row's own ``reference`` field is identical -- SGD's own meta-analysis
+    citation for the *aggregate* median figure (``SgdProteinAbundance``), never the
+    individual original study each row separately names in its own
+    ``original_reference`` field (deliberately not extracted here -- this connector
+    resolves the meta-reference only, mirroring ``SgdProteinAbundance`` itself never
+    ingesting the heterogeneous per-study rows). Only the first row is read; this
+    function does not verify every row agrees, since doing so would require ingesting
+    the very heterogeneous per-study data this increment's design deliberately avoids.
+
+    Returns ``None`` for a locus with no abundance-detail rows at all -- a real,
+    disclosed case (confirmed live for genes with no ``protein_overview.median_value``),
+    never an error.
+    """
+    if not isinstance(data, list):
+        raise ConnectorParseError(
+            "malformed SGD protein_abundance_details response: expected a JSON array, "
+            f"got {type(data).__name__}"
+        )
+    if not data:
+        return None
+    first = data[0]
+    if not isinstance(first, dict):
+        raise ConnectorParseError(f"malformed SGD protein_abundance_details entry: {first!r}")
+    reference = first.get("reference")
+    if not isinstance(reference, dict):
+        raise ConnectorParseError(
+            f"malformed SGD protein_abundance_details entry: missing 'reference': {first!r}"
+        )
+    reference_sgd_id = _sgd_id_from_href(reference.get("link"))
+    if not reference_sgd_id:
+        raise ConnectorParseError(
+            f"malformed SGD protein_abundance_details entry: unusable reference.link: "
+            f"{reference!r}"
+        )
+    return reference_sgd_id
+
+
 def normalize_locus(record: SgdLocusRecord) -> SgdNormalizedRecord:
     """Map a generic parsed record onto SGD-scoped, schema-shaped fields.
 
@@ -435,6 +597,7 @@ def normalize_locus(record: SgdLocusRecord) -> SgdNormalizedRecord:
         aliases=tuple(a.display_name for a in record.aliases if a.category == "Alias"),
         uniprot_id=record.uniprot_id,
         external_links=record.external_links,
+        protein_abundance=record.protein_abundance,
         raw=record,
     )
 
@@ -561,6 +724,50 @@ class SgdConnector:
         data = _parse_json(response.text, context="go_details")
         return parse_go_details_response(data)
 
+    def fetch_reference(self, reference_sgd_id: str) -> SgdReferenceRecord | None:
+        """Retrieve one SGD literature reference by its SGD reference id (e.g.
+        ``"S000207593"``), Agent 1.x Increment "SGD Reference Protein Abundance
+        Integration". Returns ``None`` when SGD reports the identifier does not exist
+        (HTTP 404, same convention as ``fetch()``/``fetch_go_details()``).
+        """
+        identifier = reference_sgd_id.strip()
+        if not identifier:
+            raise ValueError("reference_sgd_id must not be empty")
+
+        url = f"{self._base_url}/reference/{quote(identifier, safe='')}"
+        try:
+            response = self._http.get(url)
+        except ConnectorHTTPError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        data = _parse_json(response.text, context="reference")
+        return parse_reference_response(data)
+
+    def fetch_protein_abundance_reference_id(self, sgd_id: str) -> str | None:
+        """Retrieve the shared meta-reference SGD id for one locus's protein-abundance
+        aggregate, Agent 1.x Increment "SGD Reference Protein Abundance Integration".
+
+        See ``parse_protein_abundance_details_response`` for what this extracts and
+        why. Returns ``None`` both when the locus itself does not exist (HTTP 404,
+        same convention as every other method here) and when it exists but has no
+        abundance-detail rows -- this connector's callers only ever need "is there a
+        resolvable reference, yes or no," not which of these two cases applies.
+        """
+        identifier = sgd_id.strip()
+        if not identifier:
+            raise ValueError("sgd_id must not be empty")
+
+        url = f"{self._base_url}/locus/{quote(identifier, safe='')}/protein_abundance_details"
+        try:
+            response = self._http.get(url)
+        except ConnectorHTTPError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        data = _parse_json(response.text, context="protein_abundance_details")
+        return parse_protein_abundance_details_response(data)
+
     def normalize(self, raw: SgdLocusRecord) -> SgdNormalizedRecord:
         """Map a parsed SGD locus record onto an SGD-scoped normalized shape."""
         return normalize_locus(raw)
@@ -573,10 +780,14 @@ __all__ = [
     "SgdGoAnnotation",
     "SgdLocusRecord",
     "SgdNormalizedRecord",
+    "SgdProteinAbundance",
+    "SgdReferenceRecord",
     "SgdSearchHit",
     "classify_sgd_identifier",
     "normalize_locus",
     "parse_go_details_response",
     "parse_locus_response",
+    "parse_protein_abundance_details_response",
+    "parse_reference_response",
     "parse_search_response",
 ]

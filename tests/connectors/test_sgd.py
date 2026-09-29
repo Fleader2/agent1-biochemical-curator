@@ -25,6 +25,7 @@ Fixtures").
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -38,10 +39,14 @@ from app.connectors.sgd import (
     SgdConnector,
     SgdExternalLink,
     SgdLocusRecord,
+    SgdProteinAbundance,
+    SgdReferenceRecord,
     classify_sgd_identifier,
     normalize_locus,
     parse_go_details_response,
     parse_locus_response,
+    parse_protein_abundance_details_response,
+    parse_reference_response,
     parse_search_response,
 )
 from app.models.enums import SourceType
@@ -266,6 +271,149 @@ def test_sgd_fetch_go_details_empty_list_when_no_annotations() -> None:
     annotations = connector.fetch_go_details("S000000364")
 
     assert annotations == []
+
+
+# --- Protein abundance (Agent 1.x Increment "SGD Reference Protein Abundance
+# Integration") --------------------------------------------------------------------------------
+
+
+def test_sgd_locus_with_abundance_parses_protein_overview() -> None:
+    """Real, live-confirmed CDC28 median abundance figure (6670 molecules/cell,
+    MAD 1539) is parsed from the locus record's own ``protein_overview`` object."""
+    record = _parsed_fixture("locus_cdc28_with_abundance.json")
+
+    assert record.protein_abundance == SgdProteinAbundance(
+        value=Decimal("6670"), median_absolute_deviation=Decimal("1539")
+    )
+
+
+def test_sgd_locus_without_protein_overview_has_no_abundance() -> None:
+    """A real, common, non-error case: SGD reports no abundance data for this locus at
+    all -- never fabricated as zero or any other placeholder value."""
+    record = _parsed_fixture("locus_cdc28.json")
+
+    assert record.protein_abundance is None
+
+
+def test_sgd_minimal_locus_has_no_abundance() -> None:
+    record = _parsed_fixture("locus_minimal.json")
+
+    assert record.protein_abundance is None
+
+
+def test_sgd_fetch_returns_abundance_via_full_connector_call() -> None:
+    """End-to-end: ``fetch()`` through a mocked HTTP transport surfaces the same
+    parsed abundance figure as the pure parser."""
+    handler = _RecordingHandler(
+        httpx.Response(200, text=_fixture("locus_cdc28_with_abundance.json"))
+    )
+    connector = SgdConnector(_client_for(handler), base_url=_BASE_URL)
+
+    record = connector.fetch("CDC28")
+
+    assert record is not None
+    assert record.protein_abundance == SgdProteinAbundance(
+        value=Decimal("6670"), median_absolute_deviation=Decimal("1539")
+    )
+
+
+def test_sgd_reference_response_parses_pubmed_id() -> None:
+    """Real, live-confirmed: SGD reference S000207593 (Ho et al. 2018) carries
+    ``pubmed_id`` 29361465 -- the meta-reference for SGD's own abundance aggregate."""
+    reference = parse_reference_response(json.loads(_fixture("reference_ho2018.json")))
+
+    assert reference == SgdReferenceRecord(
+        sgd_id="S000207593",
+        citation=(
+            "Ho B, et al. (2018) Unification of Protein Abundance Datasets Yields a "
+            "Quantitative Saccharomyces cerevisiae Proteome. Cell Syst 6(2):192-205.e3"
+        ),
+        pubmed_id="29361465",
+        year=2018,
+    )
+
+
+def test_sgd_fetch_reference_returns_none_for_unknown_reference() -> None:
+    handler = _RecordingHandler(httpx.Response(404, text="not found"))
+    connector = SgdConnector(_client_for(handler, max_retries=0), base_url=_BASE_URL)
+
+    assert connector.fetch_reference("S099999999") is None
+
+
+def test_sgd_fetch_reference_calls_verified_endpoint() -> None:
+    handler = _RecordingHandler(httpx.Response(200, text=_fixture("reference_ho2018.json")))
+    connector = SgdConnector(_client_for(handler), base_url=_BASE_URL)
+
+    reference = connector.fetch_reference("S000207593")
+
+    assert len(handler.requests) == 1
+    assert handler.requests[0].url.path == "/sgd/reference/S000207593"
+    assert reference is not None
+    assert reference.pubmed_id == "29361465"
+
+
+def test_sgd_reference_response_missing_sgdid_raises_parse_error() -> None:
+    with pytest.raises(ConnectorParseError):
+        parse_reference_response({"pubmed_id": 123})
+
+
+def test_sgd_reference_response_no_pubmed_id_is_none_never_fabricated() -> None:
+    reference = parse_reference_response({"sgdid": "S000000001"})
+
+    assert reference.pubmed_id is None
+
+
+def test_sgd_protein_abundance_details_extracts_shared_meta_reference() -> None:
+    """Every one of CDC28's real per-study rows shares the identical meta-reference
+    (Ho et al. 2018, S000207593) -- confirmed live; only the first row is read."""
+    reference_sgd_id = parse_protein_abundance_details_response(
+        json.loads(_fixture("protein_abundance_details_cdc28.json"))
+    )
+
+    assert reference_sgd_id == "S000207593"
+
+
+def test_sgd_protein_abundance_details_empty_list_is_none() -> None:
+    """A locus with no abundance-detail rows at all -- a real, disclosed case, never
+    an error."""
+    assert parse_protein_abundance_details_response([]) is None
+
+
+def test_sgd_protein_abundance_details_not_a_list_raises_parse_error() -> None:
+    with pytest.raises(ConnectorParseError):
+        parse_protein_abundance_details_response({"not": "a list"})
+
+
+def test_sgd_protein_abundance_details_missing_reference_raises_parse_error() -> None:
+    with pytest.raises(ConnectorParseError):
+        parse_protein_abundance_details_response([{"data_value": 100}])
+
+
+def test_sgd_fetch_protein_abundance_reference_id_returns_none_for_unknown_locus() -> None:
+    handler = _RecordingHandler(httpx.Response(404, text="not found"))
+    connector = SgdConnector(_client_for(handler, max_retries=0), base_url=_BASE_URL)
+
+    assert connector.fetch_protein_abundance_reference_id("NOSUCHGENE") is None
+
+
+def test_sgd_fetch_protein_abundance_reference_id_returns_none_for_empty_details() -> None:
+    handler = _RecordingHandler(httpx.Response(200, text="[]"))
+    connector = SgdConnector(_client_for(handler), base_url=_BASE_URL)
+
+    assert connector.fetch_protein_abundance_reference_id("S000000364") is None
+
+
+def test_sgd_fetch_protein_abundance_reference_id_calls_verified_endpoint() -> None:
+    handler = _RecordingHandler(
+        httpx.Response(200, text=_fixture("protein_abundance_details_cdc28.json"))
+    )
+    connector = SgdConnector(_client_for(handler), base_url=_BASE_URL)
+
+    reference_sgd_id = connector.fetch_protein_abundance_reference_id("S000000364")
+
+    assert len(handler.requests) == 1
+    assert handler.requests[0].url.path == "/sgd/locus/S000000364/protein_abundance_details"
+    assert reference_sgd_id == "S000207593"
 
 
 # --- Malformed content ----------------------------------------------------------

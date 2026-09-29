@@ -317,6 +317,19 @@ def execute_pathway_curation(
                 _record_kinetics_not_attempted(state=state)
                 steps_executed.append("kinetics-not-attempted")
 
+        if effective_request.include_protein_abundance and iteration_number == 1:
+            _discover_protein_abundance(
+                connectors=connectors,
+                organism_id=organism_id,
+                resolved_protein_ids=_resolved_protein_ids_for_abundance(
+                    session, state.discovered_entity_ids
+                ),
+                publication_lookup=publication_lookup,
+                session=session,
+                state=state,
+            )
+            steps_executed.append("discover-protein-abundance")
+
         frontier_after = state.snapshot_frontier()
         made_progress = (
             len(state.discovered_entity_ids) > new_entities_before
@@ -2444,6 +2457,220 @@ def _discover_kinetics(
                     notes="no kinetic measurements found from any configured source",
                 )
             )
+
+
+def _resolved_protein_ids_for_abundance(
+    session: Session, discovered_entity_ids: list[UUID]
+) -> tuple[UUID, ...]:
+    """Every already-discovered entity id this run that is actually a ``Protein`` row
+    (Agent 1.x Increment "SGD Reference Protein Abundance Integration").
+
+    ``state.discovered_entity_ids`` mixes organisms/genes/proteins/compounds/
+    publications together with no type discrimination (every ``record_entity`` call
+    across this module appends to the same flat list) -- this filters it down via one
+    plain query, mirroring ``_ec_numbers_for_protein``'s own plain-``session.get``
+    convention. Deliberately **not** ``resolved_protein_ec_numbers`` (which
+    ``_discover_kinetics`` uses): that list only ever contains proteins that also
+    carry a curated EC number, which would silently exclude any pathway-resolved
+    protein SGD has abundance data for but this repository has not (yet) curated an
+    EC number for -- task Sec 7's own "pathway-resolved proteins," not "EC-resolved
+    proteins."
+    """
+    from sqlalchemy import select
+
+    from app.models.protein import Protein
+
+    if not discovered_entity_ids:
+        return ()
+    return tuple(
+        session.execute(select(Protein.id).where(Protein.id.in_(discovered_entity_ids)))
+        .scalars()
+        .all()
+    )
+
+
+def _discover_protein_abundance(
+    *,
+    connectors: PathwayConnectorBundle,
+    organism_id: UUID,
+    resolved_protein_ids: tuple[UUID, ...],
+    publication_lookup,
+    session: Session,
+    state: CurationRunState,
+) -> None:
+    """Discover SGD reference protein abundance for every protein already resolved
+    this run with a curated ``Gene.sgd_id`` (Agent 1.x Increment "SGD Reference Protein
+    Abundance Integration"). Mirrors ``_discover_kinetics``'s own bounded,
+    per-already-resolved-protein iteration shape, narrowed to SGD's single reference
+    abundance figure -- never a bare gene symbol guessed from a reaction, never a
+    fuzzy protein match (task Sec 3): only proteins already resolved via the existing
+    gene/protein identity machinery, with an already-curated ``Gene.sgd_id``, are ever
+    queried here. ``resolved_protein_ids`` comes from
+    ``_resolved_protein_ids_for_abundance`` -- see that function's own docstring for
+    why this is deliberately not ``resolved_protein_ec_numbers``.
+
+    **Bounded and non-blocking** (task Sec 7): a protein with no ``gene_id``/no
+    ``Gene.sgd_id``, a protein SGD reports no abundance figure for, or a single
+    connector failure is recorded as its own warning/frontier item -- never aborts
+    discovery for any other protein in the same run.
+
+    **No concentration derivation** (task Sec 5): every persisted observation carries
+    ``observation_type=PROTEIN_ABUNDANCE``/``unit=molecules/cell`` only -- this
+    function never converts to a concentration and never assumes a cell volume.
+
+    The one shared SGD meta-reference publication (Ho et al. 2018 -- confirmed live
+    identical across every real locus's own abundance-detail rows, see
+    ``strategies.resolve_sgd_abundance_reference_publication``'s own docstring) is
+    resolved **at most once per run**, via ``publication_resolved``/
+    ``resolved_publication_id`` (a single-slot cache, not a per-PMID ``dict`` like
+    kinetics' own ``pmid_publication_cache`` -- this run has exactly one distinct PMID
+    to ever resolve here) -- reused across every protein's own persisted observation.
+    """
+    from app.models.gene import Gene
+    from app.models.protein import Protein
+    from app.persistence.quantitative_observation import (
+        get_or_create_sgd_abundance_reference_context,
+        persist_quantitative_observation,
+    )
+
+    if connectors.sgd is None:
+        state.add_frontier(
+            CurationFrontierItem(
+                frontier_id=build_frontier_id(
+                    entity_kind=EntityKind.PROTEIN,
+                    reason=FrontierReason.NO_CONNECTOR_AVAILABLE,
+                    anchor="protein_abundance",
+                ),
+                entity_kind=EntityKind.PROTEIN,
+                reason=FrontierReason.NO_CONNECTOR_AVAILABLE,
+                priority=6,
+                entity_text="protein_abundance",
+                notes="no SGD connector configured",
+            )
+        )
+        return
+
+    protein_ids = sorted(set(resolved_protein_ids), key=str)
+    if not protein_ids:
+        _record_protein_abundance_not_attempted(state=state)
+        return
+
+    reference_context = get_or_create_sgd_abundance_reference_context(
+        session, organism_id=organism_id
+    )
+
+    publication_resolved = False
+    resolved_publication_id: UUID | None = None
+
+    def _resolve_publication(pmid: str) -> UUID | None:
+        if connectors.pubmed is None:
+            return None
+        try:
+            outcome = strategies.resolve_publication_by_pmid(
+                connectors.pubmed, pmid, lookup=publication_lookup, session=session
+            )
+        except ConnectorError as exc:
+            state.warn(
+                f"PubMed publication resolution failed for PMID {pmid} "
+                f"(protein abundance provenance): {exc}"
+            )
+            return None
+        state.record_connector_call()
+        if outcome.entity_id is not None:
+            state.record_publication(outcome.entity_id)
+        return outcome.entity_id
+
+    for protein_id in protein_ids:
+        protein = session.get(Protein, protein_id)
+        if protein is None or protein.gene_id is None:
+            continue
+        gene = session.get(Gene, protein.gene_id)
+        if gene is None or not gene.sgd_id:
+            continue
+        sgd_id = gene.sgd_id
+
+        identity = query_identity(
+            connector=SourceType.SGD, action="discover_protein_abundance", sgd_id=sgd_id
+        )
+        if state.has_run_query(identity):
+            continue
+
+        if not publication_resolved:
+            try:
+                resolved_publication_id = strategies.resolve_sgd_abundance_reference_publication(
+                    connectors.sgd, sgd_id, resolve_publication=_resolve_publication
+                )
+            except ConnectorError as exc:
+                state.warn(
+                    f"SGD abundance reference-publication resolution failed for {sgd_id}: {exc}"
+                )
+                resolved_publication_id = None
+            state.record_connector_call()
+            publication_resolved = True
+
+        try:
+            observation_identity = strategies.discover_protein_abundance_sgd(
+                connectors.sgd,
+                sgd_id,
+                protein_id=protein_id,
+                organism_id=organism_id,
+                experimental_context_id=reference_context.id,
+                publication_id=resolved_publication_id,
+            )
+        except ConnectorError as exc:
+            state.warn(f"SGD protein abundance discovery failed for {sgd_id}: {exc}")
+            observation_identity = None
+        state.record_connector_call()
+        state.record_query(identity, display_text=f"SGD protein abundance: {sgd_id}")
+
+        if observation_identity is None:
+            state.add_frontier(
+                CurationFrontierItem(
+                    frontier_id=build_frontier_id(
+                        entity_kind=EntityKind.PROTEIN,
+                        reason=FrontierReason.MISSING_PROTEIN_ABUNDANCE,
+                        anchor=sgd_id,
+                    ),
+                    entity_kind=EntityKind.PROTEIN,
+                    reason=FrontierReason.MISSING_PROTEIN_ABUNDANCE,
+                    priority=6,
+                    entity_text=sgd_id,
+                    notes="SGD reports no reference protein abundance figure for this locus",
+                )
+            )
+            continue
+
+        try:
+            persist_quantitative_observation(observation_identity, session=session)
+        except (TypeError, ValueError) as exc:  # pragma: no cover -- defensive
+            raise CurationExecutionError(
+                f"failed to persist protein abundance observation for {sgd_id}: {exc}"
+            ) from exc
+
+
+def _record_protein_abundance_not_attempted(*, state: CurationRunState) -> None:
+    """``include_protein_abundance=True`` was requested, but no resolved protein this run
+    carried a resolvable ``Gene.sgd_id`` -- there is nothing to search SGD against, so
+    abundance enrichment is never even attempted, distinct from ``MISSING_PROTEIN_ABUNDANCE``
+    (attempted, nothing found). Mirrors ``_record_kinetics_not_attempted`` exactly."""
+    state.add_frontier(
+        CurationFrontierItem(
+            frontier_id=build_frontier_id(
+                entity_kind=EntityKind.PROTEIN,
+                reason=FrontierReason.PROTEIN_ABUNDANCE_REQUESTED_NOT_ATTEMPTED,
+                anchor="protein_abundance",
+            ),
+            entity_kind=EntityKind.PROTEIN,
+            reason=FrontierReason.PROTEIN_ABUNDANCE_REQUESTED_NOT_ATTEMPTED,
+            priority=1,
+            entity_text="protein_abundance",
+            notes=(
+                "include_protein_abundance was requested, but no resolved protein carried "
+                "a resolvable Gene.sgd_id to search SGD against -- protein abundance "
+                "enrichment was never attempted"
+            ),
+        )
+    )
 
 
 def _build_result(

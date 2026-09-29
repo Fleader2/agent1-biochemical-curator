@@ -18,11 +18,20 @@ from sqlalchemy.orm import Session
 
 from app.connectors.exceptions import ConnectorError
 from app.connectors.sabiork import SabioCompoundExternalIdentity, SabioReactionSpecies
+from app.connectors.sgd import SgdProteinAbundance, SgdReferenceRecord
 from app.connectors.uniprot import UniProtProteinRecord
 from app.models.compound import Compound
-from app.models.enums import ReactionParticipantRole, SourceType
+from app.models.enums import (
+    ExperimentalContextClassification,
+    QuantitativeEvidenceClass,
+    ReactionParticipantRole,
+    SourceType,
+)
+from app.models.experimental_context import ExperimentalContext
 from app.models.protein import Protein
+from app.models.quantitative_observation import QuantitativeObservation
 from app.models.source_cross_reference import SourceCrossReference
+from app.normalization.quantitative_observation import QuantitativeObservationType
 from app.pathway_curation.errors import InvalidCurationRequestError
 from app.pathway_curation.executor import PathwayConnectorBundle, execute_pathway_curation
 from app.pathway_curation.types import (
@@ -5060,3 +5069,485 @@ def test_c7_resolved_substrate_coexists_with_protein_and_publication_context(
     assert measurement.substrate_id == existing.id
     assert measurement.protein_id is not None
     assert measurement.publication_id is not None
+
+
+# --- SGD reference protein abundance (Agent 1.x Increment "SGD Reference Protein
+# Abundance Integration") ---------------------------------------------------------------------
+
+
+def _abundance_request(**overrides) -> PathwayCurationRequest:
+    merged = {"include_protein_abundance": True} | overrides
+    return _c2_request(**merged)
+
+
+def _cem1_kegg() -> FakeKeggConnector:
+    return _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+        )
+    )
+
+
+def _cem1_uniprot() -> FakeUniProtConnector:
+    return FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            )
+        }
+    )
+
+
+def test_abundance_wiring_persists_an_observation_for_the_resolved_protein(
+    db_session: Session,
+) -> None:
+    """Real, live-confirmed CDC28-shaped figure reused here for CEM1: 6670
+    molecules/cell, MAD 1539 -- the central wiring regression."""
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=Decimal("1539")
+                ),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(request_id="req-abundance-basic", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=_cem1_uniprot()),
+    )
+
+    resolved_protein_id = result.agent1_knowledge_package.proteins[0].id
+    observations = result.agent1_knowledge_package.quantitative_observations
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation.observation_type == QuantitativeObservationType.PROTEIN_ABUNDANCE.value
+    assert observation.value == Decimal("6670")
+    assert observation.unit == "molecules/cell"
+    assert observation.normalized_value == Decimal("6670")
+    assert observation.normalized_unit == "molecules_per_cell"
+    assert observation.uncertainty == Decimal("1539")
+    assert observation.evidence_class is QuantitativeEvidenceClass.REFERENCE_BASELINE
+    assert observation.protein_id == resolved_protein_id
+    assert observation.organism_id == result.organism_id
+    assert observation.source is SourceType.SGD
+    assert observation.source_id == "sgd-protein-abundance:S000000001"
+
+
+def test_abundance_never_derives_a_concentration(db_session: Session) -> None:
+    """Task's own explicit exclusion: no nM value, no 0.1 pL cell-volume assumption."""
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=None
+                ),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(request_id="req-abundance-no-derivation", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=_cem1_uniprot()),
+    )
+
+    (observation,) = result.agent1_knowledge_package.quantitative_observations
+    assert observation.observation_type != QuantitativeObservationType.PROTEIN_CONCENTRATION.value
+    assert "pL" not in observation.unit
+    assert "0.1 pL" not in (observation.notes or "")
+
+
+def test_abundance_reference_context_created_and_attached(db_session: Session) -> None:
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=None
+                ),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(request_id="req-abundance-context", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=_cem1_uniprot()),
+    )
+
+    (observation,) = result.agent1_knowledge_package.quantitative_observations
+    assert observation.experimental_context_id is not None
+    contexts = result.agent1_knowledge_package.experimental_contexts
+    assert len(contexts) == 1
+    context = contexts[0]
+    assert context.id == observation.experimental_context_id
+    assert context.classification is ExperimentalContextClassification.REFERENCE
+    assert context.source is SourceType.SGD
+    # SGD documents none of these -- never invented (task Sec 2).
+    assert context.medium is None
+    assert context.strain is None
+    assert context.temperature_c is None
+
+
+def test_abundance_reference_context_reused_across_two_proteins(db_session: Session) -> None:
+    """Task Sec 2/6: one deterministic reference context, reused -- never a fresh
+    context per protein."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+            FakeKgmlEntrySpec(entry_type="gene", names=("YKL182W",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=None
+                ),
+            ),
+            "YKL182W": make_sgd_locus(
+                sgd_id="S000000002",
+                systematic_name="YKL182W",
+                standard_name="FAS1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("74144"), median_absolute_deviation=None
+                ),
+            ),
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+            "FAS1": make_uniprot_entry(
+                accession="P19097",
+                recommended_name="fake FAS1",
+                gene_names=("FAS1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+        }
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(request_id="req-abundance-shared-context", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot),
+    )
+
+    observations = result.agent1_knowledge_package.quantitative_observations
+    assert len(observations) == 2
+    context_ids = {obs.experimental_context_id for obs in observations}
+    assert len(context_ids) == 1  # exactly one shared reference context
+    assert len(result.agent1_knowledge_package.experimental_contexts) == 1
+
+
+def test_abundance_missing_data_recorded_as_frontier_never_blocks(db_session: Session) -> None:
+    """A real, common, non-error SGD outcome (no protein_overview at all) -- never
+    fabricated, and never blocks completion under any policy (task Sec 7)."""
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001", systematic_name="YER061C", standard_name="CEM1"
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(request_id="req-abundance-missing", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=_cem1_uniprot()),
+    )
+
+    assert result.agent1_knowledge_package.quantitative_observations == ()
+    frontier_reasons = {item.reason for item in result.unresolved_frontier}
+    assert FrontierReason.MISSING_PROTEIN_ABUNDANCE in frontier_reasons
+    assert result.completion_status in (
+        CompletionStatus.COMPLETE,
+        CompletionStatus.COMPLETE_WITH_GAPS,
+    )
+
+
+def test_abundance_no_resolved_protein_recorded_as_not_attempted(db_session: Session) -> None:
+    """An SGD connector is configured, but no protein resolved this run at all (no
+    catalyst entries) -- distinct from ``MISSING_PROTEIN_ABUNDANCE`` (attempted,
+    nothing found): there is nothing to search SGD against in the first place."""
+    kegg = _kegg_with_reactions(("R00742",))
+    result = execute_pathway_curation(
+        _abundance_request(
+            request_id="req-abundance-no-protein", seed_entity_texts=(), include_kinetics=False
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=FakeSgdConnector()),
+    )
+
+    assert result.agent1_knowledge_package.quantitative_observations == ()
+    frontier_reasons = {item.reason for item in result.unresolved_frontier}
+    assert FrontierReason.PROTEIN_ABUNDANCE_REQUESTED_NOT_ATTEMPTED in frontier_reasons
+
+
+def test_abundance_disabled_by_default_produces_no_observations(db_session: Session) -> None:
+    """``include_protein_abundance`` defaults to ``False`` -- existing callers/tests need
+    no change at all."""
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=None
+                ),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _c2_request(request_id="req-abundance-disabled", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=_cem1_uniprot()),
+    )
+
+    assert result.agent1_knowledge_package.quantitative_observations == ()
+
+
+def test_abundance_repeated_execution_does_not_duplicate(db_session: Session) -> None:
+    """Task Sec 6: repeated ingestion reuses the same context and never duplicates the
+    observation row."""
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=Decimal("1539")
+                ),
+            )
+        }
+    )
+    uniprot = _cem1_uniprot()
+
+    request = _abundance_request(request_id="req-abundance-idempotent", seed_entity_texts=())
+    execute_pathway_curation(
+        request,
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=uniprot),
+    )
+    result_second = execute_pathway_curation(
+        request,
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=uniprot),
+    )
+
+    rows = (
+        db_session.execute(
+            select(QuantitativeObservation).where(
+                QuantitativeObservation.source_id == "sgd-protein-abundance:S000000001"
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert len(result_second.agent1_knowledge_package.quantitative_observations) == 1
+    assert len(db_session.execute(select(ExperimentalContext)).scalars().all()) == 1
+
+
+def test_abundance_reference_publication_resolved_and_shared(db_session: Session) -> None:
+    """The one shared SGD meta-reference publication (Ho et al. 2018) is resolved once
+    and reused across every protein's own persisted observation (task's own design
+    decision, ``strategies.resolve_sgd_abundance_reference_publication``)."""
+    kegg = _c2_kegg(
+        catalyst_entries=(
+            FakeKgmlEntrySpec(entry_type="gene", names=("YER061C",), reaction_ids=("R00742",)),
+            FakeKgmlEntrySpec(entry_type="gene", names=("YKL182W",), reaction_ids=("R00742",)),
+        )
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=None
+                ),
+            ),
+            "YKL182W": make_sgd_locus(
+                sgd_id="S000000002",
+                systematic_name="YKL182W",
+                standard_name="FAS1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("74144"), median_absolute_deviation=None
+                ),
+            ),
+        },
+        abundance_reference_ids={"S000000001": "S000207593", "S000000002": "S000207593"},
+        references={
+            "S000207593": SgdReferenceRecord(
+                sgd_id="S000207593", citation="Ho B, et al. (2018)", pubmed_id="29361465", year=2018
+            )
+        },
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+            "FAS1": make_uniprot_entry(
+                accession="P19097",
+                recommended_name="fake FAS1",
+                gene_names=("FAS1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+            ),
+        }
+    )
+    pubmed = FakePubMedConnector(
+        articles={"29361465": make_pubmed_article(pmid="29361465", title="Unification paper")}
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(request_id="req-abundance-publication", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg, sgd=sgd, uniprot=uniprot, pubmed=pubmed),
+    )
+
+    observations = result.agent1_knowledge_package.quantitative_observations
+    assert len(observations) == 2
+    publication_ids = {obs.publication_id for obs in observations}
+    assert len(publication_ids) == 1
+    assert None not in publication_ids
+    assert len(result.agent1_knowledge_package.publications) == 1  # never duplicated
+    fetch_reference_calls = [call for call in sgd.calls if call[0] == "fetch_reference"]
+    assert len(fetch_reference_calls) == 1  # resolved once per run, reused across proteins
+
+
+def test_abundance_no_pubmed_connector_leaves_publication_unresolved_never_blocks(
+    db_session: Session,
+) -> None:
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=None
+                ),
+            )
+        },
+        abundance_reference_ids={"S000000001": "S000207593"},
+        references={
+            "S000207593": SgdReferenceRecord(
+                sgd_id="S000207593", citation="Ho B, et al. (2018)", pubmed_id="29361465", year=2018
+            )
+        },
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(request_id="req-abundance-no-pubmed", seed_entity_texts=()),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=_cem1_kegg(), sgd=sgd, uniprot=_cem1_uniprot()),
+    )
+
+    (observation,) = result.agent1_knowledge_package.quantitative_observations
+    assert observation.publication_id is None
+
+
+def test_abundance_no_sgd_connector_recorded_as_frontier(db_session: Session) -> None:
+    kegg = _kegg_with_reactions(("R00742",))
+    result = execute_pathway_curation(
+        _abundance_request(
+            request_id="req-abundance-no-connector",
+            seed_entity_texts=(),
+            include_kinetics=False,
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(kegg=kegg),
+    )
+
+    assert result.agent1_knowledge_package.quantitative_observations == ()
+    frontier_reasons = {item.reason for item in result.unresolved_frontier}
+    assert FrontierReason.NO_CONNECTOR_AVAILABLE in frontier_reasons
+
+
+def test_abundance_coexists_with_kinetics_enrichment(db_session: Session) -> None:
+    """Both enrichment steps run independently in the same iteration -- neither blocks
+    the other (task's own "bounded and non-blocking" requirement, general case)."""
+    sabiork = FakeSabiorkConnector(
+        records={
+            "SABIO1": make_sabio_record(
+                entry_id="SABIO1",
+                ec_number="2.3.1.41",
+                parameter_type="kcat",
+                value="12.0",
+                unit="1/s",
+            )
+        }
+    )
+    sgd = FakeSgdConnector(
+        loci={
+            "YER061C": make_sgd_locus(
+                sgd_id="S000000001",
+                systematic_name="YER061C",
+                standard_name="CEM1",
+                protein_abundance=SgdProteinAbundance(
+                    value=Decimal("6670"), median_absolute_deviation=None
+                ),
+            )
+        }
+    )
+    uniprot = FakeUniProtConnector(
+        entries={
+            "CEM1": make_uniprot_entry(
+                accession="P39525",
+                recommended_name="fake CEM1",
+                gene_names=("CEM1",),
+                organism_name="Saccharomyces cerevisiae",
+                organism_taxonomy_id=YEAST_TAXONOMY_ID,
+                ec_numbers=("2.3.1.41",),
+            )
+        }
+    )
+
+    result = execute_pathway_curation(
+        _abundance_request(
+            request_id="req-abundance-with-kinetics", seed_entity_texts=(), include_kinetics=True
+        ),
+        session=db_session,
+        connectors=PathwayConnectorBundle(
+            kegg=_cem1_kegg(), sgd=sgd, uniprot=uniprot, sabiork=sabiork
+        ),
+    )
+
+    assert len(result.agent1_knowledge_package.quantitative_observations) == 1
+    assert len(result.agent1_knowledge_package.kinetic_measurements) == 1

@@ -32,14 +32,20 @@ from app.models.experiment_recommendation import (
     ExperimentRecommendationRecord,
 )
 from app.models.experimental_condition import ExperimentalCondition
+from app.models.experimental_context import ExperimentalContext
 from app.models.external_record import ExternalRecord
 from app.models.gene import Gene
-from app.models.kinetic_measurement import KineticMeasurement
+from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.modeling_assumption import ModelingAssumption
 from app.models.organism import Organism
+from app.models.perturbation import Perturbation
 from app.models.protein import Protein
 from app.models.publication import Publication
+from app.models.quantitative_observation import (
+    QuantitativeObservation,
+    QuantitativeObservationDependency,
+)
 from app.models.reaction import Reaction, ReactionEnzyme, ReactionParticipant
 from app.models.regulatory_interaction import RegulatoryInteraction
 from app.models.review_event import ReviewEvent
@@ -65,14 +71,19 @@ __all__ = [
     "ExperimentRecommendationRecord",
     "ExperimentResult",
     "ExperimentalCondition",
+    "ExperimentalContext",
     "ExternalRecord",
     "Gene",
     "KineticMeasurement",
+    "KineticMeasurementProteinContext",
     "KnowledgeGap",
     "ModelingAssumption",
     "Organism",
+    "Perturbation",
     "Protein",
     "Publication",
+    "QuantitativeObservation",
+    "QuantitativeObservationDependency",
     "Reaction",
     "ReactionEnzyme",
     "ReactionParticipant",

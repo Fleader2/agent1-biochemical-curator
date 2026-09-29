@@ -2607,7 +2607,106 @@ of the four integrated sources, now carries a real canonical value/unit wherever
 reported unit is recognized and compatible, for the identical real input.
 `AGENT1_CONTRACT_VERSION` is unchanged (see above).
 
-## 58. Final architectural rule
+## 58. Increment "SGD Reference Protein Abundance Integration"
+
+The first real connector use of the new experimental-context/quantitative-observation
+framework (`docs/27_experimental_context_and_quantitative_observation_framework.md`):
+autonomous pathway curation can now enrich every resolved protein with SGD's own
+reference (cross-study median) protein abundance figure, deliberately stopping short
+of any concentration derivation.
+
+**The exact SGD field.** A locus record's own `protein_overview.median_value`/
+`median_abs_dev_value` (unit `molecules/cell`, confirmed live against SGD's own
+protein-abundance page text: "obtained from over 20 studies... normalized and
+converted to a common unit of molecules per cell") -- SGD's own documented,
+pre-aggregated figure, never the 20-30 heterogeneous per-study rows a locus's separate
+`/locus/{id}/protein_abundance_details` sub-resource exposes (deliberately not
+ingested as observations: those rows carry genuinely different strains/media/
+measurement methods per study, which would violate both "one deterministic context"
+and "never average unless the source already supplies an integrated value").
+
+**The one shared meta-reference.** Every per-study row of `protein_abundance_details`
+cites the identical meta-analysis publication (confirmed live for two proteins, 30 and
+2 real rows respectively) -- SGD id `S000207593`, Ho B, et al. (2018), "Unification of
+Protein Abundance Datasets Yields a Quantitative Saccharomyces cerevisiae Proteome,"
+Cell Syst 6(2):192-205.e3, PMID 29361465. `strategies
+.resolve_sgd_abundance_reference_publication` extracts this reference id from one
+locus's own abundance-detail rows and resolves it, once per run, via the existing
+`resolve_publication_by_pmid` machinery -- reused across every protein's own persisted
+observation, never re-fetched per protein.
+
+**Deliverable**: `app.connectors.sgd` gained `SgdProteinAbundance`/
+`SgdReferenceRecord`, `fetch_reference`, and `fetch_protein_abundance_reference_id`
+(all additive; `SgdLocusRecord.protein_abundance`/`SgdNormalizedRecord
+.protein_abundance` default to `None` so every pre-existing keyword-argument
+construction site across the codebase needed no change). `app.normalization
+.quantitative_observation` gained `quantitative_observation_identity_from_sgd_
+abundance`. `app.persistence.quantitative_observation` (new module) gained
+`persist_quantitative_observation` (idempotent on the table's own `(source,
+source_id)` partial unique index, mirroring `persist_kinetic_measurement`'s own
+SAVEPOINT/IntegrityError-recheck pattern) and `get_or_create_sgd_abundance_reference_
+context` (idempotent at the application level only -- `ExperimentalContext` carries no
+database-level uniqueness constraint at all, by original design). `app.pathway_
+curation.strategies` gained `discover_protein_abundance_sgd` (pure discovery, no I/O
+beyond the one `connector.fetch` call) and the reference-publication resolver above.
+`app.pathway_curation.executor` gained `_discover_protein_abundance`, gated by a new
+`PathwayCurationRequest.include_protein_abundance` field (default `False`).
+
+**Bounded and non-blocking (task's own explicit requirement).** Two new
+`FrontierReason` members, `MISSING_PROTEIN_ABUNDANCE`/
+`PROTEIN_ABUNDANCE_REQUESTED_NOT_ATTEMPTED`, mirror `MISSING_KINETICS`/
+`KINETICS_REQUESTED_NOT_ATTEMPTED` exactly, and are deliberately never added to any
+`policy.required_frontier_reasons` category -- missing abundance data never gates
+`COMPLETE`/`COMPLETE_WITH_GAPS` under any completion policy. A connector failure or a
+protein SGD reports no abundance figure for is recorded as its own warning/frontier
+item and never aborts discovery for any other protein in the same run.
+
+**The resolved-protein set is deliberately not `resolved_protein_ec_numbers`.**
+`_discover_kinetics`'s own list only ever contains proteins that also carry a curated
+EC number -- reusing it here would silently exclude any pathway-resolved protein SGD
+has abundance data for but this repository has not (yet) curated an EC number for. A
+new `_resolved_protein_ids_for_abundance` instead filters `state.discovered_entity_ids`
+(which mixes every discovered entity kind) down to real `Protein` rows via one plain
+query.
+
+**No concentration derivation, no cell-volume assumption anywhere in this increment**
+(task's own explicit exclusion) -- every persisted observation carries
+`observation_type=PROTEIN_ABUNDANCE`/`unit=molecules/cell` only.
+
+**Real, live-data evaluation** (all 13 curated sce00061 fatty-acid-biosynthesis
+proteins, queried live against the real SGD API inside a rolled-back transaction --
+no permanent write):
+
+| Protein | SGD id | Abundance (molecules/cell) | Uncertainty (MAD) |
+|---|---|---:|---:|
+| HFA1 | S000004820 | 433 | 306 |
+| HTD2 | S000001109 | 972 | 556 |
+| FAA2 | S000000817 | 1180 | 820 |
+| OAR1 | S000001538 | 1760 | 1081 |
+| MCT1 | S000005747 | 2706 | 1235 |
+| CEM1 | S000000863 | 3023 | 1363 |
+| FAA3 | S000001271 | 4023 | 1944 |
+| ETR1 | S000000230 | 9388 | 6286 |
+| FAA4 | S000004860 | 17682 | 6606 |
+| FAA1 | S000005844 | 24250 | 10059 |
+| ACC1 | S000005299 | 29049 | 13718 |
+| FAS2 | S000006152 | 52956 | 28255 |
+| FAS1 | S000001665 | 74144 | 43169 |
+
+13/13 proteins have real SGD abundance data (433-74144 molecules/cell), 13/13 carry an
+uncertainty figure, and the one shared meta-reference publication resolves
+successfully for every protein (`fetch_reference` called exactly once for the whole
+run). Zero identity failures, zero connector failures.
+
+**Versioning**: `PATHWAY_CURATION_POLICY_VERSION` bumps to `"pathway-curation-v1.12"`
+-- a genuine, observable behavior change: `include_protein_abundance=True` now
+produces real, persisted `QuantitativeObservation` rows for the identical real input.
+`AGENT1_CONTRACT_VERSION` is unchanged: the handoff already exposed
+`experimental_contexts`/`quantitative_observations` generically (the prior
+"Experimental Context and Quantitative Observation Framework" increment), and this
+increment is simply the first real connector to populate them -- no shape changed.
+
+## 59. Final architectural rule
 
 > A high-level curation request is planned deterministically and executed
 > within an explicit, auditable budget -- never an open-ended agent loop.

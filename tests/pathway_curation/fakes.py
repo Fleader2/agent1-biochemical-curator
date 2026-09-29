@@ -36,7 +36,13 @@ from app.connectors.sabiork import (
     SabioReactionSpecies,
     SabioSearchHit,
 )
-from app.connectors.sgd import SgdLocusRecord, SgdNormalizedRecord, SgdSearchHit
+from app.connectors.sgd import (
+    SgdLocusRecord,
+    SgdNormalizedRecord,
+    SgdProteinAbundance,
+    SgdReferenceRecord,
+    SgdSearchHit,
+)
 from app.connectors.uniprot import UniProtEntryRecord, UniProtProteinRecord, UniProtSearchHit
 
 
@@ -233,6 +239,14 @@ class FakeSgdConnector:
 
     loci: dict[str, SgdLocusRecord] = field(default_factory=dict)
     calls: list[tuple[str, tuple]] = field(default_factory=list)
+    #: Agent 1.x Increment "SGD Reference Protein Abundance Integration": keyed by
+    #: locus ``sgd_id`` -> the shared meta-reference ``sgd_id`` its abundance-detail
+    #: rows would cite (mirrors ``fetch_protein_abundance_reference_id``'s own return
+    #: shape). Absent/``None`` means "no abundance-detail rows for this locus."
+    abundance_reference_ids: dict[str, str | None] = field(default_factory=dict)
+    #: Keyed by reference ``sgd_id`` -> the parsed ``SgdReferenceRecord`` (mirrors
+    #: ``fetch_reference``'s own return shape).
+    references: dict[str, SgdReferenceRecord] = field(default_factory=dict)
 
     def search(self, query: str) -> list[SgdSearchHit]:
         self.calls.append(("search", (query,)))
@@ -270,9 +284,24 @@ class FakeSgdConnector:
             raw=raw,
         )
 
+    def fetch_protein_abundance_reference_id(self, sgd_id: str) -> str | None:
+        """Agent 1.x Increment "SGD Reference Protein Abundance Integration"."""
+        self.calls.append(("fetch_protein_abundance_reference_id", (sgd_id,)))
+        return self.abundance_reference_ids.get(sgd_id)
+
+    def fetch_reference(self, reference_sgd_id: str) -> SgdReferenceRecord | None:
+        """Agent 1.x Increment "SGD Reference Protein Abundance Integration"."""
+        self.calls.append(("fetch_reference", (reference_sgd_id,)))
+        return self.references.get(reference_sgd_id)
+
 
 def make_sgd_locus(
-    *, sgd_id: str, systematic_name: str, standard_name: str, description: str | None = None
+    *,
+    sgd_id: str,
+    systematic_name: str,
+    standard_name: str,
+    description: str | None = None,
+    protein_abundance: SgdProteinAbundance | None = None,
 ) -> SgdLocusRecord:
     return SgdLocusRecord(
         sgd_id=sgd_id,
@@ -284,6 +313,7 @@ def make_sgd_locus(
         uniprot_id=None,
         external_links=(),
         raw={"sgd_id": sgd_id},
+        protein_abundance=protein_abundance,
     )
 
 

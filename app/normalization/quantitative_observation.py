@@ -25,6 +25,7 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
+from app.connectors.sgd import SgdProteinAbundance
 from app.models.enums import (
     ContextCompatibility,
     QuantitativeEvidenceClass,
@@ -466,6 +467,72 @@ def classify_context_compatibility(
     return ContextCompatibility.EXACT_CONTEXT
 
 
+# --- SGD protein abundance adapter (Agent 1.x Increment "SGD Reference Protein
+# Abundance Integration") ---------------------------------------------------------------------
+
+#: SGD's own reported unit for this figure (confirmed live -- see
+#: ``app.connectors.sgd.SgdProteinAbundance``'s own docstring) -- already identical to this
+#: increment's own canonical unit, so this adapter's ``unit``/``normalized_unit`` are always
+#: the same string; no conversion multiplier is ever applied.
+_SGD_PROTEIN_ABUNDANCE_UNIT = "molecules/cell"
+
+
+def quantitative_observation_identity_from_sgd_abundance(
+    abundance: SgdProteinAbundance,
+    *,
+    sgd_id: str,
+    protein_id: UUID | None = None,
+    organism_id: UUID | None = None,
+    experimental_context_id: UUID | None = None,
+    publication_id: UUID | None = None,
+) -> QuantitativeObservationIdentity:
+    """Pure adapter: one SGD reference protein-abundance figure -> a source-neutral
+    identity (Agent 1.x Increment "SGD Reference Protein Abundance Integration").
+
+    Never returns ``None`` -- mirrors
+    ``app.normalization.kinetic_measurement.kinetic_identity_from_gotenzymes``'s own
+    convention: the caller (``app.pathway_curation.strategies
+    .discover_protein_abundance_sgd``) already checked ``abundance is not None`` before
+    ever calling this function.
+
+    ``evidence_class`` is always ``REFERENCE_BASELINE`` -- SGD's own median-across-
+    studies figure is exactly the "reference/baseline measurement" this increment's own
+    objective names, never ``EXPERIMENT_SPECIFIC`` (no single condition applies) and
+    never ``DERIVED``/``MODEL_PREDICTED`` (it is SGD's own already-published, documented
+    integrated figure, not something this repository computed or a model predicted).
+
+    ``value``/``unit`` are already in SGD's own canonical unit
+    (``molecules/cell``) -- ``convert_quantitative_unit`` still runs (never
+    special-cased around), so ``normalized_value``/``normalized_unit`` are populated by
+    the same code path every other observation type uses, not a shortcut.
+
+    **This increment never converts molecules/cell to a concentration** (task's own
+    explicit exclusion) -- there is no ``0.1 pL`` or any other cell-volume assumption
+    anywhere in this function or its caller.
+    """
+    return QuantitativeObservationIdentity(
+        observation_type=QuantitativeObservationType.PROTEIN_ABUNDANCE.value,
+        value=abundance.value,
+        unit=_SGD_PROTEIN_ABUNDANCE_UNIT,
+        evidence_class=QuantitativeEvidenceClass.REFERENCE_BASELINE,
+        uncertainty=abundance.median_absolute_deviation,
+        protein_id=protein_id,
+        organism_id=organism_id,
+        experimental_context_id=experimental_context_id,
+        source=SourceType.SGD,
+        source_id=f"sgd-protein-abundance:{sgd_id}",
+        publication_id=publication_id,
+        dataset_id="SGD_PROTEIN_ABUNDANCE_REFERENCE",
+        measurement_method=None,
+        notes=(
+            "SGD-computed median protein abundance across multiple independently "
+            "reported studies (varying strains/media/measurement methods) -- never a "
+            "single measurement, never averaged or recomputed by this repository. "
+            "Median absolute deviation preserved as uncertainty where SGD reports one."
+        ),
+    )
+
+
 __all__ = [
     "CANONICAL_UNIT_MOLECULES_PER_CELL",
     "CANONICAL_UNIT_NM",
@@ -479,4 +546,5 @@ __all__ = [
     "classify_context_compatibility",
     "convert_quantitative_unit",
     "convert_time_to_seconds",
+    "quantitative_observation_identity_from_sgd_abundance",
 ]

@@ -105,6 +105,10 @@ from app.normalization.publication import (
     normalize_publication,
     publication_identity_from_pubmed,
 )
+from app.normalization.quantitative_observation import (
+    QuantitativeObservationIdentity,
+    quantitative_observation_identity_from_sgd_abundance,
+)
 from app.normalization.reaction import (
     ReactionLookup,
     ReactionParticipantIdentity,
@@ -158,6 +162,7 @@ __all__ = [
     "discover_kinetics_oed",
     "discover_kinetics_sabiork",
     "discover_pathway",
+    "discover_protein_abundance_sgd",
     "discover_publications",
     "discover_reactions_in_pathway",
     "fetch_kegg_pathway_metadata",
@@ -174,6 +179,7 @@ __all__ = [
     "resolve_reaction_by_kegg_id",
     "resolve_reaction_by_text",
     "resolve_reference_compartment_by_name",
+    "resolve_sgd_abundance_reference_publication",
     "select_canonical_gene_anchored_protein",
     "split_ec_numbers",
 ]
@@ -1816,3 +1822,87 @@ def discover_kinetics_gotenzymes(
     return GotEnzymesKineticDiscoveryResult(
         identities=tuple(identities), skipped_records=tuple(skipped)
     )
+
+
+# --- SGD reference protein abundance (Agent 1.x Increment "SGD Reference Protein
+# Abundance Integration") ---------------------------------------------------------------------
+
+
+def discover_protein_abundance_sgd(
+    connector,
+    sgd_id: str,
+    *,
+    protein_id: UUID | None = None,
+    organism_id: UUID | None = None,
+    experimental_context_id: UUID | None = None,
+    publication_id: UUID | None = None,
+) -> QuantitativeObservationIdentity | None:
+    """Expansion path: fetch one already-known ``Gene.sgd_id`` and build its
+    ``QuantitativeObservationIdentity``, if SGD reports a reference abundance figure.
+
+    Deterministic only (task Sec 3): ``sgd_id`` is always the already-curated
+    ``Gene.sgd_id`` for a protein already resolved earlier this run -- this function
+    never searches SGD by name and never guesses at a protein/gene identity itself. No
+    ``Protocol`` is declared for ``connector`` here, mirroring
+    ``discover_kinetics_sabiork``/``discover_kinetics_oed``/``discover_kinetics_brenda``/
+    ``discover_kinetics_gotenzymes`` immediately above: each accepts its own source's
+    connector untyped, since ``app.entity_resolution.adapters.SgdSearchAndFetch`` is
+    deliberately scoped narrower ("the three ``SgdConnector`` methods Gene resolution
+    actually calls") and widening it for this, unrelated call site would blur that
+    documented scope.
+
+    Returns ``None`` when the locus does not exist (``connector.fetch`` -> ``None``) or
+    exists but SGD reports no reference abundance figure for it at all
+    (``record.protein_abundance is None`` -- ``SgdProteinAbundance``'s own docstring: a
+    real, common, non-error case, confirmed live for several real genes) -- never
+    fabricated. ``organism_id``/``experimental_context_id``/``publication_id`` are
+    threaded straight through, already resolved by the caller -- this function performs
+    no organism, context, or publication resolution itself.
+    """
+    record = connector.fetch(sgd_id)
+    if record is None or record.protein_abundance is None:
+        return None
+    return quantitative_observation_identity_from_sgd_abundance(
+        record.protein_abundance,
+        sgd_id=sgd_id,
+        protein_id=protein_id,
+        organism_id=organism_id,
+        experimental_context_id=experimental_context_id,
+        publication_id=publication_id,
+    )
+
+
+def resolve_sgd_abundance_reference_publication(
+    connector,
+    sgd_id: str,
+    *,
+    resolve_publication: Callable[[str], UUID | None],
+) -> UUID | None:
+    """Resolve the one shared meta-reference publication for SGD's protein-abundance
+    aggregate (Agent 1.x Increment "SGD Reference Protein Abundance Integration").
+
+    Intended to be called **once per pathway-curation run** -- the caller (``executor
+    ._discover_protein_abundance``) owns that "once," via its own per-run cache,
+    mirroring ``_resolve_publication_for_pmid``'s own per-PMID cache used for kinetics
+    provenance elsewhere in this module's caller. It does not matter *which* already-
+    resolved locus's own ``sgd_id`` is passed in, only that it is one with abundance
+    data -- confirmed live that every locus's own ``/protein_abundance_details`` rows
+    cite the identical meta-reference (``SgdReferenceRecord``'s own docstring; CDC28's
+    30 real rows, 19 distinct original studies, all cite the same one).
+
+    ``resolve_publication`` is a caller-owned closure (mirrors ``resolve_publication``
+    parameters used throughout this module's kinetics-discovery functions) that turns a
+    PMID into an already-resolved/persisted ``Publication`` UUID, or ``None`` -- this
+    function never resolves or persists a publication itself.
+
+    Returns ``None`` when the locus has no abundance-detail rows at all, no extractable
+    reference id, or the reference record itself carries no PMID -- every one a real,
+    disclosed, non-error case, never fabricated.
+    """
+    reference_sgd_id = connector.fetch_protein_abundance_reference_id(sgd_id)
+    if reference_sgd_id is None:
+        return None
+    reference = connector.fetch_reference(reference_sgd_id)
+    if reference is None or reference.pubmed_id is None:
+        return None
+    return resolve_publication(reference.pubmed_id)
