@@ -55,6 +55,16 @@ exactly like ``CuratedKineticMeasurement.protein_ids`` is computed from
 ``package.kinetic_measurement_protein_contexts`` -- never copied from a
 single column, and never itself a derivation (see that dataclass's own
 docstring).
+
+**Publications** (Publication Date Handoff increment). Every
+``package.publications`` row (itself already scoped by
+``app.agent1.service.get_agent1_knowledge_package`` to exactly the publications this
+run's own kinetic measurements/experimental contexts/perturbations/quantitative
+observations reference) is reshaped into the minimal ``CuratedPublication`` (``id``/
+``year`` only) and passed through unfiltered -- publications carry no ``Claim``/
+``CurationState`` column either. This exposes only already-computed, already-stored
+data one layer further; no new lookup, no year inferred from ``pmid``/``doi``/a
+timestamp.
 """
 
 from __future__ import annotations
@@ -71,6 +81,7 @@ from app.agent1.types import (
     CuratedExperimentalContext,
     CuratedKineticMeasurement,
     CuratedPerturbation,
+    CuratedPublication,
     CuratedQuantitativeObservation,
     CuratedQuantitativeObservationDependency,
 )
@@ -83,6 +94,7 @@ from app.models.enzyme_state import (
 from app.models.experimental_context import ExperimentalContext
 from app.models.kinetic_measurement import KineticMeasurement
 from app.models.perturbation import Perturbation
+from app.models.publication import Publication
 from app.models.quantitative_observation import (
     QuantitativeObservation,
     QuantitativeObservationDependency,
@@ -148,6 +160,7 @@ def get_agent1_curated_knowledge_view(
         )
         for row in package.quantitative_observations
     )
+    publications = tuple(_curated_publication(row) for row in package.publications)
 
     return Agent1CuratedKnowledgeView(
         contract_version=AGENT1_CONTRACT_VERSION,
@@ -169,6 +182,7 @@ def get_agent1_curated_knowledge_view(
         claims=accepted,
         evidence=accepted_evidence,
         confidence_summaries=accepted_confidence,
+        publications=publications,
     )
 
 
@@ -213,6 +227,15 @@ def _curated_kinetic_measurement(
         notes=row.notes,
         enzyme_state_id=row.enzyme_state_id,
     )
+
+
+def _curated_publication(row: Publication) -> CuratedPublication:
+    """Pure field-for-field reshaping of one ``Publication`` row's own ``id``/``year`` --
+    the smallest useful subset for kinetic-evidence recency prioritization (Publication
+    Date Handoff increment). No I/O, no inference, no year computed from ``pmid``/``doi``
+    or any timestamp column.
+    """
+    return CuratedPublication(id=row.id, year=row.year)
 
 
 def _curated_enzyme_state(row: EnzymeState) -> CuratedEnzymeState:

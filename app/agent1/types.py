@@ -97,6 +97,19 @@ from a single column -- this increment represents derived-value
 dependency/provenance only, it never performs a derivation itself
 (no code anywhere computes a ``DERIVED`` observation's own value from its
 declared inputs).
+
+**Publication Date Handoff increment** added ``publications`` (the minimal
+``CuratedPublication`` -- ``id``/``year`` only) to ``Agent1CuratedKnowledgeView``,
+bumping ``AGENT1_CONTRACT_VERSION`` to ``"1.5"`` -- one additive field, no existing
+field removed or repurposed. ``Agent1KnowledgePackage.publications`` already existed
+(``tuple[Publication, ...]``, already scoped by
+``app.agent1.service.get_agent1_knowledge_package`` to exactly the publications this
+run's own kinetic measurements/experimental contexts/perturbations/quantitative
+observations reference) -- this increment only exposes that already-computed,
+already-stored data one layer further, reshaped to the minimal subset Agent 2's own
+kinetic-evidence recency prioritization needs. No new publication lookup logic. No
+year is ever inferred from ``pmid``/``doi``/a database timestamp -- ``Publication
+.year`` verbatim, or ``None`` when Agent 1 itself never resolved one.
 """
 
 from __future__ import annotations
@@ -147,7 +160,7 @@ from app.models.review_event import ReviewEvent
 
 #: This contract's own version. Bump only when ``Agent1KnowledgePackage``/
 #: ``Agent1CuratedKnowledgeView``'s field shape changes.
-AGENT1_CONTRACT_VERSION = "1.4"
+AGENT1_CONTRACT_VERSION = "1.5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +297,25 @@ class CuratedKineticMeasurement:
     #: ``Agent1KnowledgePackage.kinetic_measurement_protein_contexts``
     #: (``created_at``), not to this tuple's own ordering.
     protein_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedPublication:
+    """Agent 2-facing view of one publication's own primary date, for kinetic-evidence
+    recency prioritization only (Publication Date Handoff increment).
+
+    Deliberately the smallest useful subset of ``Publication`` -- ``id`` (so Agent 2 can
+    key a ``publication_id -> year`` mapping the same way ``CuratedKineticMeasurement
+    .publication_id`` already references it) and ``year`` alone, never title/journal/
+    authors/PMID/DOI/abstract or any other bibliographic metadata Agent 2's own kinetic-
+    evidence consolidation has no use for. ``year`` is ``Publication.year`` verbatim --
+    the primary publication's own year, never a database ``created_at``/``updated_at``
+    timestamp and never inferred from ``pmid``/``doi`` -- ``None`` whenever Agent 1 itself
+    never resolved a year for this publication (never fabricated here).
+    """
+
+    id: UUID
+    year: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -591,6 +623,15 @@ class Agent1CuratedKnowledgeView:
     evidence: tuple[Evidence, ...]
     confidence_summaries: tuple[ClaimConfidenceSummary, ...]
 
+    #: Publication Date Handoff increment. Every publication
+    #: ``package.publications`` already resolved (itself already scoped to exactly the
+    #: publications this run's own kinetic measurements/experimental contexts/
+    #: perturbations/quantitative observations reference -- see
+    #: ``app.agent1.service.get_agent1_knowledge_package``), reshaped into the minimal
+    #: ``CuratedPublication`` (id + year only). Defaulted to ``()`` so every existing
+    #: keyword-based construction of this type continues to construct unchanged.
+    publications: tuple[CuratedPublication, ...] = ()
+
 
 __all__ = [
     "AGENT1_CONTRACT_VERSION",
@@ -605,6 +646,7 @@ __all__ = [
     "CuratedExperimentalContext",
     "CuratedKineticMeasurement",
     "CuratedPerturbation",
+    "CuratedPublication",
     "CuratedQuantitativeObservation",
     "CuratedQuantitativeObservationDependency",
     "ProvenanceSummary",
