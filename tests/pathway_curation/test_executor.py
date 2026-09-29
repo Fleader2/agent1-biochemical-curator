@@ -4260,10 +4260,17 @@ def test_c4_kinetic_measurement_provenance_preserved(db_session: Session) -> Non
     assert measurement.source_id == "SABIO1:kcat"
     assert measurement.protein_id == result.agent1_knowledge_package.proteins[0].id
     assert measurement.organism_id == result.organism_id
-    # Pre-existing architectural characteristic, unchanged by C.4 (disclosed, not
-    # fixed -- kinetics discovery is keyed by (protein, EC), never by reaction, in
-    # every path: seeded, EC-fallback, and this direct-KGML one alike):
-    assert measurement.reaction_id is None
+    # Post evidence-based reaction attribution (app.normalization
+    # .kinetic_measurement_reaction_attribution): CEM1 is curated as catalyzing
+    # exactly one reaction in this scenario, so tier 2's catalyst-only branch
+    # resolves the measurement to it unambiguously -- no compound anchor is
+    # needed or used, consistent with kcat being outside
+    # COMPOUND_ANCHOR_ELIGIBLE_PARAMETER_TYPES. Kinetics *discovery* itself is
+    # still keyed by (protein, EC), never by reaction, in every path (seeded,
+    # EC-fallback, and this direct-KGML one alike) -- only downstream
+    # attribution of the discovered measurement changed.
+    assert measurement.reaction_id == result.agent1_knowledge_package.reactions[0].id
+    assert measurement.reaction_attribution_reason == "CATALYST_AND_COMPOUND_UNIQUE"
 
 
 def test_c4_kinetics_disabled_direct_catalyst_behavior_is_unchanged(db_session: Session) -> None:
