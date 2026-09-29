@@ -188,6 +188,82 @@ def test_reuse_never_overwrites_existing_row(db_session):
     assert row.notes == "first"  # never rewritten by the "replay"
 
 
+# --- Evidence-Based Kinetic Measurement -> Reaction Attribution increment ------------------
+
+
+def test_create_persists_reaction_id_and_attribution_reason(db_session):
+    reaction = _reaction(db_session)
+    identity = _identity(
+        reaction_id=reaction.id, reaction_attribution_reason="CATALYST_AND_COMPOUND_UNIQUE"
+    )
+    result = persist_kinetic_measurement(identity, session=db_session)
+
+    row = get_kinetic_measurement(db_session, result.kinetic_measurement_id)
+    assert row.reaction_id == reaction.id
+    assert row.reaction_attribution_reason == "CATALYST_AND_COMPOUND_UNIQUE"
+
+
+def test_create_with_no_attribution_leaves_both_fields_null(db_session):
+    identity = _identity()
+    result = persist_kinetic_measurement(identity, session=db_session)
+
+    row = get_kinetic_measurement(db_session, result.kinetic_measurement_id)
+    assert row.reaction_id is None
+    assert row.reaction_attribution_reason is None
+
+
+def test_reuse_backfills_reaction_attribution_when_previously_unresolved(db_session):
+    """A second, independent discovery of the identical (source, source_id) record --
+    e.g. a different protein's own search -- retroactively attributes an
+    already-persisted, still-unattributed row (module docstring: monotonic, never
+    un-attributes)."""
+    identity = _identity(value=Decimal("1.0"))
+    first = persist_kinetic_measurement(identity, session=db_session)
+    row = get_kinetic_measurement(db_session, first.kinetic_measurement_id)
+    assert row.reaction_id is None
+
+    reaction = _reaction(db_session)
+    replay_now_attributed = _identity(
+        source=identity.source,
+        source_id=identity.source_id,
+        value=Decimal("1.0"),
+        reaction_id=reaction.id,
+        reaction_attribution_reason="CATALYST_AND_COMPOUND_UNIQUE",
+    )
+    second = persist_kinetic_measurement(replay_now_attributed, session=db_session)
+
+    assert second.kinetic_measurement_id == first.kinetic_measurement_id
+    row = get_kinetic_measurement(db_session, first.kinetic_measurement_id)
+    assert row.reaction_id == reaction.id
+    assert row.reaction_attribution_reason == "CATALYST_AND_COMPOUND_UNIQUE"
+
+
+def test_reuse_never_overwrites_an_already_attributed_row(db_session):
+    """The first successful attribution wins, never re-litigated -- a second, different
+    attribution attempt for the same already-attributed row is silently ignored."""
+    first_reaction = _reaction(db_session)
+    second_reaction = _reaction(db_session)
+    identity = _identity(
+        value=Decimal("1.0"),
+        reaction_id=first_reaction.id,
+        reaction_attribution_reason="DIRECT_REACTION_IDENTIFIER",
+    )
+    first = persist_kinetic_measurement(identity, session=db_session)
+
+    conflicting_replay = _identity(
+        source=identity.source,
+        source_id=identity.source_id,
+        value=Decimal("1.0"),
+        reaction_id=second_reaction.id,
+        reaction_attribution_reason="CATALYST_AND_COMPOUND_UNIQUE",
+    )
+    persist_kinetic_measurement(conflicting_replay, session=db_session)
+
+    row = get_kinetic_measurement(db_session, first.kinetic_measurement_id)
+    assert row.reaction_id == first_reaction.id
+    assert row.reaction_attribution_reason == "DIRECT_REACTION_IDENTIFIER"
+
+
 # --- derivative lineage merge (Increment A Step 25) -----------------------------------
 
 

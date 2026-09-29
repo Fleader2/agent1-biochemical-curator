@@ -18,6 +18,7 @@ already follows; the caller decides when (or whether) to commit.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -41,6 +42,13 @@ from app.normalization.compound import (
     normalize_compound,
     resolve_brenda_ligand_to_compound,
 )
+from app.normalization.kinetic_measurement import map_parameter_type
+from app.normalization.kinetic_measurement_reaction_attribution import (
+    KineticMeasurementAttributionContext,
+    KineticMeasurementReactionAttributionReason,
+    attribute_kinetic_measurement_to_reaction,
+    sabiork_signature_role,
+)
 from app.normalization.reaction import ReactionParticipantIdentity
 from app.normalization.types import NormalizationStatus
 from app.pathway_curation import strategies
@@ -51,6 +59,7 @@ from app.pathway_curation.lookups import (
     SqlAlchemyCompoundLookup,
     SqlAlchemyCompoundNameIndexLookup,
     SqlAlchemyGeneLookup,
+    SqlAlchemyKineticMeasurementReactionAttributionLookup,
     SqlAlchemyOrganismLookup,
     SqlAlchemyProteinLookup,
     SqlAlchemyPublicationLookup,
@@ -2242,6 +2251,110 @@ def _discover_kinetics(
         pmid_publication_cache[pmid] = outcome.entity_id
         return outcome.entity_id
 
+    # --- Evidence-Based Kinetic Measurement -> Reaction Attribution increment --------------
+
+    attribution_lookup = SqlAlchemyKineticMeasurementReactionAttributionLookup(session)
+    sabiork_signature_cache: dict[str, tuple[ReactionParticipantIdentity, ...]] = {}
+
+    def _sabiork_reaction_signature(record) -> tuple[ReactionParticipantIdentity, ...]:
+        """Tier 4's own partial reaction signature: every ``reaction_species`` entry this
+        SABIO-RK entry itself resolves to a real, already-curated Agent 1 compound id (the
+        identical ``compound_external_identities`` structured-identifier mechanism
+        ``_resolve_substrate_for_sabiork_parameter`` already uses for one substrate, applied
+        here to every species the entry names), with its own role mapped via
+        ``sabiork_signature_role`` -- role-only, never stoichiometry (SABIO-RK's own
+        connector model exposes none -- see ``app.normalization
+        .kinetic_measurement_reaction_attribution``'s own module docstring). ``stoichiometry``
+        is set to a fixed, never-compared placeholder (``Decimal(1)``) purely to satisfy
+        ``ReactionParticipantIdentity``'s own structural requirement -- attribution's own
+        signature comparison ignores it entirely. Cached by ``entry_id``: one entry's own
+        species list never varies across its own parameters.
+        """
+        if record.entry_id in sabiork_signature_cache:
+            return sabiork_signature_cache[record.entry_id]
+        participants: list[ReactionParticipantIdentity] = []
+        for species in record.reaction_species:
+            role = sabiork_signature_role(species.role)
+            if role is None:
+                continue
+            matches = [
+                ext
+                for ext in record.compound_external_identities
+                if ext.internal_id == species.internal_id
+            ]
+            if len(matches) != 1:
+                continue
+            external = matches[0]
+            if not any(
+                (
+                    external.chebi_id,
+                    external.kegg_compound_id,
+                    external.pubchem_cid,
+                    external.metacyc_id,
+                    external.inchikey,
+                )
+            ):
+                continue
+            identity = CompoundIdentity(
+                source=SourceType.SABIORK,
+                source_identifier=f"{record.entry_id}:{species.internal_id}",
+                chebi_id=external.chebi_id,
+                kegg_compound_id=external.kegg_compound_id,
+                pubchem_cid=external.pubchem_cid,
+                metacyc_id=external.metacyc_id,
+                inchikey=external.inchikey,
+                canonical_name=species.name,
+            )
+            result = normalize_compound(identity, lookup=compound_lookup)
+            if result.status is not NormalizationStatus.MATCHED:
+                continue
+            state.record_entity(result.matched_entity_id)
+            participants.append(
+                ReactionParticipantIdentity(
+                    compound_id=result.matched_entity_id, role=role, stoichiometry=Decimal(1)
+                )
+            )
+        signature = tuple(participants)
+        sabiork_signature_cache[record.entry_id] = signature
+        return signature
+
+    def _attribute_reaction(
+        *,
+        current_protein_id: UUID | None,
+        current_ec_number: str,
+        parameter_type_label: str | None,
+        substrate_id: UUID | None,
+        kegg_reaction_id: str | None = None,
+        reaction_participants: tuple[ReactionParticipantIdentity, ...] = (),
+    ) -> tuple[UUID | None, str | None]:
+        """The one real attribution decision every source's own ``resolve_reaction``
+        closure below delegates to -- see ``app.normalization
+        .kinetic_measurement_reaction_attribution`` for the full hierarchy this runs.
+        Discloses an ``AMBIGUOUS_MULTIPLE_REACTIONS`` outcome as a warning (mirrors every
+        other ambiguous-resolution closure in this function); every other unresolved
+        reason (``INSUFFICIENT_CONTEXT``/``NO_CANDIDATE``) is the common, expected case
+        for most measurements and is not separately disclosed here, to avoid flooding
+        this run's own warnings with noise.
+        """
+        context = KineticMeasurementAttributionContext(
+            parameter_type=map_parameter_type(parameter_type_label),
+            protein_ids=(current_protein_id,) if current_protein_id is not None else (),
+            substrate_id=substrate_id,
+            ec_number=current_ec_number,
+            kegg_reaction_id=kegg_reaction_id,
+            reaction_participants=reaction_participants,
+        )
+        result = attribute_kinetic_measurement_to_reaction(context, lookup=attribution_lookup)
+        ambiguous = KineticMeasurementReactionAttributionReason.AMBIGUOUS_MULTIPLE_REACTIONS
+        if result.reason is ambiguous:
+            state.warn(
+                "kinetic measurement reaction attribution ambiguous for protein "
+                f"{current_protein_id}, EC {current_ec_number}, "
+                f"parameter_type={parameter_type_label!r}: {result.explanation} "
+                f"(candidate reactions: {result.candidate_reaction_ids})"
+            )
+        return result.reaction_id, result.reason.value
+
     if (
         connectors.sabiork is None
         and connectors.oed is None
@@ -2284,6 +2397,23 @@ def _discover_kinetics(
             )
             if not state.has_run_query(identity):
                 attempted_sources.append(SourceType.SABIORK)
+
+                def _resolve_reaction_for_sabiork(
+                    record,
+                    parameter,
+                    substrate_id,
+                    *,
+                    _protein_id=protein_id,
+                    _ec_number=ec_number,
+                ) -> tuple[UUID | None, str | None]:
+                    return _attribute_reaction(
+                        current_protein_id=_protein_id,
+                        current_ec_number=_ec_number,
+                        parameter_type_label=parameter.parameter_type,
+                        substrate_id=substrate_id,
+                        reaction_participants=_sabiork_reaction_signature(record),
+                    )
+
                 try:
                     sabiork_result = strategies.discover_kinetics_sabiork(
                         connectors.sabiork,
@@ -2293,6 +2423,7 @@ def _discover_kinetics(
                         organism_id=organism_id,
                         resolve_publication=_resolve_publication_for_pmid,
                         resolve_substrate=_resolve_substrate_for_sabiork_parameter,
+                        resolve_reaction=_resolve_reaction_for_sabiork,
                     )
                 except ConnectorError as exc:
                     state.warn(f"SABIO-RK kinetics discovery failed for EC {ec_number}: {exc}")
@@ -2328,6 +2459,17 @@ def _discover_kinetics(
             )
             if not state.has_run_query(identity):
                 attempted_sources.append(SourceType.OED)
+
+                def _resolve_reaction_for_oed(
+                    parameter, *, _protein_id=protein_id, _ec_number=ec_number
+                ) -> tuple[UUID | None, str | None]:
+                    return _attribute_reaction(
+                        current_protein_id=_protein_id,
+                        current_ec_number=_ec_number,
+                        parameter_type_label=parameter.parameter_type,
+                        substrate_id=None,
+                    )
+
                 try:
                     identities = strategies.discover_kinetics_oed(
                         connectors.oed,
@@ -2335,6 +2477,7 @@ def _discover_kinetics(
                         organism=organism_text,
                         protein_id=protein_id,
                         organism_id=organism_id,
+                        resolve_reaction=_resolve_reaction_for_oed,
                     )
                 except ConnectorError as exc:
                     state.warn(f"Open Enzyme Database discovery failed for EC {ec_number}: {exc}")
@@ -2359,6 +2502,17 @@ def _discover_kinetics(
             )
             if not state.has_run_query(identity):
                 attempted_sources.append(SourceType.BRENDA)
+
+                def _resolve_reaction_for_brenda(
+                    record, substrate_id, *, _protein_id=protein_id, _ec_number=ec_number
+                ) -> tuple[UUID | None, str | None]:
+                    return _attribute_reaction(
+                        current_protein_id=_protein_id,
+                        current_ec_number=_ec_number,
+                        parameter_type_label=record.parameter_type,
+                        substrate_id=substrate_id,
+                    )
+
                 try:
                     brenda_result = strategies.discover_kinetics_brenda(
                         connectors.brenda,
@@ -2368,6 +2522,7 @@ def _discover_kinetics(
                         organism_id=organism_id,
                         resolve_publication=_resolve_publication_for_pmid,
                         resolve_substrate=_resolve_substrate_for_brenda_measurement,
+                        resolve_reaction=_resolve_reaction_for_brenda,
                     )
                 except ConnectorError as exc:
                     state.warn(f"BRENDA kinetics discovery failed for EC {ec_number}: {exc}")
@@ -2405,6 +2560,18 @@ def _discover_kinetics(
             )
             if not state.has_run_query(identity):
                 attempted_sources.append(SourceType.GOTENZYMES)
+
+                def _resolve_reaction_for_gotenzymes(
+                    prediction, substrate_id, *, _protein_id=protein_id, _ec_number=ec_number
+                ) -> tuple[UUID | None, str | None]:
+                    return _attribute_reaction(
+                        current_protein_id=_protein_id,
+                        current_ec_number=_ec_number,
+                        parameter_type_label=prediction.parameter_type,
+                        substrate_id=substrate_id,
+                        kegg_reaction_id=prediction.reaction_id,
+                    )
+
                 try:
                     gotenzymes_result = strategies.discover_kinetics_gotenzymes(
                         connectors.gotenzymes,
@@ -2414,6 +2581,7 @@ def _discover_kinetics(
                         organism_id=organism_id,
                         resolve_protein_for_gene=_resolve_protein_for_gotenzymes_gene,
                         resolve_substrate=_resolve_substrate_for_gotenzymes_compound,
+                        resolve_reaction=_resolve_reaction_for_gotenzymes,
                     )
                 except ConnectorError as exc:
                     state.warn(f"GotEnzymes2 kinetics discovery failed for EC {ec_number}: {exc}")

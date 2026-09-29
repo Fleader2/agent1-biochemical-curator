@@ -106,6 +106,20 @@ consumer of the Agent 1 handoff -- must treat
 ``kinetic_measurement_protein_context`` (and its reshapings,
 ``Agent1KnowledgePackage.kinetic_measurement_protein_contexts`` /
 ``CuratedKineticMeasurement.protein_ids``) as authoritative instead.
+
+**Reaction-attribution backfill, retroactive but monotonic** (Evidence-Based
+Kinetic Measurement -> Reaction Attribution increment). ``identity.reaction_id``/
+``.reaction_attribution_reason`` are now written on ``CREATE`` (this table's own
+``reaction_id`` column, and the new ``reaction_attribution_reason`` column,
+migration ``0018_kinetic_measurement_reaction_attribution``). On ``_reuse``, an
+already-persisted row still lacking a ``reaction_id`` is retroactively attributed
+when *this* call's own identity now supplies one -- e.g. a second protein's own
+independent discovery of the identical ``(source, source_id)`` record, whose own
+catalyst context happens to resolve where the first protein's did not. This never
+overwrites an already-set ``reaction_id`` (the first successful attribution wins,
+never re-litigated -- see ``app.normalization.kinetic_measurement_reaction_
+attribution``'s own idempotency policy) and never un-attributes a row -- purely
+additive, exactly like ``kinetic_measurement_protein_context`` above.
 """
 
 from __future__ import annotations
@@ -210,6 +224,17 @@ def _reuse(
         attach_kinetic_measurement_protein_context(
             session, kinetic_measurement_id=existing.id, protein_id=identity.protein_id
         )
+    # Evidence-Based Kinetic Measurement -> Reaction Attribution increment: an
+    # already-persisted, still-unattributed row (reaction_id IS NULL) is retroactively
+    # attributed when *this* reuse call's own identity now supplies one -- e.g. a second
+    # protein's own independent search/attribution attempt for the identical (source,
+    # source_id) record. Never overwrites an already-set reaction_id (first successful
+    # attribution wins, never re-litigated -- see that module's own "idempotency" policy)
+    # and never un-attributes a row.
+    if existing.reaction_id is None and identity.reaction_id is not None:
+        existing.reaction_id = identity.reaction_id
+        existing.reaction_attribution_reason = identity.reaction_attribution_reason
+        session.flush()
     external_record_id = (
         record_external_record(session, source=identity.source, provenance=provenance)
         if provenance is not None
@@ -279,6 +304,7 @@ def persist_kinetic_measurement(
         with session.begin_nested():
             row = KineticMeasurement(
                 reaction_id=identity.reaction_id,
+                reaction_attribution_reason=identity.reaction_attribution_reason,
                 protein_id=identity.protein_id,
                 complex_id=identity.complex_id,
                 parameter_type=identity.parameter_type.value,

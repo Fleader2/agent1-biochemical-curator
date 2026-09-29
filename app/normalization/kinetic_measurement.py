@@ -224,6 +224,15 @@ class KineticMeasurementIdentity:
     value_maximum: Decimal | None = None
 
     reaction_id: UUID | None = None
+    # Evidence-Based Kinetic Measurement -> Reaction Attribution increment: why
+    # reaction_id was (or was not) set -- one of
+    # app.normalization.kinetic_measurement_reaction_attribution
+    # .KineticMeasurementReactionAttributionReason's own seven values, as plain text
+    # (this module never imports that package, to avoid a dependency cycle -- the
+    # caller/executor is the one place that actually runs attribution and already
+    # holds a real value from that enum). ``None`` whenever ``reaction_id`` is also
+    # ``None`` and nothing else applies.
+    reaction_attribution_reason: str | None = None
     protein_id: UUID | None = None
     complex_id: UUID | None = None
     substrate_id: UUID | None = None
@@ -300,6 +309,7 @@ def kinetic_identity_from_brenda(
     record: BrendaKineticMeasurement,
     *,
     reaction_id: UUID | None = None,
+    reaction_attribution_reason: str | None = None,
     protein_id: UUID | None = None,
     complex_id: UUID | None = None,
     substrate_id: UUID | None = None,
@@ -337,6 +347,7 @@ def kinetic_identity_from_brenda(
         value_maximum=parse_decimal(record.parameter_value_maximum),
         unit=record.unit or "dimensionless",
         reaction_id=reaction_id,
+        reaction_attribution_reason=reaction_attribution_reason,
         protein_id=protein_id,
         complex_id=complex_id,
         substrate_id=substrate_id,
@@ -351,6 +362,7 @@ def kinetic_identity_from_sabiork(
     parameter: SabioKineticParameter,
     *,
     reaction_id: UUID | None = None,
+    reaction_attribution_reason: str | None = None,
     protein_id: UUID | None = None,
     complex_id: UUID | None = None,
     substrate_id: UUID | None = None,
@@ -393,6 +405,7 @@ def kinetic_identity_from_sabiork(
         value=value,
         unit=parameter.unit or "unspecified",
         reaction_id=reaction_id,
+        reaction_attribution_reason=reaction_attribution_reason,
         protein_id=protein_id,
         complex_id=complex_id,
         substrate_id=substrate_id,
@@ -410,6 +423,7 @@ def kinetic_identity_from_oed(
     parameter: OedKineticParameter,
     *,
     reaction_id: UUID | None = None,
+    reaction_attribution_reason: str | None = None,
     protein_id: UUID | None = None,
     complex_id: UUID | None = None,
     substrate_id: UUID | None = None,
@@ -440,6 +454,7 @@ def kinetic_identity_from_oed(
         value=value,
         unit=parameter.unit or "unspecified",
         reaction_id=reaction_id,
+        reaction_attribution_reason=reaction_attribution_reason,
         protein_id=protein_id,
         complex_id=complex_id,
         substrate_id=substrate_id,
@@ -454,6 +469,7 @@ def kinetic_identity_from_gotenzymes(
     prediction: GotEnzymesPrediction,
     *,
     reaction_id: UUID | None = None,
+    reaction_attribution_reason: str | None = None,
     protein_id: UUID | None = None,
     complex_id: UUID | None = None,
     substrate_id: UUID | None = None,
@@ -501,6 +517,7 @@ def kinetic_identity_from_gotenzymes(
         value=Decimal(str(prediction.parameter_value)),
         unit=prediction.unit,
         reaction_id=reaction_id,
+        reaction_attribution_reason=reaction_attribution_reason,
         protein_id=protein_id,
         complex_id=complex_id,
         substrate_id=substrate_id,

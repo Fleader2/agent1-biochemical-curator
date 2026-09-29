@@ -127,6 +127,17 @@ class KineticMeasurement(Base):
         PGUUID(as_uuid=True), ForeignKey("reaction.id", ondelete="RESTRICT"), index=True
     )
 
+    # Added by the Evidence-Based Kinetic Measurement -> Reaction Attribution increment
+    # (migration 0018_kinetic_measurement_reaction_attribution). A plain, unconstrained
+    # VARCHAR -- mirrors parameter_type's own identical "never a closed database enum"
+    # policy -- naming exactly why reaction_id was (or was not) set: one of the seven
+    # values app.normalization.kinetic_measurement_reaction_attribution
+    # .KineticMeasurementReactionAttributionReason defines. NULL for every row persisted
+    # before this increment, and for any row this increment's own attribution logic
+    # never attempted to attribute (e.g. no session/lookup was ever wired to run it for
+    # that particular persist call).
+    reaction_attribution_reason: Mapped[str | None] = mapped_column(String)
+
     # LEGACY CONVENIENCE FIELD, NOT AUTHORITATIVE (Agent 1.x Increment C.6): records
     # only whichever protein's own persist_kinetic_measurement call happened to
     # reach this (source, source_id) row first -- an accident of processing order

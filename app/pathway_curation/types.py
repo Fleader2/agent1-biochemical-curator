@@ -138,7 +138,38 @@ from app.pathway_curation.readiness import Agent2ReadinessAssessment
 #: under any completion policy, and one malformed/missing record never aborts
 #: discovery for the rest of the run). No existing request/result field was removed
 #: or repurposed.
-PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.12"
+#:
+#: Bumped to ``v1.13`` by the Evidence-Based Kinetic Measurement -> Reaction
+#: Attribution increment: kinetics discovery (``discover_kinetics_sabiork``/
+#: ``_brenda``/``_oed``/``_gotenzymes``) now attempts a real, conservative,
+#: evidence-based attribution of each measurement's own ``reaction_id`` --
+#: structured reaction identifiers (today: GotEnzymes2's own real KEGG
+#: ``reaction_id``), catalyst identity (``reaction_enzyme``), an exact resolved
+#: compound anchor (Km/Ki only), the catalyst's own curated EC number, and a
+#: partial role-only reaction signature (SABIO-RK only) -- via the new
+#: ``app.normalization.kinetic_measurement_reaction_attribution`` module, never
+#: guessing among two or more remaining candidates. A materially different,
+#: observable result for the same real input: before this increment,
+#: ``KineticMeasurement.reaction_id`` was unconditionally ``None`` for every real
+#: ``sce00061`` measurement (0/216, confirmed live); this increment resolves
+#: 185/216 (85.6%), with the remaining 31 correctly, conservatively left
+#: unresolved (genuinely ambiguous promiscuous-enzyme cases, never a false
+#: attribution -- see this increment's own real-data evaluation). Each of the
+#: four ``discover_kinetics_*`` functions gained one new optional
+#: ``resolve_reaction`` parameter (defaulted to ``None`` -- existing
+#: callers/tests need no change), mirroring ``resolve_substrate``'s own v1.7
+#: addition exactly. A new, plain (never a closed database enum)
+#: ``KineticMeasurement.reaction_attribution_reason`` column (migration
+#: ``0018_kinetic_attribution``) preserves *why* a measurement's ``reaction_id``
+#: was (or was not) set, auditable without inventing evidence. An
+#: already-persisted, still-unattributed row is retroactively backfilled on
+#: reuse (a second, independent discovery of the identical source record) but
+#: never re-litigated once attributed -- the first successful attribution wins.
+#: No public request/result field on this package's own contracts was removed,
+#: repurposed, or added; the Agent 1 handoff contract's own public shape is
+#: unchanged (``reaction_id`` already existed there, always ``None`` before --
+#: this increment only changes how often a real value is now computed for it).
+PATHWAY_CURATION_POLICY_VERSION = "pathway-curation-v1.13"
 
 
 #: KEGG's own stable pathway-id shape: an organism/database code (2-5 lowercase

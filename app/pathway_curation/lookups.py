@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.compartment import Compartment
 from app.models.compound import Compound, CompoundSynonym
@@ -45,7 +45,7 @@ from app.normalization.gene import GeneCandidate
 from app.normalization.organism import OrganismCandidate
 from app.normalization.protein import ProteinCandidate
 from app.normalization.publication import PublicationCandidate
-from app.normalization.reaction import ReactionCandidate
+from app.normalization.reaction import ReactionCandidate, ReactionParticipantIdentity
 from app.normalization.reaction_enzyme import ReactionEnzymeCandidate
 
 
@@ -463,11 +463,93 @@ class SqlAlchemyReactionEnzymeLookup:
         )
 
 
+class SqlAlchemyKineticMeasurementReactionAttributionLookup:
+    """Real ``KineticMeasurementReactionAttributionLookup`` implementation (Evidence-
+    Based Kinetic Measurement -> Reaction Attribution increment).
+
+    Unlike ``SqlAlchemyReactionLookup`` above, every returned ``ReactionCandidate``
+    here has its own ``participants`` populated (eager-loaded via
+    ``selectinload``) -- required for this increment's own tier-2/3/4 compound/
+    EC/signature narrowing, which ``SqlAlchemyReactionLookup``'s own candidates
+    (never populated with participants; see that class's own docstring) cannot
+    support.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _candidates(self, stmt) -> tuple[ReactionCandidate, ...]:
+        rows = (
+            self._session.execute(stmt.options(selectinload(Reaction.participants)))
+            .scalars()
+            .unique()
+            .all()
+        )
+        return tuple(
+            ReactionCandidate(
+                id=row.id,
+                organism_id=row.organism_id,
+                internal_id=row.internal_id,
+                name=row.name,
+                kegg_reaction_id=row.kegg_reaction_id,
+                metacyc_reaction_id=row.metacyc_reaction_id,
+                rhea_id=row.rhea_id,
+                reversible=row.reversible,
+                reaction_type=row.reaction_type,
+                ec_number=row.ec_number,
+                participants=tuple(
+                    ReactionParticipantIdentity(
+                        compound_id=p.compound_id,
+                        role=p.role,
+                        stoichiometry=p.stoichiometry,
+                        compartment_id=p.compartment_id,
+                    )
+                    for p in row.participants
+                ),
+            )
+            for row in rows
+        )
+
+    def by_kegg_reaction_id(self, kegg_reaction_id: str) -> Sequence[ReactionCandidate]:
+        return self._candidates(
+            select(Reaction).where(Reaction.kegg_reaction_id == kegg_reaction_id)
+        )
+
+    def by_metacyc_reaction_id(self, metacyc_reaction_id: str) -> Sequence[ReactionCandidate]:
+        return self._candidates(
+            select(Reaction).where(Reaction.metacyc_reaction_id == metacyc_reaction_id)
+        )
+
+    def by_rhea_id(self, rhea_id: str) -> Sequence[ReactionCandidate]:
+        return self._candidates(select(Reaction).where(Reaction.rhea_id == rhea_id))
+
+    def reactions_catalyzed_by_protein(self, protein_id: UUID) -> Sequence[ReactionCandidate]:
+        reaction_ids = select(ReactionEnzyme.reaction_id).where(
+            ReactionEnzyme.protein_id == protein_id
+        )
+        return self._candidates(select(Reaction).where(Reaction.id.in_(reaction_ids)))
+
+    def reactions_catalyzed_by_complex(self, complex_id: UUID) -> Sequence[ReactionCandidate]:
+        reaction_ids = select(ReactionEnzyme.reaction_id).where(
+            ReactionEnzyme.complex_id == complex_id
+        )
+        return self._candidates(select(Reaction).where(Reaction.id.in_(reaction_ids)))
+
+    def reactions_catalyzed_by_enzyme_state(
+        self, enzyme_state_id: UUID
+    ) -> Sequence[ReactionCandidate]:
+        reaction_ids = select(ReactionEnzyme.reaction_id).where(
+            ReactionEnzyme.enzyme_state_id == enzyme_state_id
+        )
+        return self._candidates(select(Reaction).where(Reaction.id.in_(reaction_ids)))
+
+
 __all__ = [
     "SqlAlchemyCompartmentLookup",
     "SqlAlchemyCompoundLookup",
     "SqlAlchemyCompoundNameIndexLookup",
     "SqlAlchemyGeneLookup",
+    "SqlAlchemyKineticMeasurementReactionAttributionLookup",
     "SqlAlchemyOrganismLookup",
     "SqlAlchemyProteinLookup",
     "SqlAlchemyPublicationLookup",

@@ -55,7 +55,7 @@ from sqlalchemy.orm import Session
 from app.claim_generation.types import EntityKind
 from app.connectors.brenda import BrendaKineticMeasurement
 from app.connectors.exceptions import ConnectorError, ConnectorParseError
-from app.connectors.gotenzymes import GotEnzymesRecord
+from app.connectors.gotenzymes import GotEnzymesPrediction, GotEnzymesRecord
 from app.connectors.kegg import (
     KeggCompoundRecord,
     KeggFlatFileRecord,
@@ -64,6 +64,7 @@ from app.connectors.kegg import (
     parse_kgml_entries,
     parse_kgml_reaction_ids,
 )
+from app.connectors.open_enzyme_database import OedKineticParameter
 from app.connectors.sabiork import SabioKineticParameter, SabioKineticRecord
 from app.entity_resolution.adapters import (
     KeggSearchAndFetch,
@@ -1478,6 +1479,11 @@ def discover_kinetics_sabiork(
     resolve_publication: Callable[[str], UUID | None] | None = None,
     resolve_substrate: Callable[[SabioKineticRecord, SabioKineticParameter], UUID | None]
     | None = None,
+    resolve_reaction: Callable[
+        [SabioKineticRecord, SabioKineticParameter, UUID | None],
+        tuple[UUID | None, str | None],
+    ]
+    | None = None,
 ) -> SabiorkKineticDiscoveryResult:
     """Search SABIO-RK for ``ec_number`` and build one ``KineticMeasurementIdentity`` per
     reported parameter (never persisted here -- the caller/executor persists each one, since
@@ -1522,6 +1528,21 @@ def discover_kinetics_sabiork(
     never even asks the caller to resolve one. When omitted (``None``, the default), every
     measurement's ``substrate_id`` stays ``None``, exactly as before this increment --
     existing callers/tests need no change.
+
+    **Evidence-Based Kinetic Measurement -> Reaction Attribution increment**:
+    ``resolve_reaction``, when supplied, is called once per parameter with
+    ``(record, parameter, substrate_id)`` -- the same already-resolved
+    ``substrate_id`` this function just computed for that exact parameter, since
+    compound-anchored attribution (Km/Ki) needs it -- and must return a
+    ``(reaction_id, reaction_attribution_reason)`` tuple (either or both ``None``
+    when unresolved). This function performs no
+    attribution decision itself (no ``session``/lookup here, by design, the same
+    separation every other resolver in this module already establishes); the
+    caller's closure owns the real decision
+    (``app.normalization.kinetic_measurement_reaction_attribution
+    .attribute_kinetic_measurement_to_reaction``). When omitted (``None``, the
+    default), every measurement's ``reaction_id`` stays ``None``, exactly as
+    before this increment -- existing callers/tests need no change.
     """
     hits = connector.search(ec_number, organism=organism)
     identities: list[KineticMeasurementIdentity] = []
@@ -1545,6 +1566,11 @@ def discover_kinetics_sabiork(
                 if resolve_substrate is not None and parameter.species_label is not None
                 else None
             )
+            reaction_id, reaction_attribution_reason = (
+                resolve_reaction(record, parameter, substrate_id)
+                if resolve_reaction is not None
+                else (None, None)
+            )
             identity = kinetic_identity_from_sabiork(
                 record,
                 parameter,
@@ -1552,6 +1578,8 @@ def discover_kinetics_sabiork(
                 organism_id=organism_id,
                 publication_id=publication_id,
                 substrate_id=substrate_id,
+                reaction_id=reaction_id,
+                reaction_attribution_reason=reaction_attribution_reason,
             )
             if identity is not None:
                 identities.append(identity)
@@ -1567,15 +1595,35 @@ def discover_kinetics_oed(
     organism: str | None,
     protein_id: UUID | None = None,
     organism_id: UUID | None = None,
+    resolve_reaction: Callable[[OedKineticParameter], tuple[UUID | None, str | None]]
+    | None = None,
 ) -> tuple[KineticMeasurementIdentity, ...]:
     """Search Open Enzyme Database for ``ec_number``. OED has no ``fetch()`` -- ``search()``
-    rows are already complete records (see that connector's own contract)."""
+    rows are already complete records (see that connector's own contract).
+
+    **Evidence-Based Kinetic Measurement -> Reaction Attribution increment**:
+    ``resolve_reaction``, when supplied, is called once per parameter and must return
+    a ``(reaction_id, reaction_attribution_reason)`` tuple -- see
+    ``discover_kinetics_sabiork``'s own identical ``resolve_reaction`` docstring for the
+    full policy. OED's own compound context (``OedKineticParameter.substrate``, a free-
+    text name) is not resolved anywhere in this repository yet (no ``resolve_substrate``
+    wiring exists for OED at all, unlike SABIO-RK/BRENDA/GotEnzymes2), so attribution for
+    OED-sourced measurements can only ever reach catalyst-based tiers, never a compound-
+    anchored one -- a real, disclosed limitation, not an oversight.
+    """
     rows = connector.search(ec_number=ec_number, organism=organism)
     identities: list[KineticMeasurementIdentity] = []
     for row in rows:
         for parameter in connector.normalize(row):
+            reaction_id, reaction_attribution_reason = (
+                resolve_reaction(parameter) if resolve_reaction is not None else (None, None)
+            )
             identity = kinetic_identity_from_oed(
-                parameter, protein_id=protein_id, organism_id=organism_id
+                parameter,
+                protein_id=protein_id,
+                organism_id=organism_id,
+                reaction_id=reaction_id,
+                reaction_attribution_reason=reaction_attribution_reason,
             )
             if identity is not None:
                 identities.append(identity)
@@ -1635,6 +1683,10 @@ def discover_kinetics_brenda(
     organism_id: UUID | None = None,
     resolve_publication: Callable[[str], UUID | None] | None = None,
     resolve_substrate: Callable[[BrendaKineticMeasurement], UUID | None] | None = None,
+    resolve_reaction: Callable[
+        [BrendaKineticMeasurement, UUID | None], tuple[UUID | None, str | None]
+    ]
+    | None = None,
 ) -> BrendaKineticDiscoveryResult:
     """Query every one of BRENDA's seven confirmed kinetic SOAP methods for ``ec_number``
     (Agent 1.x Increment C.9) and build one ``KineticMeasurementIdentity`` per reported
@@ -1668,6 +1720,14 @@ def discover_kinetics_brenda(
     ``KineticMeasurementIdentity``'s existing single ``publication_id`` field, not a new
     schema change (Agent 1.x Increment C.9 instructions, §9: no redesign of already-validated
     behavior).
+
+    **Evidence-Based Kinetic Measurement -> Reaction Attribution increment**:
+    ``resolve_reaction``, when supplied, is called once per record with
+    ``(record, substrate_id)`` -- see ``discover_kinetics_sabiork``'s own identical
+    ``resolve_reaction`` docstring for the full policy. BRENDA's own ``record.ec_number``
+    is never read here for attribution -- the caller's closure uses the authoritative,
+    already-curated ``Protein.ec_number`` this search was itself scoped by, never a second,
+    independently-reported EC field that could silently disagree.
     """
     identities: list[KineticMeasurementIdentity] = []
     skipped_methods: list[SkippedBrendaMethod] = []
@@ -1688,12 +1748,19 @@ def discover_kinetics_brenda(
                 if resolve_substrate is not None and brenda_ligand_text(record) is not None
                 else None
             )
+            reaction_id, reaction_attribution_reason = (
+                resolve_reaction(record, substrate_id)
+                if resolve_reaction is not None
+                else (None, None)
+            )
             identity = kinetic_identity_from_brenda(
                 record,
                 protein_id=protein_id,
                 organism_id=organism_id,
                 publication_id=publication_id,
                 substrate_id=substrate_id,
+                reaction_id=reaction_id,
+                reaction_attribution_reason=reaction_attribution_reason,
             )
             if identity is not None:
                 identities.append(identity)
@@ -1735,6 +1802,10 @@ def discover_kinetics_gotenzymes(
     organism_id: UUID | None = None,
     resolve_protein_for_gene: Callable[[str, str], UUID | None],
     resolve_substrate: Callable[[str], UUID | None] | None = None,
+    resolve_reaction: Callable[
+        [GotEnzymesPrediction, UUID | None], tuple[UUID | None, str | None]
+    ]
+    | None = None,
 ) -> GotEnzymesKineticDiscoveryResult:
     """Search GotEnzymes2 for ``ec_number`` (organism-scoped) and build
     ``KineticMeasurementIdentity`` records for every prediction that attributes, via exact
@@ -1770,6 +1841,18 @@ def discover_kinetics_gotenzymes(
     "If protein or substrate identity is ambiguous, do not attach the prediction" read
     together with every other adapter's own established "substrate context is always
     best-effort, protein context is the load-bearing identity" precedent.
+
+    **Evidence-Based Kinetic Measurement -> Reaction Attribution increment**:
+    ``resolve_reaction``, when supplied, is called once per prediction with
+    ``(prediction, substrate_id)`` and must return a
+    ``(reaction_id, reaction_attribution_reason)`` tuple -- see
+    ``discover_kinetics_sabiork``'s own identical ``resolve_reaction``
+    docstring for the full policy. **Real, confirmed opportunity**: GotEnzymes2 reports a
+    real KEGG reaction id directly on every prediction
+    (``GotEnzymesPrediction.reaction_id``, e.g. ``"R00742"`` -- confirmed live-format,
+    ``tests/connectors/test_gotenzymes.py``), the strongest evidence this hierarchy's own
+    tier 1 (``DIRECT_REACTION_IDENTIFIER``) ever sees for any source; the caller's closure
+    is expected to pass it through as the attribution context's own ``kegg_reaction_id``.
     """
     records = connector.search(ec_number=ec_number, organism=organism_kegg_code)
     identities: list[KineticMeasurementIdentity] = []
@@ -1811,11 +1894,18 @@ def discover_kinetics_gotenzymes(
             else None
         )
         for prediction in connector.normalize(record):
+            reaction_id, reaction_attribution_reason = (
+                resolve_reaction(prediction, substrate_id)
+                if resolve_reaction is not None
+                else (None, None)
+            )
             identity = kinetic_identity_from_gotenzymes(
                 prediction,
                 protein_id=protein_id,
                 organism_id=organism_id,
                 substrate_id=substrate_id,
+                reaction_id=reaction_id,
+                reaction_attribution_reason=reaction_attribution_reason,
             )
             identities.append(identity)
 
