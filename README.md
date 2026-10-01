@@ -53,21 +53,32 @@ Those responsibilities belong to downstream agents.
 Agent 1 is one component of a five-agent pipeline. Each agent has a fixed,
 non-overlapping responsibility:
 
-- **Agent 1 — Literature Curator** (this repository): curates biochemical
+- **Agent 1 — Biochemical Curator** (this repository): curates biochemical
   knowledge — entities, reactions, enzymes, regulation, provenance,
   confidence, knowledge gaps, and experiment recommendations/execution —
   into a structured, evidence-backed, reviewable knowledge base.
-- **Agent 2 — Antimony Builder**: turns Agent 1's curated knowledge into
-  syntactically valid Antimony (reactions, parameters, compartments,
-  events, rules).
-- **Agent 3 — Validator**: checks a built model for mass balance, missing
-  species, duplicate reactions, disconnected subnetworks, unit
-  consistency, and conservation laws.
-- **Agent 4 — Simulator**: runs Tellurium/COPASI simulations, parameter
-  scans, sensitivity analyses, and steady-state calculations.
-- **Agent 5 — Model Critic**: asks whether a model is thermodynamically
-  sound, whether cofactors/regulation are missing, and whether its
-  assumptions are experimentally supported.
+- **Agent 2 — Antimony / Mechanistic Model Builder** (`agent2-antimony-builder`):
+  turns Agent 1's curated knowledge into an executable Antimony model
+  (reactions, kinetic laws, parameters, compartments), via its own
+  canonical orchestration entrypoint.
+- **Agent 3 — Simulation and Diagnostics** (`agent3-simulation-diagnostics`):
+  simulates Agent 2's model deterministically and reports structural/
+  numerical diagnostics — it does not repair the model to make a
+  simulation "pass."
+- **Agent 4 — Calibration and Parameter Estimation** (`agent4-calibration-estimator`):
+  calibrates only explicitly authorized uncertain parameters against
+  supplied observation data, never overwriting evidence-backed values.
+- **Agent 5 — Validation and Experimental Design** (`agent5-validation-experimental-design`):
+  validates the calibrated model against held-out data and ranks the
+  next most informative experiments — it never recalibrates or mutates
+  the model.
+
+All five agents are orchestrated end to end by a sixth repository,
+`five-agent-integration-harness` — see that repository's own
+`docs/00_five_agent_workflow_v1_architecture.md` for the full Version 1
+system map (contract/version matrix, responsibility boundaries,
+canonical acceptance fixtures, and invariants), tagged `v1.0.0` as the
+Version 1 release baseline.
 
 Agent 1 v1 is complete and frozen at the boundary above — it does not
 build, validate, simulate, or critique mathematical models. See
@@ -426,7 +437,7 @@ Agent 1 v1 establishes a robust, evidence-backed scientific curation framework t
 
 "Complete" describes v1's scope, not a stopping point for the project: Agent 1.x may still add connectors (MetaCyc, BioCyc), a fuller regulation curation pipeline, and richer cofactor semantics, none of which were required for v1. Future work will expand organism coverage, biological scope, and downstream integrations while preserving the project's core principles of provenance, reproducibility, and scientific rigor.
 
-**Agent 1.x is implemented through the SGD Reference Protein Abundance Integration increment.** Each increment below extends the same v1 curation framework without changing v1's own scope-freeze boundary (still no Antimony/SBML/simulation output, no automatic parameter estimation, no concentration derivation from abundance data). Current `AGENT1_CONTRACT_VERSION` is `"1.4"`; the autonomous pathway curation planner's own policy version is `PATHWAY_CURATION_POLICY_VERSION` `"pathway-curation-v1.12"`. Full detail for every increment — including live-integration findings, rejected alternatives, and disclosed limitations — is documented in `docs/26_autonomous_pathway_curation_planner.md` (plus `docs/24_kinetic_data_curation_and_handoff.md` for A, `docs/25_enzyme_regulatory_states_contract.md` for B, and `docs/27_experimental_context_and_quantitative_observation_framework.md` for the quantitative-observation framework); this section is intentionally a summary, not a chronological log.
+**Agent 1.x is implemented through evidence-based kinetic-measurement reaction attribution.** Each increment below extends the same v1 curation framework without changing v1's own scope-freeze boundary (still no Antimony/SBML/simulation output, no automatic parameter estimation, no concentration derivation from abundance data). Current `AGENT1_CONTRACT_VERSION` is `"1.5"`; the autonomous pathway curation planner's own policy version is `PATHWAY_CURATION_POLICY_VERSION` `"pathway-curation-v1.13"`. Full detail for every increment — including live-integration findings, rejected alternatives, and disclosed limitations — is documented in `docs/26_autonomous_pathway_curation_planner.md` (plus `docs/24_kinetic_data_curation_and_handoff.md` for A, `docs/25_enzyme_regulatory_states_contract.md` for B, and `docs/27_experimental_context_and_quantitative_observation_framework.md` for the quantitative-observation framework); this section is intentionally a summary, not a chronological log.
 
 - **A** — SABIO-RK/Open Enzyme Database kinetic-source support.
 - **B** — structured regulatory enzyme states (allostery, covalent modification, state-specific kinetics).
@@ -445,5 +456,7 @@ Agent 1 v1 establishes a robust, evidence-backed scientific curation framework t
 - **C.12** — canonical kinetic-unit normalization (nM / per_sec / nM_per_s / per_nMs).
 - **Experimental Context and Quantitative Observation Framework** — a new, connector-agnostic schema (`ExperimentalContext`, `Perturbation`, `QuantitativeObservation`, `QuantitativeObservationDependency`) for reference/experiment-specific/time-series quantitative biological data (protein abundance, concentrations, flux, cell volume, growth rate), generically exposed through the Agent 1 handoff.
 - **SGD Reference Protein Abundance Integration** — the first real connector use of that framework: autonomous pathway curation can enrich every resolved protein with SGD's own reference (cross-study median) protein abundance figure (`molecules/cell`), with full provenance and uncertainty preserved and its shared meta-reference publication resolved once per run — deliberately stopping short of any concentration derivation.
+- **Publication year in the Agent 2 handoff** — `Agent1CuratedKnowledgeView` now exposes each referenced publication's own year (verbatim, never inferred), making Agent 2's publication-recency kinetic-evidence tie-breaker non-inert on real data for the first time. `AGENT1_CONTRACT_VERSION` bumped `1.4` → `1.5` (additive field).
+- **Evidence-based kinetic-measurement reaction attribution** — kinetic measurements now receive a `reaction_id`, conservatively, from structured evidence already available to Agent 1 (direct reaction identifiers, catalyst identity, an exact compound anchor for Km/Ki, the catalyst's own curated EC number, and partial reaction signatures); a genuinely ambiguous measurement is left unresolved, with the reason preserved. On the real, live `sce00061` pathway this raised attribution from 0/216 to 185/216 kinetic measurements via a non-destructive, idempotent re-run.
 
-Taken together, Agent 1 now supports: organism-specific KEGG/KGML pathway curation; gene → protein → catalyst resolution; SABIO-RK and BRENDA experimental kinetic evidence; GotEnzymes2 AI-predicted kinetics as a distinct non-experimental evidence class; preservation of plural protein context and compound context; evidence-based (never guessed) reversibility curation; canonical normalization of every kinetic measurement into a shared nM/second unit system; and a structured handoff Agent 2 can consume directly.
+Taken together, Agent 1 now supports: organism-specific KEGG/KGML pathway curation; gene → protein → catalyst resolution; SABIO-RK and BRENDA experimental kinetic evidence; GotEnzymes2 AI-predicted kinetics as a distinct non-experimental evidence class; preservation of plural protein context and compound context; evidence-based (never guessed) reversibility and reaction attribution; canonical normalization of every kinetic measurement into a shared nM/second unit system; and a structured handoff Agent 2 can consume directly.
