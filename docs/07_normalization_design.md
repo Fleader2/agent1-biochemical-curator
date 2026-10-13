@@ -1179,3 +1179,62 @@ test_perturbations_persisted
 test_provenance_attached
 test_repeated_import_is_idempotent
 ```
+
+# Finalized Normalization Policy: Project/Subproject/Model/ModelSpecification/ModelingDecision
+
+See `docs/30_project_subproject_model_foundation.md` for the full design rationale.
+
+## Why these five entities do not use `app.normalization.types.NormalizationResult`
+
+Every normalizer documented above resolves one *externally sourced* record (from KEGG, PubMed,
+SABIO-RK, ...) against existing entities, and `NormalizationResult` is built around exactly that
+shape: it requires a `SourceType` and offers a full MATCHED/NEW/AMBIGUOUS/CONFLICTED/UNRESOLVED
+identity-resolution vocabulary, including a `CANDIDATE_SYNONYM` match method, for exactly that
+case.
+
+`Project`, `Subproject`, `Model`, `ModelSpecification`, and `ModelingDecision` are agent- or
+user-authored organizational records with no external source at all -- there is no KEGG N-number
+or PMID to resolve against, and no `SourceType` member describes "created by the user through
+this application." Forcing these five entities through `NormalizationResult` would mean either
+inventing a meaningless `SourceType` value or leaving `source`/`match_method` permanently
+nonsensical.
+
+Instead, each of the five reuses the existing, smaller precedent already established by
+`app.persistence.knowledge_gap_types.KnowledgeGapPersistenceResult` -- another agent-authored,
+non-externally-sourced record type: a bespoke, per-entity `*PersistenceResult` dataclass (in
+`app.persistence.project_types`/`subproject_types`/`model_types`/
+`model_specification_types`/`modeling_decision_types`) that reuses the shared
+`app.persistence.types.PersistenceAction` enum (`CREATED`/`REUSED_EXISTING`/`FAILED` -- no
+`REQUIRES_REVIEW`, since there is no ambiguity concept for a simple natural-key equality check)
+but defines its own invariants and carries no `NormalizationStatus`/`SourceType` at all. No
+separate `app.normalization.project`/`subproject`/... module exists; identity resolution and
+persistence are the same step for these five entities, exactly as they already are for
+`KnowledgeGap`.
+
+## Identity keys
+
+```text
+Project             stable_identifier (globally unique)
+Subproject           (project_id, title)
+Model                stable_model_identifier (globally unique; allocated via
+                      app.persistence.model_id_allocator when the caller supplies none)
+ModelSpecification   subproject_id (one specification per subproject in this increment)
+ModelingDecision      (project_id, subproject_id, model_id, question)
+```
+
+Every one of the five follows "reuse never touches existing content": a repeat call with the
+identical identity key returns `REUSED_EXISTING` and never overwrites the already-persisted
+row's fields, the same policy `normalize_network`'s own `MATCHED` path already established for
+`Network`.
+
+## ModelSpecification child rows
+
+The eight `model_specification_*` child tables (species/reaction/gene_protein/compartment/
+regulatory_interaction/enzyme_state/pathway) carry no database uniqueness constraint of their
+own -- a specification may legitimately need the identical reaction recorded under two different
+roles, so no single natural key spans every child table the way `uq_subproject_project_id_title`
+does for `Subproject`. Idempotency is instead enforced in `app.persistence.model_specification`
+at the application level: each `add_*` function queries for an existing row with the identical
+full field set before inserting. `raw_identifier` is always preserved when the caller supplies
+it, regardless of whether a resolved entity FK was also supplied -- an unresolved, user-provided
+identifier is retained for later normalization, never discarded.

@@ -16,12 +16,14 @@ from sqlalchemy.orm import Session
 
 from app.models.compartment import Compartment
 from app.models.compound import Compound
-from app.models.enums import EnzymeStateType
+from app.models.enums import EnzymeStateType, RegulatoryEffect
 from app.models.enzyme_state import EnzymeState
+from app.models.experimental_context import ExperimentalContext
 from app.models.gene import Gene
 from app.models.organism import Organism
 from app.models.protein import Protein
 from app.models.reaction import Reaction, ReactionEnzyme
+from app.models.regulatory_interaction import RegulatoryInteraction
 
 _internal_id_counter = itertools.count()
 
@@ -103,6 +105,30 @@ def make_reaction_enzyme(
         complex_id=complex_id,
         enzyme_state_id=enzyme_state_id,
         relationship=relationship,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def make_experimental_context(
+    session: Session, *, organism_id=None, suffix: str | None = None
+) -> ExperimentalContext:
+    context = ExperimentalContext(
+        organism_id=organism_id, growth_condition=f"test-only context {suffix or uuid4().hex[:8]}"
+    )
+    session.add(context)
+    session.flush()
+    return context
+
+
+def make_regulatory_interaction(
+    session: Session, *, effect: RegulatoryEffect = RegulatoryEffect.ACTIVATION
+) -> RegulatoryInteraction:
+    row = RegulatoryInteraction(
+        regulator_type="protein",
+        target_type="gene",
+        effect=effect,
     )
     session.add(row)
     session.flush()

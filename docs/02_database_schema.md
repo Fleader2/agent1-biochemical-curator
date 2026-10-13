@@ -388,6 +388,131 @@ GENETIC
 OTHER
 ```
 
+## ProjectType
+
+Added in the Project/Subproject/Model/ModelSpecification foundation increment. The kind of
+biological system a `project` studies.
+
+```text
+MICROBIAL_METABOLISM
+REGULATORY_NETWORK
+```
+
+## ProjectLifecycleStatus
+
+Added in the same increment. A coarse, generic lifecycle state, shared by `project.status` and
+`subproject.status` (deliberately not `CurationState`: that enum describes a human-review
+verdict on one specific scientific record, not whether a multi-month project or modeling effort
+is still active -- the two questions are unrelated and must not be conflated).
+
+```text
+ACTIVE
+COMPLETED
+ON_HOLD
+ARCHIVED
+```
+
+## SubprojectTaskType
+
+Added in the same increment. What kind of modeling effort one `subproject` represents.
+`EXTEND_MODEL` is reserved now (included, per the task's own instruction) even though no
+increment yet implements automatic model extension.
+
+```text
+BUILD_MODEL
+IMPORT_MODEL
+TEST_MODEL
+CALIBRATE_MODEL
+EXTEND_MODEL
+```
+
+## ModelSourceType
+
+Added in the same increment. How one `model` row's own executable content came to exist.
+
+```text
+GENERATED
+IMPORTED
+DERIVED
+```
+
+## ModelStatus
+
+Added in the same increment. A `model` row's own lifecycle state -- distinct from
+`ProjectLifecycleStatus`: `SUPERSEDED` (replaced by a newer version via `parent_model_id`) has no
+equivalent meaning for a `project`/`subproject`.
+
+```text
+DRAFT
+ACTIVE
+SUPERSEDED
+ARCHIVED
+```
+
+## ModelSpecificationSpeciesRole
+
+Added in the same increment. Which part of a `model_specification` one `model_specification_species`
+row describes -- the single table covering "model input/start species," "model output/end
+species," "boundary species," and "seed metabolites" (task's own four separate bullets), the same
+single-table-plus-role-column convention already used by `reaction_participant.role`.
+
+```text
+INPUT
+OUTPUT
+BOUNDARY
+SEED
+```
+
+## ModelSpecificationReactionRole
+
+Added in the same increment. Covers "seed reactions," "reactions that must be included," and
+"reactions that must be excluded" in one table.
+
+```text
+SEED
+REQUIRED
+EXCLUDED
+```
+
+## ModelSpecificationGeneProteinRole
+
+Added in the same increment. Covers "seed genes," "seed proteins/enzymes," and "genes/proteins
+known to be important" in one table.
+
+```text
+SEED
+IMPORTANT
+```
+
+## ModelSpecificationPathwayRole
+
+Added in the same increment. Covers "pathway scope / pathway inclusion and exclusion."
+
+```text
+INCLUDE
+EXCLUDE
+```
+
+## ModelingDecisionStatus
+
+Added in the same increment.
+
+```text
+OPEN
+RESOLVED
+DEFERRED
+```
+
+## ModelingDecisionResolutionSource
+
+Added in the same increment. Who (or what) actually resolved a `modeling_decision`.
+
+```text
+USER
+AGENT
+RULE
+```
+
 ---
 
 # Table: organism
@@ -1809,6 +1934,477 @@ created_at              TIMESTAMP WITH TIME ZONE NOT NULL
 
 ---
 
+# Table: project
+
+Added in the Project/Subproject/Model/ModelSpecification foundation increment
+(`docs/30_project_subproject_model_foundation.md`). The long-lived scientific project: what
+biological system is being studied. Never confused with model calibration data, and never the
+same thing as a `subproject` (what modeling task is being performed) -- see that doc's own
+"Important architectural boundaries" section.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+stable_identifier       VARCHAR NOT NULL UNIQUE
+title                   VARCHAR NOT NULL
+description             TEXT
+
+project_type            ProjectType NOT NULL
+
+organism_id             UUID REFERENCES organism(id)
+strain_genotype_notes   TEXT
+biological_process      TEXT
+
+status                  ProjectLifecycleStatus NOT NULL DEFAULT ACTIVE
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`stable_identifier` is the project's own identity for idempotent reuse (mirrors `network`'s own
+`external_id`-based identity, except the identifier here is project/agent-assigned rather than
+sourced from an external database). `organism_id` links to an existing, already-curated
+`organism` row -- never a new one fabricated for the project. `strain_genotype_notes` is a
+free-text supplement for project-specific framing that a single linked `organism` row (itself
+already strain-scoped) does not fully capture; it is never a substitute for resolving
+`organism_id` when a suitable row exists. `biological_process` is a free-text description of the
+pathway/process under study -- there is no `pathway` entity in this schema to link to instead
+(the same gap `network_pathway` already discloses).
+
+---
+
+# Table: project_regulatory_context
+
+Added in the same increment. A one-to-one extension of `project`, holding fields relevant only to
+`REGULATORY_NETWORK`-type projects (disease/tissue/cell type) -- kept out of `project` itself so
+that table never becomes the "one oversized table" the task's own instructions warn against. No
+`disease`/`tissue`/`cell_type` entity exists in this schema; all three are free text, the same
+"no entity to link to yet" precedent as `biological_process` above.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+project_id              UUID NOT NULL UNIQUE REFERENCES project(id)
+
+disease                 VARCHAR
+tissue                  VARCHAR
+cell_type               VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`project_id` cascades on delete (this row has no independent meaning apart from the project it
+extends -- the same precedent as `compound_synonym`/`enzyme_complex_member`).
+
+---
+
+# Table: subproject
+
+Added in the same increment. One specific modeling effort or scientific objective within a
+`project`. A project may have many subprojects; nothing in this schema assumes a project has only
+one model-building effort.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+project_id              UUID NOT NULL REFERENCES project(id)
+
+title                   VARCHAR NOT NULL
+objective               TEXT
+
+task_type               SubprojectTaskType NOT NULL
+
+experimental_context_id UUID REFERENCES experimental_context(id)
+
+status                  ProjectLifecycleStatus NOT NULL DEFAULT ACTIVE
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`(project_id, title)` must be unique -- the natural key for idempotent reuse within one project.
+`experimental_context_id` links to the existing, more general `experimental_context` table (Agent
+1.x "Experimental Context and Quantitative Observation Framework" increment) -- never the
+narrower, Claim/Evidence-scoped `experimental_condition` table, which is a different, unrelated
+structure (see that table's own section above and `app/models/experimental_context.py`'s own
+docstring for why the two are never merged).
+
+---
+
+# Table: model
+
+Added in the same increment. One concrete model artifact/version belonging to a `subproject`. A
+subproject may contain multiple models/model versions; a later calibration or modification never
+overwrites a prior model -- it creates a new row, linked via `parent_model_id`, so model lineage
+is always reproducible.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+subproject_id           UUID NOT NULL REFERENCES subproject(id)
+
+stable_model_identifier VARCHAR NOT NULL UNIQUE
+name                    VARCHAR NOT NULL
+
+source_type             ModelSourceType NOT NULL
+status                  ModelStatus NOT NULL DEFAULT DRAFT
+
+parent_model_id         UUID REFERENCES model(id)
+version_label           VARCHAR
+
+executable_format       VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`stable_model_identifier` is globally unique, allocated the same way `reaction.internal_id` is
+(a dedicated PostgreSQL sequence, `model_stable_identifier_seq`, via
+`app.persistence.model_id_allocator`) when the caller does not supply one. `parent_model_id` is a
+nullable self-reference, restricting on delete (a prior version must not be deleted while a later
+version still names it as its parent). `executable_format` is a deliberately open `VARCHAR`, not
+a closed enum -- the task's own "initially including `ANTIMONY`" wording signals this vocabulary
+will grow, the same "never restrict the database so tightly that future values cannot be added"
+policy already applied to `kinetic_measurement.parameter_type`/`perturbation.perturbation_type`.
+This table intentionally does **not** yet have any column for an executable reaction/species/
+parameter representation -- that is `ModelNetworkRepresentation`, a future increment's own table,
+attachable to `model` without altering this table's own shape.
+
+---
+
+# Table: model_specification
+
+Added in the same increment. What the user wants Agent 1 to construct for one `subproject` --
+distinct from the model artifact itself (`model`). One `model_specification` per `subproject` in
+this increment (a subproject's constraints are revised in place, never versioned as separate
+rows yet); the eight tables that follow hold its own normalized constraint lists.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+subproject_id           UUID NOT NULL UNIQUE REFERENCES subproject(id)
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`subproject_id` is unique: one specification per subproject. User assumptions/constraints that
+are not a specific entity reference are represented via the existing `modeling_assumption` table
+(`subject_type="model_specification"`, `subject_id=model_specification.id`) -- never a new,
+redundant "constraints" table (task's own "reuse over duplication" instruction).
+
+---
+
+# Table: model_specification_species
+
+Added in the same increment. One compound/species reference within a `model_specification` --
+covers model input/start species, model output/end species, boundary species, and seed
+metabolites in a single table, distinguished by `role` (mirrors `reaction_participant.role`'s own
+single-table-plus-role convention).
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+model_specification_id  UUID NOT NULL REFERENCES model_specification(id)
+
+role                    ModelSpecificationSpeciesRole NOT NULL
+
+compound_id             UUID REFERENCES compound(id)
+compartment_id          UUID REFERENCES compartment(id)
+
+raw_identifier          VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`model_specification_id` cascades on delete (owned by its specification, no independent meaning).
+`compound_id`/`compartment_id` restrict (independent scientific records). `raw_identifier`
+preserves the user's own original text when it cannot yet be resolved to an existing `compound`
+row -- never discarded, never silently dropped, exactly like `network_node.raw_token`.
+
+---
+
+# Table: model_specification_reaction
+
+Added in the same increment. Covers seed reactions, required reactions, and excluded reactions in
+one table, distinguished by `role`.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+model_specification_id  UUID NOT NULL REFERENCES model_specification(id)
+
+role                    ModelSpecificationReactionRole NOT NULL
+
+reaction_id             UUID REFERENCES reaction(id)
+
+raw_identifier          VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+Same cascade/restrict/raw-identifier-preservation policy as `model_specification_species`.
+
+---
+
+# Table: model_specification_gene_protein
+
+Added in the same increment. Covers seed genes, seed proteins/enzymes, and genes/proteins known
+to be important, in one table. At most one of `gene_id`/`protein_id` is ever set, enforced at the
+application level (the same policy, and the same reason, as `network_node`'s own "at most one
+entity FK" rule).
+
+## Columns
+
+```text
+id                          UUID PRIMARY KEY
+model_specification_id     UUID NOT NULL REFERENCES model_specification(id)
+
+role                        ModelSpecificationGeneProteinRole NOT NULL
+
+gene_id                     UUID REFERENCES gene(id)
+protein_id                  UUID REFERENCES protein(id)
+localization_compartment_id UUID REFERENCES compartment(id)
+
+raw_identifier              VARCHAR
+
+notes                       TEXT
+
+created_at                  TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`localization_compartment_id` is the "subcellular localization constraint" the task lists as a
+separate concept from "compartments to include" (`model_specification_compartment` below): it is
+a constraint on *this specific gene/protein reference*, not on the model as a whole. Same cascade/
+restrict/raw-identifier policy as the other reference tables.
+
+---
+
+# Table: model_specification_compartment
+
+Added in the same increment. Compartments the model as a whole should include.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+model_specification_id  UUID NOT NULL REFERENCES model_specification(id)
+
+compartment_id          UUID REFERENCES compartment(id)
+
+raw_identifier          VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+Same cascade/restrict/raw-identifier policy as the other reference tables.
+
+---
+
+# Table: model_specification_regulatory_interaction
+
+Added in the same increment. Regulatory interactions to include.
+
+## Columns
+
+```text
+id                          UUID PRIMARY KEY
+model_specification_id      UUID NOT NULL REFERENCES model_specification(id)
+
+regulatory_interaction_id   UUID REFERENCES regulatory_interaction(id)
+
+raw_identifier               VARCHAR
+
+notes                        TEXT
+
+created_at                   TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+Same cascade/restrict/raw-identifier policy as the other reference tables.
+
+---
+
+# Table: model_specification_enzyme_state
+
+Added in the same increment. PTMs/protein states to include -- reuses the existing
+`enzyme_state` table (Agent 1.x Increment B) directly; no new PTM/protein-state entity is
+introduced.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+model_specification_id  UUID NOT NULL REFERENCES model_specification(id)
+
+enzyme_state_id         UUID REFERENCES enzyme_state(id)
+
+raw_identifier          VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+Same cascade/restrict/raw-identifier policy as the other reference tables.
+
+---
+
+# Table: model_specification_pathway
+
+Added in the same increment. Pathway scope: inclusion and exclusion. Agent 1 has no `pathway`
+entity of its own (the same gap `network_pathway` already discloses), so KEGG's own pathway
+identifier is stored directly rather than a foreign key into a nonexistent table.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+model_specification_id  UUID NOT NULL REFERENCES model_specification(id)
+
+role                    ModelSpecificationPathwayRole NOT NULL
+
+external_pathway_id     VARCHAR
+name                    VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`model_specification_id` cascades on delete.
+
+---
+
+# Table: modeling_decision
+
+Added in the same increment. One modeling decision requiring reconciliation between competing
+alternatives -- distinct from `modeling_assumption` (a single declarative statement with no
+competing options to choose between). This will later support a UI screen where users resolve
+competing biological/modeling alternatives; that UI is not implemented by this increment.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+project_id              UUID REFERENCES project(id)
+subproject_id           UUID REFERENCES subproject(id)
+model_id                UUID REFERENCES model(id)
+
+question                TEXT NOT NULL
+decision_type           VARCHAR
+
+status                  ModelingDecisionStatus NOT NULL DEFAULT OPEN
+
+selected_option_id      UUID REFERENCES modeling_decision_option(id)
+resolution_source       ModelingDecisionResolutionSource
+
+rationale               TEXT
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`project_id`/`subproject_id`/`model_id` are all nullable: a decision's own context may be scoped
+at whichever level is appropriate (a project-wide decision, a subproject-specific one, or one tied
+to a specific model version) -- none is required, and more than one may be set when a decision is
+naturally scoped at multiple levels at once. `decision_type` is a deliberately open `VARCHAR`
+(the task names no closed vocabulary for it, unlike `status`/`resolution_source`, both of which
+it does enumerate). `selected_option_id` references `modeling_decision_option` -- a genuine
+forward reference to a child table, resolved via a second `ALTER TABLE ... ADD CONSTRAINT` once
+that table exists (see the migration), restricting on delete (an option currently selected by a
+decision cannot be deleted out from under it).
+
+---
+
+# Table: modeling_decision_option
+
+Added in the same increment. One candidate option for a `modeling_decision`.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+decision_id             UUID NOT NULL REFERENCES modeling_decision(id)
+
+label                   VARCHAR NOT NULL
+description             TEXT
+
+evidence_summary        TEXT
+confidence_score        NUMERIC
+confidence_class        ConfidenceClass
+
+consequence_summary     TEXT
+
+recommended             BOOLEAN NOT NULL DEFAULT FALSE
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`decision_id` cascades on delete (an option has no independent meaning apart from the decision it
+answers). `confidence_score` reuses `claim.confidence_score`'s own 0-100 range `CHECK` and
+`confidence_class` reuses the existing `ConfidenceClass` enum directly -- no new confidence
+representation is invented.
+
+---
+
 # Confidence Representation
 
 Confidence must normally be associated with claims rather than entire biological entities.
@@ -1948,6 +2544,42 @@ network
            +-- publication (optional)
 ```
 
+Project / modeling foundation (organizational structure above the
+reaction/network layers, not a replacement for either):
+
+```text
+project
+   |
+   +-- project_regulatory_context
+   |
+   +-- subproject
+           |
+           +-- experimental_context (optional)
+           |
+           +-- model_specification
+           |       |
+           |       +-- model_specification_species (compound, compartment)
+           |       +-- model_specification_reaction (reaction)
+           |       +-- model_specification_gene_protein (gene, protein, compartment)
+           |       +-- model_specification_compartment (compartment)
+           |       +-- model_specification_regulatory_interaction (regulatory_interaction)
+           |       +-- model_specification_enzyme_state (enzyme_state)
+           |       +-- model_specification_pathway
+           |       +-- modeling_assumption (polymorphic subject_type="model_specification")
+           |
+           +-- model
+                 |
+                 +-- model (parent_model_id, self-referential lineage)
+
+modeling_decision
+   |
+   +-- project / subproject / model (optional context, any combination)
+   |
+   +-- modeling_decision_option
+           |
+           +-- modeling_decision (selected_option_id, optional)
+```
+
 ---
 
 # Required Indexes
@@ -1999,6 +2631,20 @@ network_node.network_id
 network_node.raw_token
 network_edge.network_id
 network_edge.interaction_type
+
+project.stable_identifier
+project.organism_id
+subproject.project_id
+subproject.experimental_context_id
+model.subproject_id
+model.stable_model_identifier
+model.parent_model_id
+model_specification.subproject_id
+modeling_decision.project_id
+modeling_decision.subproject_id
+modeling_decision.model_id
+modeling_decision.selected_option_id
+modeling_decision_option.decision_id
 ```
 
 JSONB indexes may be added later based on observed query patterns.
@@ -2030,13 +2676,28 @@ network_perturbation (cascades from network)
 network_pathway    (cascades from network)
 network_disease    (cascades from network)
 network_publication (cascades from network)
+project_regulatory_context (cascades from project)
+model_specification_species (cascades from model_specification)
+model_specification_reaction (cascades from model_specification)
+model_specification_gene_protein (cascades from model_specification)
+model_specification_compartment (cascades from model_specification)
+model_specification_regulatory_interaction (cascades from model_specification)
+model_specification_enzyme_state (cascades from model_specification)
+model_specification_pathway (cascades from model_specification)
+modeling_decision_option (cascades from modeling_decision)
 ```
 
 A `network_node`/`network_perturbation`'s own optional link *into* an
 independent scientific record (`gene`/`protein`/`enzyme_complex`/
 `compound`/`reaction`/`publication`) still restricts, exactly like every
 other such link elsewhere in this schema -- only the link *back to a
-network's own child rows* cascades.
+network's own child rows* cascades. The same rule applies to every
+`model_specification_*` child table's own optional link into an
+independent scientific record (`compound`/`reaction`/`gene`/`protein`/
+`compartment`/`regulatory_interaction`/`enzyme_state`) -- those links
+restrict; only the link back to `model_specification` cascades.
+`model.parent_model_id` restricts (a prior model version must not be
+deleted while a later version still names it as its parent).
 
 Publication, evidence, claim, and kinetic records must never disappear automatically because another entity was deleted.
 

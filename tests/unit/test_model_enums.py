@@ -22,16 +22,27 @@ from app.models.enums import (
     EnzymeStateType,
     EvidenceType,
     ExperimentalContextClassification,
+    ModelingDecisionResolutionSource,
+    ModelingDecisionStatus,
+    ModelSourceType,
+    ModelSpecificationGeneProteinRole,
+    ModelSpecificationPathwayRole,
+    ModelSpecificationReactionRole,
+    ModelSpecificationSpeciesRole,
+    ModelStatus,
     ModificationType,
     NetworkEdgeInteractionType,
     NetworkNodeMappingStatus,
     NetworkNodeType,
     NetworkPerturbationType,
     NetworkType,
+    ProjectLifecycleStatus,
+    ProjectType,
     QuantitativeEvidenceClass,
     ReactionParticipantRole,
     RegulatoryEffect,
     SourceType,
+    SubprojectTaskType,
     TimeReferenceBasis,
 )
 
@@ -49,16 +60,27 @@ _EXPECTED_NAMES = {
     "EnzymeStateType",
     "EvidenceType",
     "ExperimentalContextClassification",
+    "ModelSourceType",
+    "ModelSpecificationGeneProteinRole",
+    "ModelSpecificationPathwayRole",
+    "ModelSpecificationReactionRole",
+    "ModelSpecificationSpeciesRole",
+    "ModelStatus",
+    "ModelingDecisionResolutionSource",
+    "ModelingDecisionStatus",
     "ModificationType",
     "NetworkEdgeInteractionType",
     "NetworkNodeMappingStatus",
     "NetworkNodeType",
     "NetworkPerturbationType",
     "NetworkType",
+    "ProjectLifecycleStatus",
+    "ProjectType",
     "QuantitativeEvidenceClass",
     "ReactionParticipantRole",
     "RegulatoryEffect",
     "SourceType",
+    "SubprojectTaskType",
     "TimeReferenceBasis",
 }
 
@@ -193,6 +215,23 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
     NetworkPerturbationType: frozenset(
         {"GENE_VARIANT", "DRUG", "VIRAL_FACTOR", "ENVIRONMENTAL", "GENETIC", "OTHER"}
     ),
+    # Added in the Project/Subproject/Model/ModelSpecification foundation
+    # increment (migration 0020_project_subproject_model) -- see
+    # docs/02_database_schema.md's own sections for each and
+    # docs/30_project_subproject_model_foundation.md.
+    ProjectType: frozenset({"MICROBIAL_METABOLISM", "REGULATORY_NETWORK"}),
+    ProjectLifecycleStatus: frozenset({"ACTIVE", "COMPLETED", "ON_HOLD", "ARCHIVED"}),
+    SubprojectTaskType: frozenset(
+        {"BUILD_MODEL", "IMPORT_MODEL", "TEST_MODEL", "CALIBRATE_MODEL", "EXTEND_MODEL"}
+    ),
+    ModelSourceType: frozenset({"GENERATED", "IMPORTED", "DERIVED"}),
+    ModelStatus: frozenset({"DRAFT", "ACTIVE", "SUPERSEDED", "ARCHIVED"}),
+    ModelSpecificationSpeciesRole: frozenset({"INPUT", "OUTPUT", "BOUNDARY", "SEED"}),
+    ModelSpecificationReactionRole: frozenset({"SEED", "REQUIRED", "EXCLUDED"}),
+    ModelSpecificationGeneProteinRole: frozenset({"SEED", "IMPORTANT"}),
+    ModelSpecificationPathwayRole: frozenset({"INCLUDE", "EXCLUDE"}),
+    ModelingDecisionStatus: frozenset({"OPEN", "RESOLVED", "DEFERRED"}),
+    ModelingDecisionResolutionSource: frozenset({"USER", "AGENT", "RULE"}),
 }
 
 
@@ -212,8 +251,8 @@ def test_enum_values_are_stable_strings(enum_cls: type) -> None:
         assert _STABLE_ENUM_VALUE.match(member.value)
 
 
-def test_exactly_twenty_enums_are_defined() -> None:
-    """The module defines exactly the twenty enums named in docs/02_database_schema.md.
+def test_exactly_thirty_one_enums_are_defined() -> None:
+    """The module defines exactly the thirty-one enums named in docs/02_database_schema.md.
 
     Seven from the original specification, four added in Agent 1.x
     Increment B (``EnzymeStateType``, ``ModificationType``,
@@ -221,10 +260,16 @@ def test_exactly_twenty_enums_are_defined() -> None:
     Agent 1.x Increment "Experimental Context and Quantitative Observation
     Framework" (``QuantitativeEvidenceClass``,
     ``ExperimentalContextClassification``, ``TimeReferenceBasis``,
-    ``ContextCompatibility``), and five added in the KEGG NETWORK support
+    ``ContextCompatibility``), five added in the KEGG NETWORK support
     increment (``NetworkType``, ``NetworkNodeType``,
     ``NetworkNodeMappingStatus``, ``NetworkEdgeInteractionType``,
-    ``NetworkPerturbationType``).
+    ``NetworkPerturbationType``), and eleven added in the Project/
+    Subproject/Model/ModelSpecification foundation increment
+    (``ProjectType``, ``ProjectLifecycleStatus``, ``SubprojectTaskType``,
+    ``ModelSourceType``, ``ModelStatus``, ``ModelSpecificationSpeciesRole``,
+    ``ModelSpecificationReactionRole``,
+    ``ModelSpecificationGeneProteinRole``, ``ModelSpecificationPathwayRole``,
+    ``ModelingDecisionStatus``, ``ModelingDecisionResolutionSource``).
     """
     assert set(enums.__all__) == _EXPECTED_NAMES
 
