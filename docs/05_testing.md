@@ -218,6 +218,12 @@ Each test should operate in an isolated transaction where practical.
 
 Database state must not leak between tests.
 
+The session-scoped `migrated_engine` fixture resets the test database to a clean, deterministic
+baseline (full migration replay, not a blanket truncate -- see `docs/29_test_database_isolation.md`
+for why) once at the start of every pytest session, before any test runs, so this holds even
+against data committed out-of-band (a real-connection concurrency test, a one-off script, or any
+other write `db_session`'s own per-test rollback never sees) in a prior run.
+
 ---
 
 # Fixtures

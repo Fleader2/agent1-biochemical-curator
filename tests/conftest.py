@@ -123,11 +123,56 @@ def alembic_config() -> Config:
     return config
 
 
+def reset_test_database(alembic_config: Config) -> None:
+    """Replay the full migration history, restoring the database to exactly the
+    clean, deterministic baseline a fresh migration run produces -- including any
+    reference/seed data a migration's own ``upgrade()`` inserts (e.g. migration
+    ``0002_reference_data``'s 13 standard compartments).
+
+    Root-cause context (see ``docs/29_test_database_isolation.md``): ``db_session``'s
+    per-test rollback only isolates writes made *through that one fixture's own
+    connection*. Anything committed on a *separate* connection -- a concurrency test that
+    must use two independent real connections to exercise a genuine database-level race
+    (``tests/persistence/test_kinetic_measurement.py::test_concurrent_same_source_record_yields_one_row``
+    is exactly this shape), a one-off script, or any other direct write -- is completely
+    outside that isolation and persists in the database indefinitely, across tests and
+    across separate pytest invocations, until something explicitly clears it. Calling
+    ``alembic upgrade head`` alone never does this: it only applies schema changes (and
+    is a safe no-op when already at head) and has no opinion about what data already
+    sits in the tables.
+
+    An earlier version of this function instead issued one blanket
+    ``TRUNCATE ... CASCADE`` across every table. That genuinely cleared contamination,
+    but also silently discarded migration-seeded reference data no test ever created and
+    no test should be able to delete (confirmed directly: it turned
+    ``test_default_compartment_text_resolves_to_the_seeded_reference_compartment`` red,
+    since it depends on exactly those 13 seeded rows existing). A per-table "truncate
+    unless it's a seed table" exception list would need to be kept in sync by hand every
+    time a future migration adds more seed data -- fragile, and exactly the kind of
+    test-specific workaround this fix is supposed to avoid. Replaying the real migration
+    history has no such gap: ``downgrade("base")`` drops every table (a safe no-op
+    against a brand-new database with no ``alembic_version`` row at all -- confirmed
+    directly), and the subsequent ``upgrade("head")`` recreates the schema *and*
+    re-runs every seeding migration's own insert, using the exact same already-tested
+    code path ``tests/database/test_migrations.py`` already exercises for the
+    "empty database to head" case. No duplicated seeding logic, nothing to keep in sync.
+    """
+    command.downgrade(alembic_config, "base")
+    command.upgrade(alembic_config, "head")
+
+
 @pytest.fixture(scope="session")
 def migrated_engine(settings: Settings, alembic_config: Config) -> Iterator[Engine]:
-    """Engine bound to the test database, migrated to head once per session."""
+    """Engine bound to the test database, migrated to head and reset to a clean
+    baseline once per session.
+
+    The reset (``reset_test_database``) runs exactly once per session, before any
+    test can observe the database -- see that function's own docstring for why
+    migrating alone is not sufficient for a clean baseline, and
+    ``tests/database/test_fixture_isolation.py`` for the regression coverage.
+    """
     alembic_config.set_main_option("sqlalchemy.url", settings.sqlalchemy_url)
-    command.upgrade(alembic_config, "head")
+    reset_test_database(alembic_config)
 
     engine = get_engine()
     yield engine
