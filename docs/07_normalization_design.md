@@ -1088,14 +1088,28 @@ result is `CONFLICTED`, never a silent overwrite.
 
 A pure, deterministic parser (`app.connectors.kegg_network_topology.parse_topology`) turns one
 `DEFINITION`/`EXPANDED` expression into an explicit tuple of directed edges between raw tokens.
-Grouping (`(A,B)`) is explicit OR-grouping, flattened recursively for nested groups. Only two
-operators are mapped to a specific `NetworkEdgeInteractionType`: `->` (KEGG's own generic
-topology connector) maps to `UNKNOWN` -- never guessed as a specific mechanism without real
-operator-level evidence -- and `+` maps to `COMPLEX_FORMATION`, directly justified by notation.
-Every other operator is preserved verbatim and classified `UNKNOWN`. A structurally invalid
-expression (unbalanced parentheses, a dangling operator, an empty group) is reported as
-`incomplete=True` with a human-readable reason; `edges` is always `()` in that case -- no
-speculative edge is ever created to paper over syntax that cannot be parsed.
+Grouping (`(A,B)`) is explicit OR-grouping, flattened recursively for nested groups; a group may
+instead use `+` as its separator (`(A+B)`), meaning the members are components of one complex --
+mixing `,` and `+` within the same group is rejected as malformed, never guessed.
+
+Six operators are mapped to a specific `NetworkEdgeInteractionType`, each backed by KEGG's own
+NETWORK notation documentation and, where available, a real NETWORK record: `-|` ->
+`INHIBITION`, `=>` -> `EXPRESSION`, `=|` -> `REPRESSION`, `--` -> `BINDING`, and `+`/`==` ->
+`COMPLEX_FORMATION` (a `+`-group additionally produces internal `COMPLEX_FORMATION` edges between
+its own adjacent members, not just the outer edges to/from the group). `->` is deliberately left
+`UNKNOWN` even though it is the single most common KEGG operator: KEGG's own documentation gives
+it two different meanings depending on network type (signaling "Activation" vs. metabolic
+"Enzyme-product relation"), and the parser has no signal for which applies -- promoting it either
+way would be a guess. `//`, `-^`, and `>>` are likewise real, KEGG-documented operators with no
+matching `NetworkEdgeInteractionType` member, so they too remain `UNKNOWN`. Every other,
+undocumented operator is preserved verbatim and classified `UNKNOWN`. Full operator-by-operator
+evidence and citations: `docs/28_kegg_network_support.md` ("Operator semantics").
+
+A structurally invalid expression (unbalanced parentheses, a dangling operator, an empty group,
+a mixed-separator group, or parentheses used as part of a compound's own display name rather than
+topological grouping) is reported as `incomplete=True` with a human-readable reason; `edges` is
+always `()` in that case -- no speculative edge is ever created to paper over syntax that cannot
+be parsed.
 
 ## Perturbation handling
 
