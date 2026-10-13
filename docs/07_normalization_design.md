@@ -1035,3 +1035,133 @@ test_one_protein_catalyzing_two_reactions_both_allowed
 test_duplicate_blocks_new
 test_missing_relationship_is_unresolved_not_new
 ```
+
+# Finalized Normalization Policy: Network
+
+See `app.normalization.network` (`normalize_network`, `map_network_node`) and
+`docs/28_kegg_network_support.md` for the full design rationale.
+
+## Identity hierarchy
+
+A network's own identity is deliberately the simplest in this repository:
+
+```text
+1. KEGG NETWORK external ID (Nxxxxx)
+2. no fallback identity based only on name
+```
+
+There is no Level-3 name/synonym lookup for `Network` at all, unlike
+Compound/Gene/Protein/Reaction. Two networks that happen to share a `name` but have different
+external ids are never merged -- name is never consulted for identity matching.
+
+## Source identifier handling
+
+Lookup is global (`by_external_id`, no organism scope): a matching external id from a
+*different* source than the incoming record is `CONFLICTED`, never silently reused and never
+silently overwritten. Multiple existing rows already sharing the identical external id (a state
+the database's own `(source_type, external_id)` unique constraint should prevent, but which this
+normalizer still handles rather than crashing on) is `AMBIGUOUS`. Zero existing rows is `NEW`.
+`UNRESOLVED` is not reachable from `normalize_network` itself -- an identity with no usable
+external id cannot even be constructed (`NetworkIdentity.__post_init__` raises first), the same
+"invalid input is rejected at construction" convention every other `*Identity` type in this
+package already follows.
+
+## Node mapping
+
+A *separate* question from network identity, using a smaller, distinct status vocabulary
+(`NetworkNodeMappingStatus`: `MAPPED`/`UNRESOLVED`/`AMBIGUOUS`/`CONFLICTED` -- deliberately no
+`NEW`, since a network node is never itself a candidate for creating a new biological entity,
+only for linking to one that already exists).
+
+Only `GENE` (via `GeneLookup.by_kegg_gene_id`), `COMPOUND` (via
+`CompoundLookup.by_kegg_compound_id`), and `REACTION` (via `ReactionLookup.by_kegg_reaction_id`)
+can currently resolve -- the only three entity types with an existing, global, exact-match KEGG-id
+lookup method already committed in this repository. `PROTEIN`/`COMPLEX` always return
+`UNRESOLVED`: `Protein` has no `kegg_gene_id`-equivalent column, and `EnzymeComplex` has no KEGG
+identifier column at all, so there is no deterministic lookup to perform without fabricating one.
+
+A mapping, once established, is never silently remapped: if a later re-resolution of the
+identical raw token now finds a *different* single match than what was already persisted, the
+result is `CONFLICTED`, never a silent overwrite.
+
+## Topology parsing
+
+A pure, deterministic parser (`app.connectors.kegg_network_topology.parse_topology`) turns one
+`DEFINITION`/`EXPANDED` expression into an explicit tuple of directed edges between raw tokens.
+Grouping (`(A,B)`) is explicit OR-grouping, flattened recursively for nested groups. Only two
+operators are mapped to a specific `NetworkEdgeInteractionType`: `->` (KEGG's own generic
+topology connector) maps to `UNKNOWN` -- never guessed as a specific mechanism without real
+operator-level evidence -- and `+` maps to `COMPLEX_FORMATION`, directly justified by notation.
+Every other operator is preserved verbatim and classified `UNKNOWN`. A structurally invalid
+expression (unbalanced parentheses, a dangling operator, an empty group) is reported as
+`incomplete=True` with a human-readable reason; `edges` is always `()` in that case -- no
+speculative edge is ever created to paper over syntax that cannot be parsed.
+
+## Perturbation handling
+
+A KEGG NETWORK's own `VARIANT`/`PERTURBANT` field content is never required to resolve to a
+normalized entity. KEGG's own source text is always preserved on `raw_value` even when
+interpretation is incomplete. Distinct from the existing `Perturbation` model (an experimental
+condition applied when a `QuantitativeObservation` was measured): `NetworkPerturbation` describes
+what a KEGG topology record itself represents, never an experimental measurement condition, and
+the two are never merged or cross-referenced.
+
+## Unresolved nodes
+
+An unresolved node is never discarded. `mapping_status=UNRESOLVED` and every entity FK field left
+null is itself the persisted record of "this token could not be linked" -- never silently dropped
+from the topology, and never promoted to a fabricated mapping merely because exactly one
+plausible-looking candidate exists under a weaker, non-KEGG-id signal (no such weaker signal is
+ever consulted for node mapping at all).
+
+## Provenance
+
+Uses the existing `app.persistence.provenance` framework exactly
+(`attach_source_cross_reference`/`record_external_record`) -- no second provenance framework. The
+network record retains `source=KEGG`, its own KEGG network identifier, and (when supplied) the raw
+source response text via `ExternalRecordProvenance`.
+
+## Idempotency
+
+Re-importing the identical KEGG NETWORK record creates no duplicates. On `NEW`, the network and
+its full topology (nodes/edges/perturbations/pathway/disease/publication associations) are
+created as one atomic unit. On a subsequent `MATCHED` import of the identical record, children are
+never touched at all -- mirroring `persist_reaction`'s own "`MATCHED` never touches participants"
+policy exactly, and the simplest design that still satisfies "same logical set of nodes/edges/
+perturbations" for a record that has not changed upstream. Reconciling a network whose own
+upstream KEGG record has genuinely changed since it was first imported is out of scope for this
+increment.
+
+## Proposed regression tests
+
+The following tests are already implemented and passing in
+`tests/normalization/test_network.py`, `tests/connectors/test_kegg_network_topology.py`,
+`tests/persistence/test_network.py`, and `tests/database/test_group_j_models.py`:
+
+```text
+test_existing_n_number_matches
+test_unseen_n_number_becomes_new
+test_duplicate_names_with_different_n_numbers_remain_distinct
+test_conflicting_n_number_data_becomes_conflicted
+test_multiple_existing_rows_sharing_the_same_external_id_is_ambiguous
+test_gene_resolves_uniquely
+test_compound_resolves_uniquely
+test_reaction_resolves_uniquely
+test_unresolved_identifier_retained
+test_ambiguous_identifier_retained_for_review
+test_re_resolution_to_a_different_entity_is_conflicted_not_silently_remapped
+test_simple_linear_network
+test_branched_network
+test_grouped_upstream_nodes
+test_nested_grouping
+test_unsupported_operator_preserved_safely
+test_malformed_expression_unbalanced_parentheses_produces_review_state
+test_new_network_creation
+test_existing_network_reuse_never_touches_children
+test_nodes_created
+test_edges_created
+test_unresolved_nodes_still_persisted
+test_perturbations_persisted
+test_provenance_attached
+test_repeated_import_is_idempotent
+```

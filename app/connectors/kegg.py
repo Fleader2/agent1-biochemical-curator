@@ -85,6 +85,7 @@ for how this and ``link()`` are combined.
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -92,7 +93,7 @@ from urllib.parse import quote
 from app.config.settings import Settings, get_settings
 from app.connectors.exceptions import ConnectorHTTPError, ConnectorParseError
 from app.connectors.http import ConnectorHttpClient
-from app.models.enums import SourceType
+from app.models.enums import NetworkType, SourceType
 
 _ENTRY_FIELD_WIDTH = 12  # KEGG flat-file keyword column width, e.g. "ENTRY       ".
 
@@ -152,6 +153,39 @@ class KeggReactionRecord:
     equation: str | None
     enzymes: tuple[str, ...]
     pathways: tuple[str, ...]
+    raw: KeggFlatFileRecord
+
+
+@dataclass(frozen=True, slots=True)
+class KeggNetworkRecord:
+    """KEGG-scoped normalized view of a ``Network`` entry (KEGG NETWORK
+    support increment).
+
+    Every multi-row field (``pathways``/``diseases``/``genes``/``variants``/
+    ``perturbants``/``metabolites``/``references``) preserves each raw row
+    verbatim, one tuple entry per row, never split further -- the identical
+    policy ``KeggReactionRecord.enzymes``/``pathways`` already apply, for the
+    identical reason (guessing at a split risks misreading the source).
+    ``network_type`` is this increment's own closed-vocabulary
+    classification (``app.models.enums.NetworkType``), derived from the
+    ``ENTRY`` line's own sub-classification token (``Reference``/
+    ``Variant``/``Virus``/``Drug``) when present, ``OTHER`` otherwise -- see
+    ``normalize_network``.
+    """
+
+    entry_id: str
+    network_type: NetworkType
+    names: tuple[str, ...]
+    definition: str | None
+    expanded_definition: str | None
+    network_class: tuple[str, ...]
+    pathways: tuple[str, ...]
+    diseases: tuple[str, ...]
+    genes: tuple[str, ...]
+    variants: tuple[str, ...]
+    perturbants: tuple[str, ...]
+    metabolites: tuple[str, ...]
+    references: tuple[str, ...]
     raw: KeggFlatFileRecord
 
 
@@ -429,6 +463,71 @@ def normalize_compound(record: KeggFlatFileRecord) -> KeggCompoundRecord:
     )
 
 
+#: Maps the ``ENTRY`` line's own sub-classification token to ``NetworkType``.
+#: Transcribed from KEGG's own documented network source categories -- any
+#: token not listed here (including a bare ``"Network"`` entry with no
+#: further sub-classification at all) maps to ``OTHER``, never guessed.
+_NETWORK_SUBTYPE_TO_TYPE: dict[str, NetworkType] = {
+    "Reference": NetworkType.REFERENCE,
+    "Variant": NetworkType.VARIANT,
+    "Virus": NetworkType.VIRUS,
+    "Drug": NetworkType.DRUG,
+}
+
+
+def _network_subtype_text(record: KeggFlatFileRecord) -> str | None:
+    """The ``ENTRY`` line's own third token (``Reference``/``Variant``/
+    ``Virus``/``Drug``), when present.
+
+    Reads ``record.fields["ENTRY"]`` directly rather than
+    ``record.entry_type`` -- ``parse_flat_file``'s own generic
+    ``entry_type`` extraction takes only the *last* ``ENTRY``-line token,
+    which for a plain ``"N00103  Network"`` line correctly yields
+    ``"Network"``, but for ``"N00002  Network  Reference"`` yields
+    ``"Reference"`` with ``"Network"`` itself discarded -- exactly right for
+    Compound/Reaction (a single trailing classification word) but not a
+    reliable way to recover a Network's own sub-classification, so this
+    increment reads the ``ENTRY`` line's own tokens directly instead of
+    changing that generic, already-committed, already-tested behavior.
+    """
+    entry_rows = record.fields.get("ENTRY", ())
+    if not entry_rows:
+        return None
+    tokens = entry_rows[0].split()
+    if len(tokens) >= 3 and tokens[1] == "Network":
+        return tokens[2]
+    return None
+
+
+def normalize_network(record: KeggFlatFileRecord) -> KeggNetworkRecord:
+    """Map a generic parsed record onto KEGG-scoped NETWORK fields (KEGG
+    NETWORK support increment)."""
+    subtype_text = _network_subtype_text(record)
+    network_type = (
+        _NETWORK_SUBTYPE_TO_TYPE.get(subtype_text, NetworkType.OTHER)
+        if subtype_text is not None
+        else NetworkType.OTHER
+    )
+    definition_rows = record.fields.get("DEFINITION", ())
+    expanded_rows = record.fields.get("EXPANDED", ())
+    return KeggNetworkRecord(
+        entry_id=record.entry_id,
+        network_type=network_type,
+        names=_join_names(record.fields.get("NAME", ())),
+        definition=" ".join(definition_rows) if definition_rows else None,
+        expanded_definition=" ".join(expanded_rows) if expanded_rows else None,
+        network_class=record.fields.get("CLASS", ()),
+        pathways=record.fields.get("PATHWAY", ()),
+        diseases=record.fields.get("DISEASE", ()),
+        genes=record.fields.get("GENE", ()),
+        variants=record.fields.get("VARIANT", ()),
+        perturbants=record.fields.get("PERTURBANT", ()),
+        metabolites=record.fields.get("METABOLITE", ()),
+        references=record.fields.get("REFERENCE", ()),
+        raw=record,
+    )
+
+
 def normalize_reaction(record: KeggFlatFileRecord) -> KeggReactionRecord:
     """Map a generic parsed record onto KEGG-scoped reaction fields."""
     definition_rows = record.fields.get("DEFINITION", ())
@@ -554,19 +653,28 @@ class KeggConnector:
 
     def normalize(
         self, raw: KeggFlatFileRecord
-    ) -> KeggCompoundRecord | KeggReactionRecord | KeggFlatFileRecord:
+    ) -> KeggCompoundRecord | KeggReactionRecord | KeggNetworkRecord | KeggFlatFileRecord:
         """Map a parsed KEGG record onto a KEGG-scoped normalized shape.
 
-        Only ``Compound`` and ``Reaction`` entries get a specific typed
-        result; any other entry type (genes, pathways, ...) is returned
-        unchanged rather than dropped or guessed at, since no normalized
-        shape for it has been designed yet.
+        Only ``Compound``, ``Reaction``, and ``Network`` entries get a
+        specific typed result; any other entry type (genes, pathways, ...)
+        is returned unchanged rather than dropped or guessed at, since no
+        normalized shape for it has been designed yet. A ``Network`` entry
+        is detected by its own id prefix (``"N"`` followed by a digit --
+        KEGG's own stable Network-id namespace, per the task's own "KEGG
+        NETWORK external ID (Nxxxxx)" identity rule) rather than
+        ``entry_type``, which for a Network entry carrying a sub-
+        classification (``"N00002  Network  Reference"``) reports the
+        sub-classification itself (``"Reference"``), not the literal word
+        ``"Network"`` -- see ``_network_subtype_text``'s own docstring.
         """
         entry_type = (raw.entry_type or "").strip().lower()
         if entry_type == "compound":
             return normalize_compound(raw)
         if entry_type == "reaction":
             return normalize_reaction(raw)
+        if re.fullmatch(r"N\d+", raw.entry_id):
+            return normalize_network(raw)
         return raw
 
 
@@ -576,9 +684,11 @@ __all__ = [
     "KeggFlatFileRecord",
     "KeggKgmlEntry",
     "KeggLinkEntry",
+    "KeggNetworkRecord",
     "KeggReactionRecord",
     "KeggSearchHit",
     "normalize_compound",
+    "normalize_network",
     "normalize_reaction",
     "parse_find_response",
     "parse_flat_file",

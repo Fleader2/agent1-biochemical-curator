@@ -3,12 +3,14 @@
 Group A reference-data tables, Group B gene/protein/enzyme-complex tables,
 Group C reaction tables, Group D claim/evidence tables, Group E's
 kinetic_measurement table, Group F's regulatory_interaction/
-modeling_assumption/knowledge_gap tables, and Group G's external_record/
-source_cross_reference/review_event tables (``docs/02_database_schema.md``)
-are defined here. Submodules are imported so that ``Base.metadata`` is fully
-populated as soon as ``app.models`` is imported, which is what
-``migrations/env.py`` relies on for Alembic to discover table metadata.
-Remaining tables are added in later phases.
+modeling_assumption/knowledge_gap tables, Group G's external_record/
+source_cross_reference/review_event tables, and the KEGG NETWORK support
+increment's network/network_node/network_edge/network_perturbation/
+network_pathway/network_disease/network_publication tables
+(``docs/02_database_schema.md``) are defined here. Submodules are imported
+so that ``Base.metadata`` is fully populated as soon as ``app.models`` is
+imported, which is what ``migrations/env.py`` relies on for Alembic to
+discover table metadata. Remaining tables are added in later phases.
 """
 
 from app.db.base import Base
@@ -38,6 +40,15 @@ from app.models.gene import Gene
 from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.modeling_assumption import ModelingAssumption
+from app.models.network import (
+    Network,
+    NetworkDisease,
+    NetworkEdge,
+    NetworkNode,
+    NetworkPathway,
+    NetworkPerturbation,
+    NetworkPublication,
+)
 from app.models.organism import Organism
 from app.models.perturbation import Perturbation
 from app.models.protein import Protein
@@ -78,6 +89,13 @@ __all__ = [
     "KineticMeasurementProteinContext",
     "KnowledgeGap",
     "ModelingAssumption",
+    "Network",
+    "NetworkDisease",
+    "NetworkEdge",
+    "NetworkNode",
+    "NetworkPathway",
+    "NetworkPerturbation",
+    "NetworkPublication",
     "Organism",
     "Perturbation",
     "Protein",

@@ -1,0 +1,15 @@
+ENTRY       N00002                      Network   Reference
+NAME        EGF-EGFR-ERBB signaling pathway
+DEFINITION  (hsa:1950,hsa:1956) -> hsa:5290 -> (hsa:207,hsa:208)
+EXPANDED    (hsa:1950,hsa:1956) -> hsa:5290 -> (hsa:207,hsa:208)
+CLASS       Pathway; Signal transduction; Growth factor signaling
+TYPE        Gene expression
+PATHWAY     hsa04012  ErbB signaling pathway
+DISEASE     H00014  Breast cancer
+GENE        1950  EGF
+            1956  EGFR
+REFERENCE   PMID:12345678
+  AUTHORS   Doe J, Smith A
+  TITLE     A synthetic test-only reference title
+  JOURNAL   Test J 1:1-10(2020)
+///

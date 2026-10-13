@@ -31,8 +31,10 @@ from app.connectors.kegg import (
     KeggFlatFileRecord,
     KeggKgmlEntry,
     KeggLinkEntry,
+    KeggNetworkRecord,
     KeggReactionRecord,
     normalize_compound,
+    normalize_network,
     normalize_reaction,
     parse_find_response,
     parse_flat_file,
@@ -41,7 +43,7 @@ from app.connectors.kegg import (
     parse_link_response,
     split_kegg_identifier,
 )
-from app.models.enums import SourceType
+from app.models.enums import NetworkType, SourceType
 
 pytestmark = pytest.mark.connector
 
@@ -747,3 +749,68 @@ def test_parse_kgml_entries_unrelated_entry_types_preserved_unfiltered() -> None
 
 def test_parse_kgml_entries_empty_kgml_document() -> None:
     assert parse_kgml_entries('<pathway name="path:sce00061"></pathway>') == ()
+
+
+# --- KEGG NETWORK support increment -------------------------------------------------------
+
+
+def test_kegg_get_network() -> None:
+    """``fetch()`` already works unmodified for a NETWORK entry: ``parse_flat_file``
+    is entry-type-agnostic (module docstring)."""
+    handler = _PathRoutingHandler(
+        {f"{_BASE_URL}/get/N00002": httpx.Response(200, text=_fixture("get_network_n00002.txt"))}
+    )
+    connector = KeggConnector(_client_for(handler), base_url=_BASE_URL)
+
+    record = connector.fetch("N00002")
+
+    assert isinstance(record, KeggFlatFileRecord)
+    assert record.entry_id == "N00002"
+
+
+def test_kegg_network_parsing() -> None:
+    """``normalize_network`` maps a generic parsed record onto KEGG-scoped
+    NETWORK fields, recovering the ``Reference`` sub-classification from the
+    ``ENTRY`` line's own third token."""
+    record = parse_flat_file(_fixture("get_network_n00002.txt"))
+
+    network = normalize_network(record)
+
+    assert isinstance(network, KeggNetworkRecord)
+    assert network.entry_id == "N00002"
+    assert network.network_type is NetworkType.REFERENCE
+    assert network.names == ("EGF-EGFR-ERBB signaling pathway",)
+    assert network.definition == "(hsa:1950,hsa:1956) -> hsa:5290 -> (hsa:207,hsa:208)"
+    assert network.expanded_definition == network.definition
+    assert network.pathways == ("hsa04012  ErbB signaling pathway",)
+    assert network.diseases == ("H00014  Breast cancer",)
+    assert network.genes == ("1950  EGF", "1956  EGFR")
+    assert network.references[0] == "PMID:12345678"
+
+
+def test_kegg_network_parsing_defaults_to_other_without_subtype() -> None:
+    """A bare ``"N00103  Network"`` ENTRY line (no sub-classification token)
+    is classified ``OTHER`` -- never guessed as ``REFERENCE``."""
+    text = (
+        "ENTRY       N00103                      Network\n"
+        "NAME        a bare network with no sub-classification\n"
+        "///\n"
+    )
+    record = parse_flat_file(text)
+
+    network = normalize_network(record)
+
+    assert network.network_type is NetworkType.OTHER
+
+
+def test_kegg_connector_normalize_dispatches_network_by_id_prefix() -> None:
+    """``KeggConnector.normalize()`` detects a NETWORK entry by its own
+    ``"N"``-prefixed id, not by ``entry_type`` (which, for a NETWORK entry
+    carrying a sub-classification, reports the sub-classification itself,
+    never the literal word ``"Network"`` -- see ``_network_subtype_text``)."""
+    record = parse_flat_file(_fixture("get_network_n00002.txt"))
+    connector = KeggConnector(_client_for(_PathRoutingHandler({})), base_url=_BASE_URL)
+
+    result = connector.normalize(record)
+
+    assert isinstance(result, KeggNetworkRecord)

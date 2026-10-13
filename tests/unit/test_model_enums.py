@@ -23,6 +23,11 @@ from app.models.enums import (
     EvidenceType,
     ExperimentalContextClassification,
     ModificationType,
+    NetworkEdgeInteractionType,
+    NetworkNodeMappingStatus,
+    NetworkNodeType,
+    NetworkPerturbationType,
+    NetworkType,
     QuantitativeEvidenceClass,
     ReactionParticipantRole,
     RegulatoryEffect,
@@ -45,6 +50,11 @@ _EXPECTED_NAMES = {
     "EvidenceType",
     "ExperimentalContextClassification",
     "ModificationType",
+    "NetworkEdgeInteractionType",
+    "NetworkNodeMappingStatus",
+    "NetworkNodeType",
+    "NetworkPerturbationType",
+    "NetworkType",
     "QuantitativeEvidenceClass",
     "ReactionParticipantRole",
     "RegulatoryEffect",
@@ -148,6 +158,41 @@ _EXPECTED_VALUES: dict[type, frozenset[str]] = {
     ContextCompatibility: frozenset(
         {"EXACT_CONTEXT", "COMPATIBLE_REFERENCE", "CONTEXT_MISMATCH", "CONTEXT_UNKNOWN"}
     ),
+    # Added in the KEGG NETWORK support increment (migration 0019_kegg_network)
+    # -- see docs/02_database_schema.md's own sections for each and
+    # docs/28_kegg_network_support.md.
+    NetworkType: frozenset({"REFERENCE", "VARIANT", "VIRUS", "DRUG", "OTHER"}),
+    NetworkNodeType: frozenset(
+        {
+            "GENE",
+            "PROTEIN",
+            "COMPLEX",
+            "COMPOUND",
+            "REACTION",
+            "VARIANT",
+            "DRUG",
+            "VIRAL_FACTOR",
+            "ENVIRONMENTAL_FACTOR",
+            "UNKNOWN",
+        }
+    ),
+    NetworkNodeMappingStatus: frozenset({"MAPPED", "UNRESOLVED", "AMBIGUOUS", "CONFLICTED"}),
+    NetworkEdgeInteractionType: frozenset(
+        {
+            "ACTIVATION",
+            "INHIBITION",
+            "EXPRESSION",
+            "REPRESSION",
+            "BINDING",
+            "COMPLEX_FORMATION",
+            "REACTION",
+            "TRANSPORT",
+            "UNKNOWN",
+        }
+    ),
+    NetworkPerturbationType: frozenset(
+        {"GENE_VARIANT", "DRUG", "VIRAL_FACTOR", "ENVIRONMENTAL", "GENETIC", "OTHER"}
+    ),
 }
 
 
@@ -167,16 +212,19 @@ def test_enum_values_are_stable_strings(enum_cls: type) -> None:
         assert _STABLE_ENUM_VALUE.match(member.value)
 
 
-def test_exactly_fifteen_enums_are_defined() -> None:
-    """The module defines exactly the fifteen enums named in docs/02_database_schema.md.
+def test_exactly_twenty_enums_are_defined() -> None:
+    """The module defines exactly the twenty enums named in docs/02_database_schema.md.
 
     Seven from the original specification, four added in Agent 1.x
     Increment B (``EnzymeStateType``, ``ModificationType``,
-    ``AllostericEffect``, ``EnzymeStateTransitionType``), and four added in
+    ``AllostericEffect``, ``EnzymeStateTransitionType``), four added in
     Agent 1.x Increment "Experimental Context and Quantitative Observation
     Framework" (``QuantitativeEvidenceClass``,
     ``ExperimentalContextClassification``, ``TimeReferenceBasis``,
-    ``ContextCompatibility``).
+    ``ContextCompatibility``), and five added in the KEGG NETWORK support
+    increment (``NetworkType``, ``NetworkNodeType``,
+    ``NetworkNodeMappingStatus``, ``NetworkEdgeInteractionType``,
+    ``NetworkPerturbationType``).
     """
     assert set(enums.__all__) == _EXPECTED_NAMES
 

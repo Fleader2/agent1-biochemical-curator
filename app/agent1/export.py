@@ -65,6 +65,17 @@ observations reference) is reshaped into the minimal ``CuratedPublication`` (``i
 ``CurationState`` column either. This exposes only already-computed, already-stored
 data one layer further; no new lookup, no year inferred from ``pmid``/``doi``/a
 timestamp.
+
+**KEGG NETWORK support increment.** Every ``package.networks`` row is reshaped into
+``CuratedNetwork``, with its own ``package.network_nodes``/``.network_edges``/
+``.network_perturbations`` rows nested directly inside it (grouped by ``network_id`` here, not
+copied from a single column) -- see ``CuratedNetwork``'s own docstring for why nesting, not a
+separate top-level field, is used. ``network_pathways``/``.network_diseases``/
+``.network_publications`` are deliberately not included in this curated view (Agent 2 needs
+model-relevant topology, not every KEGG metadata association); they remain available on
+``Agent1KnowledgePackage`` as raw rows for any caller that needs them. A network carries no
+``Claim``/``CurationState``-based human-review gate separate from its own informational
+``curation_state`` column, mirroring ``Reaction.curation_state``'s own identical treatment.
 """
 
 from __future__ import annotations
@@ -80,6 +91,10 @@ from app.agent1.types import (
     CuratedEnzymeStateTransition,
     CuratedExperimentalContext,
     CuratedKineticMeasurement,
+    CuratedNetwork,
+    CuratedNetworkEdge,
+    CuratedNetworkNode,
+    CuratedNetworkPerturbation,
     CuratedPerturbation,
     CuratedPublication,
     CuratedQuantitativeObservation,
@@ -93,6 +108,7 @@ from app.models.enzyme_state import (
 )
 from app.models.experimental_context import ExperimentalContext
 from app.models.kinetic_measurement import KineticMeasurement
+from app.models.network import Network, NetworkEdge, NetworkNode, NetworkPerturbation
 from app.models.perturbation import Perturbation
 from app.models.publication import Publication
 from app.models.quantitative_observation import (
@@ -162,6 +178,25 @@ def get_agent1_curated_knowledge_view(
     )
     publications = tuple(_curated_publication(row) for row in package.publications)
 
+    nodes_by_network: dict = {}
+    for node in package.network_nodes:
+        nodes_by_network.setdefault(node.network_id, []).append(node)
+    edges_by_network: dict = {}
+    for edge in package.network_edges:
+        edges_by_network.setdefault(edge.network_id, []).append(edge)
+    perturbations_by_network: dict = {}
+    for perturbation in package.network_perturbations:
+        perturbations_by_network.setdefault(perturbation.network_id, []).append(perturbation)
+    networks = tuple(
+        _curated_network(
+            row,
+            nodes_by_network.get(row.id, ()),
+            edges_by_network.get(row.id, ()),
+            perturbations_by_network.get(row.id, ()),
+        )
+        for row in package.networks
+    )
+
     return Agent1CuratedKnowledgeView(
         contract_version=AGENT1_CONTRACT_VERSION,
         organism_id=package.organism_id,
@@ -183,6 +218,7 @@ def get_agent1_curated_knowledge_view(
         evidence=accepted_evidence,
         confidence_summaries=accepted_confidence,
         publications=publications,
+        networks=networks,
     )
 
 
@@ -342,6 +378,80 @@ def _curated_perturbation(row: Perturbation) -> CuratedPerturbation:
         source_id=row.source_id,
         publication_id=row.publication_id,
         notes=row.notes,
+    )
+
+
+def _curated_network_node(row: NetworkNode) -> CuratedNetworkNode:
+    """Pure field-for-field reshaping of one ``NetworkNode`` row. No I/O, no inference."""
+    return CuratedNetworkNode(
+        node_id=row.id,
+        node_type=row.node_type,
+        external_identifier=row.external_identifier,
+        display_name=row.display_name,
+        gene_id=row.gene_id,
+        protein_id=row.protein_id,
+        complex_id=row.complex_id,
+        compound_id=row.compound_id,
+        reaction_id=row.reaction_id,
+        mapping_status=row.mapping_status,
+        raw_token=row.raw_token,
+        notes=row.notes,
+    )
+
+
+def _curated_network_edge(row: NetworkEdge) -> CuratedNetworkEdge:
+    """Pure field-for-field reshaping of one ``NetworkEdge`` row. No I/O, no inference."""
+    return CuratedNetworkEdge(
+        edge_id=row.id,
+        source_node_id=row.source_node_id,
+        target_node_id=row.target_node_id,
+        interaction_type=row.interaction_type,
+        raw_operator=row.raw_operator,
+        reversible=row.reversible,
+        notes=row.notes,
+    )
+
+
+def _curated_network_perturbation(row: NetworkPerturbation) -> CuratedNetworkPerturbation:
+    """Pure field-for-field reshaping of one ``NetworkPerturbation`` row. No I/O, no inference."""
+    return CuratedNetworkPerturbation(
+        perturbation_id=row.id,
+        perturbation_type=row.perturbation_type,
+        external_identifier=row.external_identifier,
+        name=row.name,
+        target_node_id=row.target_node_id,
+        effect=row.effect,
+        description=row.description,
+        raw_value=row.raw_value,
+        notes=row.notes,
+    )
+
+
+def _curated_network(
+    row: Network,
+    node_rows: list[NetworkNode],
+    edge_rows: list[NetworkEdge],
+    perturbation_rows: list[NetworkPerturbation],
+) -> CuratedNetwork:
+    """Pure field-for-field reshaping of one ``Network`` row, with its own nodes/edges/
+    perturbations nested directly inside it. No I/O, no inference -- see ``CuratedNetwork``'s
+    own docstring for why nesting is used here instead of separate top-level fields."""
+    return CuratedNetwork(
+        network_id=row.id,
+        source=row.source_type,
+        external_id=row.external_id,
+        name=row.name,
+        network_type=row.network_type,
+        definition=row.definition,
+        expanded_definition=row.expanded_definition,
+        organism_id=row.organism_id,
+        curation_state=row.curation_state,
+        notes=row.notes,
+        nodes=tuple(_curated_network_node(node) for node in node_rows),
+        edges=tuple(_curated_network_edge(edge) for edge in edge_rows),
+        perturbations=tuple(
+            _curated_network_perturbation(perturbation) for perturbation in perturbation_rows
+        ),
     )
 
 

@@ -299,6 +299,95 @@ CONTEXT_MISMATCH
 CONTEXT_UNKNOWN
 ```
 
+## NetworkType
+
+Added in the KEGG NETWORK support increment. KEGG's own top-level
+classification of a `network` record's source category -- a reference
+topology, or a topology describing a specific perturbation (a genetic
+variant, a virus, or a drug).
+
+```text
+REFERENCE
+VARIANT
+VIRUS
+DRUG
+OTHER
+```
+
+## NetworkNodeType
+
+Added in the same increment. The kind of thing one `network_node`
+represents, independent of whether it was successfully mapped to a
+normalized Agent 1 entity (`mapping_status` below answers that
+separately). `UNKNOWN` is for a token KEGG's own `TYPE`/context does not
+let this increment classify -- never a reason to drop the node.
+
+```text
+GENE
+PROTEIN
+COMPLEX
+COMPOUND
+REACTION
+VARIANT
+DRUG
+VIRAL_FACTOR
+ENVIRONMENTAL_FACTOR
+UNKNOWN
+```
+
+## NetworkNodeMappingStatus
+
+Added in the same increment. Whether a `network_node` was successfully
+linked to an already-existing, normalized Agent 1 entity (`gene`/
+`protein`/`enzyme_complex`/`compound`/`reaction`) -- deliberately distinct
+from `NormalizationStatus` (`app.normalization.types`): a network node is
+never itself a candidate for *creating* a new biological entity (there is
+no `NEW` member here), only for *linking* to one that already exists.
+
+```text
+MAPPED
+UNRESOLVED
+AMBIGUOUS
+CONFLICTED
+```
+
+## NetworkEdgeInteractionType
+
+Added in the same increment. The normalized interpretation of a KEGG
+topology operator between two nodes. This is Agent 1's own interpretation
+of the operator; `network_edge.raw_operator` always separately preserves
+KEGG's own literal operator text. `UNKNOWN` is for any operator this
+increment's topology parser does not yet recognize -- the edge is still
+persisted (never dropped), just not yet interpreted.
+
+```text
+ACTIVATION
+INHIBITION
+EXPRESSION
+REPRESSION
+BINDING
+COMPLEX_FORMATION
+REACTION
+TRANSPORT
+UNKNOWN
+```
+
+## NetworkPerturbationType
+
+Added in the same increment. The category of perturbation one
+`network_perturbation` row describes -- KEGG's own `VARIANT`/
+`PERTURBANT` field content, never inferred from a network's own
+`network_type`.
+
+```text
+GENE_VARIANT
+DRUG
+VIRAL_FACTOR
+ENVIRONMENTAL
+GENETIC
+OTHER
+```
+
 ---
 
 # Table: organism
@@ -1448,6 +1537,278 @@ restricts (an independent scientific observation).
 
 ---
 
+# Table: network
+
+Added in the KEGG NETWORK support increment
+(`docs/28_kegg_network_support.md`). Stores one imported KEGG NETWORK
+record's own identity and metadata. A network represents biological or
+regulatory *topology* (which `network_node`/`network_edge` rows below make
+explicit and queryable) -- it is a higher-level layer above the existing
+reaction-centric biochemical schema, never a replacement for it. A network
+edge is never itself treated as a biochemical reaction unless it is
+explicitly linked to a normalized `reaction` row (`network_node.reaction_id`).
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+source_type             SourceType NOT NULL
+external_id             VARCHAR NOT NULL
+
+name                    VARCHAR NOT NULL
+
+network_type            NetworkType NOT NULL
+
+definition              TEXT
+expanded_definition     TEXT
+
+organism_id             UUID REFERENCES organism(id)
+
+curation_state          CurationState NOT NULL DEFAULT PROPOSED
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`(source_type, external_id)` must be unique -- for a KEGG-derived network,
+`external_id` is the KEGG N-number (e.g. `"N00103"`). `definition`/
+`expanded_definition` preserve KEGG's own text exactly as received and are
+never treated as the canonical internal representation of topology once a
+network has been successfully parsed: explicit `network_node`/
+`network_edge` rows are canonical from that point on.
+
+---
+
+# Table: network_node
+
+Added in the same increment. One node in a network's topology, optionally
+linked to a normalized Agent 1 entity. A node is never fabricated into
+existence as a new `gene`/`protein`/`compound`/`reaction`/`enzyme_complex`
+row merely because a KEGG NETWORK node references it -- mapping only ever
+links to an entity that already exists (see `NetworkNodeMappingStatus`).
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+network_id              UUID NOT NULL REFERENCES network(id)
+
+external_identifier     VARCHAR
+display_name            VARCHAR
+
+node_type               NetworkNodeType NOT NULL
+
+gene_id                 UUID REFERENCES gene(id)
+protein_id              UUID REFERENCES protein(id)
+complex_id              UUID REFERENCES enzyme_complex(id)
+compound_id             UUID REFERENCES compound(id)
+reaction_id             UUID REFERENCES reaction(id)
+
+mapping_status          NetworkNodeMappingStatus NOT NULL
+
+raw_token               VARCHAR
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+At most one of `gene_id`/`protein_id`/`complex_id`/`compound_id`/
+`reaction_id` is set, enforced at the application level (persistence
+layer), not by a database `CHECK` across five nullable FK columns --
+consistent with this schema's existing preference for application-level
+validation over a rigid multi-column `CHECK` where one is not already an
+established pattern. `(network_id, raw_token)` is unique when `raw_token`
+is not null, making a repeated import of the same network idempotent at
+the node level (the same literal KEGG token within one network always
+resolves to the same `network_node` row).
+
+An unresolved node is never discarded: `mapping_status` records why it
+could not be linked, and every FK field is simply left null when a unique
+mapping could not be established.
+
+---
+
+# Table: network_edge
+
+Added in the same increment. One directed relationship between two
+`network_node` rows, derived deterministically from a network's own
+`DEFINITION`/`EXPANDED` topology expression. No timestamp columns: this
+table has no independent lifecycle apart from the network it belongs to
+and the parser that produced it (same precedent as `reaction_participant`/
+`reaction_enzyme`).
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+network_id              UUID NOT NULL REFERENCES network(id)
+
+source_node_id          UUID NOT NULL REFERENCES network_node(id)
+target_node_id          UUID NOT NULL REFERENCES network_node(id)
+
+interaction_type        NetworkEdgeInteractionType NOT NULL
+
+raw_operator            VARCHAR
+
+reversible              BOOLEAN
+
+notes                   TEXT
+```
+
+## Constraints
+
+Two partial unique indexes together prevent duplicate edges on re-import
+regardless of whether `raw_operator` is null (a plain unique index cannot
+do this alone, since SQL treats every `NULL` as distinct from every other
+`NULL`):
+
+```text
+(network_id, source_node_id, target_node_id, interaction_type, raw_operator)
+    UNIQUE WHERE raw_operator IS NOT NULL
+(network_id, source_node_id, target_node_id, interaction_type)
+    UNIQUE WHERE raw_operator IS NULL
+```
+
+An operator KEGG uses that this increment's topology parser does not
+recognize is still persisted, with `interaction_type = UNKNOWN` and
+`raw_operator` preserving KEGG's own literal text -- never silently
+dropped and never guessed at.
+
+---
+
+# Table: network_perturbation
+
+Added in the same increment. One perturbation (genetic variant, drug,
+viral factor, environmental factor, or other) a KEGG NETWORK record
+describes -- KEGG's own `VARIANT`/`PERTURBANT` field content. Distinct
+from the existing `perturbation` table (an experimental condition applied
+when a `quantitative_observation` was measured in a wet-lab experiment):
+`network_perturbation` describes what a KEGG topology record itself
+represents, never an experimental measurement condition, and the two are
+never merged or cross-referenced.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+
+network_id              UUID NOT NULL REFERENCES network(id)
+
+perturbation_type       NetworkPerturbationType NOT NULL
+
+external_identifier     VARCHAR
+name                    VARCHAR
+
+target_node_id          UUID REFERENCES network_node(id)
+
+effect                  VARCHAR
+
+description             TEXT
+
+raw_value               TEXT
+
+notes                   TEXT
+
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+A perturbation is never required to resolve `target_node_id`, and KEGG's
+own source text is always preserved on `raw_value` even when
+interpretation is incomplete.
+
+---
+
+# Table: network_pathway
+
+Added in the same increment. Associates a `network` with a KEGG pathway
+it references (the `PATHWAY` field). Agent 1 has no `pathway` entity of
+its own, so this stores KEGG's own pathway identifier directly rather than
+a foreign key into a nonexistent table -- a new, minimal association
+table, added only after confirming no existing generic cross-reference
+structure represents a one-to-many "network references pathway ids"
+relationship cleanly.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+network_id              UUID NOT NULL REFERENCES network(id)
+kegg_pathway_id         VARCHAR NOT NULL
+name                    VARCHAR
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`(network_id, kegg_pathway_id)` must be unique.
+
+---
+
+# Table: network_disease
+
+Added in the same increment. Associates a `network` with a KEGG disease
+it references (the `DISEASE` field) -- same rationale as `network_pathway`:
+Agent 1 has no `disease` entity, so KEGG's own disease identifier is
+stored directly.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+network_id              UUID NOT NULL REFERENCES network(id)
+kegg_disease_id         VARCHAR NOT NULL
+name                    VARCHAR
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`(network_id, kegg_disease_id)` must be unique.
+
+---
+
+# Table: network_publication
+
+Added in the same increment. Associates a `network` with a publication it
+references (the `REFERENCE` field). Reuses the existing `publication`
+table -- which, unlike pathway/disease, already exists as a real Agent 1
+entity -- via `publication_id` when the reference's PMID resolves to an
+existing or newly-curated `publication` row; `raw_reference` always
+preserves KEGG's own reference text verbatim regardless of whether
+resolution succeeds, mirroring `network_node`'s own "never discard an
+unresolved reference" policy.
+
+## Columns
+
+```text
+id                      UUID PRIMARY KEY
+network_id              UUID NOT NULL REFERENCES network(id)
+publication_id          UUID REFERENCES publication(id)
+raw_reference           TEXT NOT NULL
+pmid                    VARCHAR
+created_at              TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+## Constraints
+
+`(network_id, raw_reference)` must be unique.
+
+---
+
 # Confidence Representation
 
 Confidence must normally be associated with claims rather than entire biological entities.
@@ -1562,6 +1923,31 @@ regulatory_interaction
            +-- evidence
 ```
 
+Network topology (a layer above the reaction-centric schema, not a
+replacement for it):
+
+```text
+network
+   |
+   +-- network_node
+   |       |
+   |       +-- gene / protein / enzyme_complex / compound / reaction (optional)
+   |
+   +-- network_edge
+   |       |
+   |       +-- network_node (source, target)
+   |
+   +-- network_perturbation
+   |       |
+   |       +-- network_node (optional target)
+   |
+   +-- network_pathway
+   +-- network_disease
+   +-- network_publication
+           |
+           +-- publication (optional)
+```
+
 ---
 
 # Required Indexes
@@ -1607,6 +1993,12 @@ kinetic_measurement.reaction_id
 kinetic_measurement.protein_id
 
 source_cross_reference.external_id
+
+network.external_id
+network_node.network_id
+network_node.raw_token
+network_edge.network_id
+network_edge.interaction_type
 ```
 
 JSONB indexes may be added later based on observed query patterns.
@@ -1632,7 +2024,19 @@ Cascade deletion may be permitted only for subordinate records that have no inde
 ```text
 compound_synonym
 enzyme_complex_member
+network_node       (cascades from network)
+network_edge       (cascades from network)
+network_perturbation (cascades from network)
+network_pathway    (cascades from network)
+network_disease    (cascades from network)
+network_publication (cascades from network)
 ```
+
+A `network_node`/`network_perturbation`'s own optional link *into* an
+independent scientific record (`gene`/`protein`/`enzyme_complex`/
+`compound`/`reaction`/`publication`) still restricts, exactly like every
+other such link elsewhere in this schema -- only the link *back to a
+network's own child rows* cascades.
 
 Publication, evidence, claim, and kinetic records must never disappear automatically because another entity was deleted.
 

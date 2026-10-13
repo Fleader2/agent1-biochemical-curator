@@ -130,6 +130,11 @@ from app.models.enums import (
     EnzymeStateType,
     ExperimentalContextClassification,
     ModificationType,
+    NetworkEdgeInteractionType,
+    NetworkNodeMappingStatus,
+    NetworkNodeType,
+    NetworkPerturbationType,
+    NetworkType,
     QuantitativeEvidenceClass,
     SourceType,
     TimeReferenceBasis,
@@ -146,6 +151,15 @@ from app.models.experimental_context import ExperimentalContext
 from app.models.gene import Gene
 from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
+from app.models.network import (
+    Network,
+    NetworkDisease,
+    NetworkEdge,
+    NetworkNode,
+    NetworkPathway,
+    NetworkPerturbation,
+    NetworkPublication,
+)
 from app.models.organism import Organism
 from app.models.perturbation import Perturbation
 from app.models.protein import Protein
@@ -160,7 +174,14 @@ from app.models.review_event import ReviewEvent
 
 #: This contract's own version. Bump only when ``Agent1KnowledgePackage``/
 #: ``Agent1CuratedKnowledgeView``'s field shape changes.
-AGENT1_CONTRACT_VERSION = "1.5"
+#:
+#: **KEGG NETWORK support increment** added ``networks``/``network_nodes``/
+#: ``network_edges``/``network_perturbations``/``network_pathways``/
+#: ``network_diseases``/``network_publications`` to
+#: ``Agent1KnowledgePackage`` and ``networks: tuple[CuratedNetwork, ...]``
+#: to ``Agent1CuratedKnowledgeView``, bumping ``1.5`` -> ``1.6`` (additive
+#: fields, not a breaking reshape of any existing field).
+AGENT1_CONTRACT_VERSION = "1.6"
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,6 +564,98 @@ class CuratedQuantitativeObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class CuratedNetworkNode:
+    """Agent 2-facing view of one curated ``NetworkNode`` row (KEGG NETWORK
+    support increment).
+
+    A faithful reshaping of one ``NetworkNode`` row. At most one of
+    ``gene_id``/``protein_id``/``complex_id``/``compound_id``/
+    ``reaction_id`` is ever set, exactly mirroring the underlying row's own
+    "at most one" application-level rule.
+    """
+
+    node_id: UUID
+    node_type: NetworkNodeType
+    external_identifier: str | None
+    display_name: str | None
+    gene_id: UUID | None
+    protein_id: UUID | None
+    complex_id: UUID | None
+    compound_id: UUID | None
+    reaction_id: UUID | None
+    mapping_status: NetworkNodeMappingStatus
+    raw_token: str | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedNetworkEdge:
+    """Agent 2-facing view of one curated ``NetworkEdge`` row (KEGG NETWORK
+    support increment). ``source_node_id``/``target_node_id`` are the same
+    ids as the corresponding ``CuratedNetworkNode.node_id`` within the same
+    ``CuratedNetwork``."""
+
+    edge_id: UUID
+    source_node_id: UUID
+    target_node_id: UUID
+    interaction_type: NetworkEdgeInteractionType
+    raw_operator: str | None
+    reversible: bool | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedNetworkPerturbation:
+    """Agent 2-facing view of one curated ``NetworkPerturbation`` row (KEGG
+    NETWORK support increment). ``target_node_id``, when not ``None``, is a
+    ``CuratedNetworkNode.node_id`` within the same ``CuratedNetwork``."""
+
+    perturbation_id: UUID
+    perturbation_type: NetworkPerturbationType
+    external_identifier: str | None
+    name: str | None
+    target_node_id: UUID | None
+    effect: str | None
+    description: str | None
+    raw_value: str | None
+    notes: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedNetwork:
+    """Agent 2-facing view of one curated ``Network`` row, with its own
+    topology nested directly inside it (KEGG NETWORK support increment).
+
+    Nodes/edges/perturbations are nested here -- never a separate top-level
+    ``Agent1CuratedKnowledgeView`` field -- because each only has meaning in
+    the context of its own owning network, mirroring
+    ``CuratedQuantitativeObservation.dependencies``'s own identical nesting
+    rationale. Pathway/disease/publication associations are not included in
+    this curated view (task's own "without overcomplicating the initial
+    implementation" -- Agent 2 needs model-relevant topology, not every KEGG
+    metadata association); they remain available on
+    ``Agent1KnowledgePackage`` as raw rows for any caller that needs them.
+    ``curation_state`` is informational only here, never a filter -- the
+    same "exists = curated" policy already applied to
+    ``reactions``/``compounds``/``compartments``.
+    """
+
+    network_id: UUID
+    source: SourceType
+    external_id: str
+    name: str
+    network_type: NetworkType
+    definition: str | None
+    expanded_definition: str | None
+    organism_id: UUID | None
+    curation_state: CurationState
+    notes: str | None
+    nodes: tuple[CuratedNetworkNode, ...]
+    edges: tuple[CuratedNetworkEdge, ...]
+    perturbations: tuple[CuratedNetworkPerturbation, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Agent1KnowledgePackage:
     """The complete, coherent Agent 1 v1 knowledge product for one scope.
 
@@ -589,6 +702,20 @@ class Agent1KnowledgePackage:
     provenance_summary: ProvenanceSummary
     limitations: tuple[str, ...]
 
+    #: KEGG NETWORK support increment. Flat, parallel raw-ORM-row tuples,
+    #: mirroring every other table added in this style (e.g.
+    #: ``quantitative_observations``/``quantitative_observation_dependencies``)
+    #: -- never nested here, unlike the curated view. Defaulted to ``()`` so
+    #: every existing keyword-based construction of this type continues to
+    #: construct unchanged.
+    networks: tuple[Network, ...] = ()
+    network_nodes: tuple[NetworkNode, ...] = ()
+    network_edges: tuple[NetworkEdge, ...] = ()
+    network_perturbations: tuple[NetworkPerturbation, ...] = ()
+    network_pathways: tuple[NetworkPathway, ...] = ()
+    network_diseases: tuple[NetworkDisease, ...] = ()
+    network_publications: tuple[NetworkPublication, ...] = ()
+
 
 @dataclass(frozen=True, slots=True)
 class Agent1CuratedKnowledgeView:
@@ -632,6 +759,11 @@ class Agent1CuratedKnowledgeView:
     #: keyword-based construction of this type continues to construct unchanged.
     publications: tuple[CuratedPublication, ...] = ()
 
+    #: KEGG NETWORK support increment. Defaulted to ``()`` so every existing
+    #: keyword-based construction of this type continues to construct
+    #: unchanged.
+    networks: tuple[CuratedNetwork, ...] = ()
+
 
 __all__ = [
     "AGENT1_CONTRACT_VERSION",
@@ -645,6 +777,10 @@ __all__ = [
     "CuratedEnzymeStateTransition",
     "CuratedExperimentalContext",
     "CuratedKineticMeasurement",
+    "CuratedNetwork",
+    "CuratedNetworkEdge",
+    "CuratedNetworkNode",
+    "CuratedNetworkPerturbation",
     "CuratedPerturbation",
     "CuratedPublication",
     "CuratedQuantitativeObservation",

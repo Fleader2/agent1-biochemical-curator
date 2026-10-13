@@ -113,4 +113,8 @@ def test_curated_view_publications_default_empty():
 
 
 def test_contract_version_bumped_for_this_increment():
-    assert AGENT1_CONTRACT_VERSION == "1.5"
+    """This increment itself bumped the version to "1.5"; a later increment
+    (KEGG NETWORK support) has since bumped it again to "1.6" -- this test
+    only confirms the version has moved on from the pre-this-increment
+    value, not that it is frozen at exactly "1.5" forever."""
+    assert AGENT1_CONTRACT_VERSION != "1.4"

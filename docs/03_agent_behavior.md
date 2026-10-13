@@ -668,6 +668,41 @@ Do not infer metabolite accessibility across membranes without evidence.
 
 ---
 
+# Network Curation Behavior
+
+Added in the KEGG NETWORK support increment (``docs/28_kegg_network_support.md``).
+
+A `network` represents biological or regulatory *topology* -- a higher-level layer linking
+existing normalized entities. A `reaction` represents a biochemical transformation. Network edges
+must not be treated as biochemical reactions unless explicitly linked to a normalized `reaction`
+entity (`network_node.reaction_id`).
+
+Importing a KEGG NETWORK record never replaces, edits, or deletes the reaction-centric
+biochemical schema it sits above. It is a knowledge-curation step, not an executable-model-
+generation step: no code in this increment translates a network into Antimony, SBML, PySB, or an
+ODE system. KEGG edges generally do not provide sufficient kinetic information for that
+transformation, and inventing one would be exactly the kind of speculative biological claim this
+agent's own scientific philosophy rejects.
+
+A network node is never fabricated into a new `gene`/`protein`/`compound`/`reaction`/
+`enzyme_complex` row merely because the node references it. Mapping only ever links to an entity
+that already exists; an unmapped node is retained, never discarded, with its own
+`mapping_status` recording why. The first implementation may import network topology while
+leaving some biological node mappings unresolved -- that is preferable to speculative entity
+creation.
+
+KEGG's own topology operators are preserved verbatim (`network_edge.raw_operator`) regardless of
+whether this agent's parser recognizes them; an unrecognized operator never blocks import and
+never invents a specific mechanism (`ACTIVATION`/`INHIBITION`/etc.) it has no evidence for -- see
+`app.connectors.kegg_network_topology`'s own module docstring for exactly which two operators
+this increment does confidently classify, and why no others are guessed at.
+
+Re-importing the identical KEGG NETWORK record must never create duplicate `network`/
+`network_node`/`network_edge`/`network_perturbation` rows -- see
+`app.persistence.network`'s own idempotency policy.
+
+---
+
 # Kinetic Curation Behavior
 
 The kinetics curator must preserve every measurement independently.
@@ -1228,6 +1263,7 @@ regulation.json
 evidence.json
 assumptions.json
 knowledge_gaps.json
+networks.json
 ```
 
 Agent 1 must not generate Antimony in the initial version.

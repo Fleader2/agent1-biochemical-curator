@@ -258,6 +258,97 @@ class ContextCompatibility(StrEnum):
     CONTEXT_UNKNOWN = "CONTEXT_UNKNOWN"
 
 
+class NetworkType(StrEnum):
+    """KEGG's own top-level classification of a ``Network`` record's source
+    category.
+
+    Added in the KEGG NETWORK support increment.
+    """
+
+    REFERENCE = "REFERENCE"
+    VARIANT = "VARIANT"
+    VIRUS = "VIRUS"
+    DRUG = "DRUG"
+    OTHER = "OTHER"
+
+
+class NetworkNodeType(StrEnum):
+    """The kind of thing one ``NetworkNode`` represents.
+
+    Added in the KEGG NETWORK support increment. Independent of whether the
+    node was successfully mapped to a normalized Agent 1 entity --
+    ``NetworkNodeMappingStatus`` answers that separately. ``UNKNOWN`` is for
+    a token this increment's parser cannot yet classify -- never a reason to
+    drop the node.
+    """
+
+    GENE = "GENE"
+    PROTEIN = "PROTEIN"
+    COMPLEX = "COMPLEX"
+    COMPOUND = "COMPOUND"
+    REACTION = "REACTION"
+    VARIANT = "VARIANT"
+    DRUG = "DRUG"
+    VIRAL_FACTOR = "VIRAL_FACTOR"
+    ENVIRONMENTAL_FACTOR = "ENVIRONMENTAL_FACTOR"
+    UNKNOWN = "UNKNOWN"
+
+
+class NetworkNodeMappingStatus(StrEnum):
+    """Whether a ``NetworkNode`` was successfully linked to an existing,
+    normalized Agent 1 entity.
+
+    Added in the KEGG NETWORK support increment. Deliberately distinct from
+    ``NormalizationStatus`` (``app.normalization.types``): a network node is
+    never itself a candidate for *creating* a new biological entity -- there
+    is no ``NEW`` member here, only for *linking* to one that already
+    exists.
+    """
+
+    MAPPED = "MAPPED"
+    UNRESOLVED = "UNRESOLVED"
+    AMBIGUOUS = "AMBIGUOUS"
+    CONFLICTED = "CONFLICTED"
+
+
+class NetworkEdgeInteractionType(StrEnum):
+    """The normalized interpretation of a KEGG topology operator between two
+    ``NetworkNode`` rows.
+
+    Added in the KEGG NETWORK support increment. This is Agent 1's own
+    interpretation; ``NetworkEdge.raw_operator`` always separately preserves
+    KEGG's own literal operator text. ``UNKNOWN`` is for any operator the
+    topology parser does not yet recognize -- the edge is still persisted,
+    never dropped.
+    """
+
+    ACTIVATION = "ACTIVATION"
+    INHIBITION = "INHIBITION"
+    EXPRESSION = "EXPRESSION"
+    REPRESSION = "REPRESSION"
+    BINDING = "BINDING"
+    COMPLEX_FORMATION = "COMPLEX_FORMATION"
+    REACTION = "REACTION"
+    TRANSPORT = "TRANSPORT"
+    UNKNOWN = "UNKNOWN"
+
+
+class NetworkPerturbationType(StrEnum):
+    """The category of perturbation one ``NetworkPerturbation`` row describes.
+
+    Added in the KEGG NETWORK support increment. KEGG's own ``VARIANT``/
+    ``PERTURBANT`` field content, never inferred from a network's own
+    ``NetworkType``.
+    """
+
+    GENE_VARIANT = "GENE_VARIANT"
+    DRUG = "DRUG"
+    VIRAL_FACTOR = "VIRAL_FACTOR"
+    ENVIRONMENTAL = "ENVIRONMENTAL"
+    GENETIC = "GENETIC"
+    OTHER = "OTHER"
+
+
 class SourceType(StrEnum):
     """External scientific source that a record or piece of evidence came from.
 
@@ -310,6 +401,11 @@ __all__ = [
     "EvidenceType",
     "ExperimentalContextClassification",
     "ModificationType",
+    "NetworkEdgeInteractionType",
+    "NetworkNodeMappingStatus",
+    "NetworkNodeType",
+    "NetworkPerturbationType",
+    "NetworkType",
     "QuantitativeEvidenceClass",
     "ReactionParticipantRole",
     "RegulatoryEffect",

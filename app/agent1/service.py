@@ -88,6 +88,17 @@ dropped even though a scoped observation names it).
 already-scoped observation ids, exactly like
 ``KineticMeasurementProteinContext`` is scoped through
 ``kinetic_measurement_ids``.
+
+**KEGG NETWORK support increment.** ``Network`` has a nullable
+``organism_id``, scoped exactly like ``Reaction``'s own.
+``NetworkNode``/``NetworkEdge``/``NetworkPerturbation``/``NetworkPathway``/
+``NetworkDisease``/``NetworkPublication`` are each scoped by traversal
+through the already-scoped network ids, mirroring
+``ReactionParticipant``/``ReactionEnzyme``'s own traversal-by-reaction-id
+pattern. A ``NetworkPublication``'s own resolved ``publication_id``
+contributes to ``publications`` exactly like a kinetic measurement's own
+resolved publication does (same Increment C.6 reasoning: it creates no
+``Evidence`` row of its own).
 """
 
 from __future__ import annotations
@@ -121,6 +132,15 @@ from app.models.experimental_context import ExperimentalContext
 from app.models.gene import Gene
 from app.models.kinetic_measurement import KineticMeasurement, KineticMeasurementProteinContext
 from app.models.knowledge_gap import KnowledgeGap
+from app.models.network import (
+    Network,
+    NetworkDisease,
+    NetworkEdge,
+    NetworkNode,
+    NetworkPathway,
+    NetworkPerturbation,
+    NetworkPublication,
+)
 from app.models.organism import Organism
 from app.models.perturbation import Perturbation
 from app.models.protein import Protein
@@ -202,6 +222,26 @@ def get_agent1_knowledge_package(
 
     regulatory_interactions = _select_by_organism(session, RegulatoryInteraction, organism_id)
 
+    # KEGG NETWORK support increment: Network has a nullable organism_id,
+    # scoped exactly like Reaction's own (mirrors _select_by_organism's
+    # existing semantics -- a Network with organism_id=None is only
+    # included in a whole-database export, never guessed into a scope it
+    # was not resolved into). Every child table is scoped by traversal from
+    # the already-scoped network ids, mirroring ReactionParticipant/
+    # ReactionEnzyme's own traversal-by-reaction-id pattern.
+    networks = _select_by_organism(session, Network, organism_id)
+    network_ids = tuple(network.id for network in networks)
+    network_nodes = _select_in(session, NetworkNode, NetworkNode.network_id, network_ids)
+    network_edges = _select_in(session, NetworkEdge, NetworkEdge.network_id, network_ids)
+    network_perturbations = _select_in(
+        session, NetworkPerturbation, NetworkPerturbation.network_id, network_ids
+    )
+    network_pathways = _select_in(session, NetworkPathway, NetworkPathway.network_id, network_ids)
+    network_diseases = _select_in(session, NetworkDisease, NetworkDisease.network_id, network_ids)
+    network_publications = _select_in(
+        session, NetworkPublication, NetworkPublication.network_id, network_ids
+    )
+
     kinetic_measurements = _select_kinetic_measurements(session, reaction_ids, organism_id)
     kinetic_measurement_ids = tuple(measurement.id for measurement in kinetic_measurements)
     kinetic_measurement_protein_contexts = _select_kinetic_measurement_protein_contexts(
@@ -277,6 +317,10 @@ def get_agent1_knowledge_package(
             for obs in quantitative_observations
             if obs.publication_id is not None
         }
+        # KEGG NETWORK support increment: the same Increment C.6 reasoning
+        # applies identically here -- a network_publication row's own
+        # resolved publication_id creates no Evidence row either.
+        | {np.publication_id for np in network_publications if np.publication_id is not None}
     )
     publications = _select_publications(session, publication_ids, organism_id)
 
@@ -356,6 +400,13 @@ def get_agent1_knowledge_package(
         experiment_results=experiment_results,
         provenance_summary=provenance_summary,
         limitations=_KNOWN_LIMITATIONS,
+        networks=networks,
+        network_nodes=network_nodes,
+        network_edges=network_edges,
+        network_perturbations=network_perturbations,
+        network_pathways=network_pathways,
+        network_diseases=network_diseases,
+        network_publications=network_publications,
     )
 
 
