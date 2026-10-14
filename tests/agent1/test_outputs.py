@@ -363,6 +363,20 @@ def test_curated_knowledge_view_is_narrower_than_package(db_session):
     assert [r.id for r in view.reactions] == [fixture["reaction"].id]
 
 
+def test_curated_knowledge_view_exposes_genes_and_proteins_unfiltered(db_session):
+    """Agent 1 -> Agent 2 Biological Display Metadata Contract increment: genes/proteins are
+    structural/schema records, not claims, so they pass through unfiltered -- same treatment
+    as reactions/compartments/compounds above."""
+    fixture = _rich_fixture(db_session)
+    package = get_agent1_knowledge_package(db_session, organism_id=fixture["organism"].id)
+    view = get_agent1_curated_knowledge_view(package)
+
+    assert [g.id for g in view.genes] == [fixture["gene"].id]
+    assert view.genes[0].symbol == fixture["gene"].symbol
+    assert [p.id for p in view.proteins] == [fixture["protein"].id]
+    assert view.proteins[0].name == fixture["protein"].name
+
+
 def test_curated_knowledge_view_exposes_kinetic_measurement_unfiltered(db_session):
     """No Claim/CurationState gate exists for KineticMeasurement -- it always passes through."""
     fixture = _rich_fixture(db_session)

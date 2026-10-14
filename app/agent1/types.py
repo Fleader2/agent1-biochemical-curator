@@ -181,7 +181,21 @@ from app.models.review_event import ReviewEvent
 #: ``Agent1KnowledgePackage`` and ``networks: tuple[CuratedNetwork, ...]``
 #: to ``Agent1CuratedKnowledgeView``, bumping ``1.5`` -> ``1.6`` (additive
 #: fields, not a breaking reshape of any existing field).
-AGENT1_CONTRACT_VERSION = "1.6"
+#:
+#: **Agent 1 -> Agent 2 Biological Display Metadata Contract increment** added
+#: ``genes: tuple[Gene, ...]``/``proteins: tuple[Protein, ...]`` to
+#: ``Agent1CuratedKnowledgeView``, bumping ``1.6`` -> ``1.7``. Both tables already
+#: existed on ``Agent1KnowledgePackage`` and were already queried by
+#: ``app.agent1.service.get_agent1_knowledge_package`` -- this exposes that
+#: already-curated data one layer further (gene ``symbol``/``systematic_name``,
+#: protein ``name``/``ec_number``/``gene_id``) so Agent 2 can generate readable
+#: reaction/parameter names (e.g. ``R_ACC1``, ``kcat_ACC1``) instead of falling back
+#: to raw ids. Passed through unfiltered, raw-ORM-row, exactly like
+#: ``compartments``/``compounds``/``reactions`` already are: genes/proteins are
+#: structural/schema records, not claims, and carry no ``Claim``/``CurationState``
+#: column of their own to filter by. No new query logic, no gene/protein identity
+#: inferred from free text -- see ``docs/33_biological_display_metadata.md``.
+AGENT1_CONTRACT_VERSION = "1.7"
 
 
 @dataclass(frozen=True, slots=True)
@@ -763,6 +777,15 @@ class Agent1CuratedKnowledgeView:
     #: keyword-based construction of this type continues to construct
     #: unchanged.
     networks: tuple[CuratedNetwork, ...] = ()
+
+    #: Agent 1 -> Agent 2 Biological Display Metadata Contract increment. Raw
+    #: ``Gene``/``Protein`` rows, passed through unfiltered exactly like
+    #: ``compartments``/``compounds``/``reactions`` above -- structural/schema records,
+    #: not claims, with no ``Claim``/``CurationState`` column of their own to filter by.
+    #: Defaulted to ``()`` so every existing keyword-based construction of this type
+    #: continues to construct unchanged.
+    genes: tuple[Gene, ...] = ()
+    proteins: tuple[Protein, ...] = ()
 
 
 __all__ = [

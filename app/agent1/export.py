@@ -76,6 +76,15 @@ model-relevant topology, not every KEGG metadata association); they remain avail
 ``Agent1KnowledgePackage`` as raw rows for any caller that needs them. A network carries no
 ``Claim``/``CurationState``-based human-review gate separate from its own informational
 ``curation_state`` column, mirroring ``Reaction.curation_state``'s own identical treatment.
+
+**Agent 1 -> Agent 2 Biological Display Metadata Contract increment.** ``package.genes``/
+``.proteins`` are passed through unfiltered, exactly like ``compartments``/``compounds``/
+``reactions`` above -- structural/schema records, not claims, with no ``Claim``/
+``CurationState`` column of their own. Both were already queried into
+``Agent1KnowledgePackage`` by ``app.agent1.service.get_agent1_knowledge_package``; this
+increment only exposes that already-curated data one layer further so Agent 2 can prefer a
+curated gene symbol/protein name over a raw internal id when generating a readable Antimony
+reaction/parameter name -- no new query, no gene/protein identity inferred from free text.
 """
 
 from __future__ import annotations
@@ -205,6 +214,8 @@ def get_agent1_curated_knowledge_view(
         reactions=package.reactions,
         reaction_participants=package.reaction_participants,
         reaction_enzyme_associations=package.reaction_enzyme_associations,
+        genes=package.genes,
+        proteins=package.proteins,
         regulatory_interactions=package.regulatory_interactions,
         kinetic_measurements=kinetic_measurements,
         enzyme_states=enzyme_states,
