@@ -25,6 +25,22 @@ via a separate ``op.create_foreign_key`` call once
 ``modeling_decision_option`` exists (see ``upgrade()``'s own comment at
 that call).
 
+**Amended by the Agent 1 cleanup increment** (migration
+``0021_agent1_cleanup``, which drops everything this migration creates):
+the ``ModelingDecisionResolutionSource``/``ModelingDecisionStatus``/
+``ModelSourceType``/``ModelSpecificationGeneProteinRole``/
+``ModelSpecificationPathwayRole``/``ModelSpecificationReactionRole``/
+``ModelSpecificationSpeciesRole``/``ModelStatus``/``ProjectLifecycleStatus``/
+``ProjectType``/``SubprojectTaskType`` Python enum classes this migration
+originally imported from ``app.models.enums`` were removed from that
+module by the cleanup increment (see ``docs/31_agent1_cleanup.md``).
+Alembic must still be able to import *every* historical migration file to
+build its revision graph, including this one, long after those classes
+stopped existing in the live codebase -- the enum values below are
+therefore now hard-coded tuples instead of an import from application
+code, with no change whatsoever to the SQL this migration's own
+``upgrade()``/``downgrade()`` issue.
+
 Revision ID: 0020_project_subproject_model
 Revises: 0019_kegg_network
 Create Date: 2026-10-13
@@ -39,19 +55,25 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.naming import conv
 
-from app.models.enums import (
-    ModelingDecisionResolutionSource,
-    ModelingDecisionStatus,
-    ModelSourceType,
-    ModelSpecificationGeneProteinRole,
-    ModelSpecificationPathwayRole,
-    ModelSpecificationReactionRole,
-    ModelSpecificationSpeciesRole,
-    ModelStatus,
-    ProjectLifecycleStatus,
-    ProjectType,
-    SubprojectTaskType,
+# Hard-coded rather than imported from app.models.enums -- see the module
+# docstring's "Amended by the Agent 1 cleanup increment" note.
+_PROJECT_TYPE_VALUES = ("MICROBIAL_METABOLISM", "REGULATORY_NETWORK")
+_PROJECT_LIFECYCLE_STATUS_VALUES = ("ACTIVE", "COMPLETED", "ON_HOLD", "ARCHIVED")
+_SUBPROJECT_TASK_TYPE_VALUES = (
+    "BUILD_MODEL",
+    "IMPORT_MODEL",
+    "TEST_MODEL",
+    "CALIBRATE_MODEL",
+    "EXTEND_MODEL",
 )
+_MODEL_SOURCE_TYPE_VALUES = ("GENERATED", "IMPORTED", "DERIVED")
+_MODEL_STATUS_VALUES = ("DRAFT", "ACTIVE", "SUPERSEDED", "ARCHIVED")
+_MODEL_SPECIFICATION_SPECIES_ROLE_VALUES = ("INPUT", "OUTPUT", "BOUNDARY", "SEED")
+_MODEL_SPECIFICATION_REACTION_ROLE_VALUES = ("SEED", "REQUIRED", "EXCLUDED")
+_MODEL_SPECIFICATION_GENE_PROTEIN_ROLE_VALUES = ("SEED", "IMPORTANT")
+_MODEL_SPECIFICATION_PATHWAY_ROLE_VALUES = ("INCLUDE", "EXCLUDE")
+_MODELING_DECISION_STATUS_VALUES = ("OPEN", "RESOLVED", "DEFERRED")
+_MODELING_DECISION_RESOLUTION_SOURCE_VALUES = ("USER", "AGENT", "RULE")
 
 revision: str = "0020_project_subproject_model"
 down_revision: str | None = "0019_kegg_network"
@@ -60,35 +82,33 @@ depends_on: str | Sequence[str] | None = None
 
 _SEQUENCE_NAME = "model_stable_identifier_seq"
 
-_project_type_enum = postgresql.ENUM(*[m.value for m in ProjectType], name="project_type")
+_project_type_enum = postgresql.ENUM(*_PROJECT_TYPE_VALUES, name="project_type")
 _project_lifecycle_status_enum = postgresql.ENUM(
-    *[m.value for m in ProjectLifecycleStatus], name="project_lifecycle_status"
+    *_PROJECT_LIFECYCLE_STATUS_VALUES, name="project_lifecycle_status"
 )
 _subproject_task_type_enum = postgresql.ENUM(
-    *[m.value for m in SubprojectTaskType], name="subproject_task_type"
+    *_SUBPROJECT_TASK_TYPE_VALUES, name="subproject_task_type"
 )
-_model_source_type_enum = postgresql.ENUM(
-    *[m.value for m in ModelSourceType], name="model_source_type"
-)
-_model_status_enum = postgresql.ENUM(*[m.value for m in ModelStatus], name="model_status")
+_model_source_type_enum = postgresql.ENUM(*_MODEL_SOURCE_TYPE_VALUES, name="model_source_type")
+_model_status_enum = postgresql.ENUM(*_MODEL_STATUS_VALUES, name="model_status")
 _model_specification_species_role_enum = postgresql.ENUM(
-    *[m.value for m in ModelSpecificationSpeciesRole], name="model_specification_species_role"
+    *_MODEL_SPECIFICATION_SPECIES_ROLE_VALUES, name="model_specification_species_role"
 )
 _model_specification_reaction_role_enum = postgresql.ENUM(
-    *[m.value for m in ModelSpecificationReactionRole], name="model_specification_reaction_role"
+    *_MODEL_SPECIFICATION_REACTION_ROLE_VALUES, name="model_specification_reaction_role"
 )
 _model_specification_gene_protein_role_enum = postgresql.ENUM(
-    *[m.value for m in ModelSpecificationGeneProteinRole],
+    *_MODEL_SPECIFICATION_GENE_PROTEIN_ROLE_VALUES,
     name="model_specification_gene_protein_role",
 )
 _model_specification_pathway_role_enum = postgresql.ENUM(
-    *[m.value for m in ModelSpecificationPathwayRole], name="model_specification_pathway_role"
+    *_MODEL_SPECIFICATION_PATHWAY_ROLE_VALUES, name="model_specification_pathway_role"
 )
 _modeling_decision_status_enum = postgresql.ENUM(
-    *[m.value for m in ModelingDecisionStatus], name="modeling_decision_status"
+    *_MODELING_DECISION_STATUS_VALUES, name="modeling_decision_status"
 )
 _modeling_decision_resolution_source_enum = postgresql.ENUM(
-    *[m.value for m in ModelingDecisionResolutionSource],
+    *_MODELING_DECISION_RESOLUTION_SOURCE_VALUES,
     name="modeling_decision_resolution_source",
 )
 
@@ -117,9 +137,7 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column(
             "project_type",
-            postgresql.ENUM(
-                *[m.value for m in ProjectType], name="project_type", create_type=False
-            ),
+            postgresql.ENUM(*_PROJECT_TYPE_VALUES, name="project_type", create_type=False),
             nullable=False,
         ),
         sa.Column("organism_id", postgresql.UUID(as_uuid=True), nullable=True),
@@ -128,7 +146,7 @@ def upgrade() -> None:
         sa.Column(
             "status",
             postgresql.ENUM(
-                *[m.value for m in ProjectLifecycleStatus],
+                *_PROJECT_LIFECYCLE_STATUS_VALUES,
                 name="project_lifecycle_status",
                 create_type=False,
             ),
@@ -191,7 +209,7 @@ def upgrade() -> None:
         sa.Column(
             "task_type",
             postgresql.ENUM(
-                *[m.value for m in SubprojectTaskType],
+                *_SUBPROJECT_TASK_TYPE_VALUES,
                 name="subproject_task_type",
                 create_type=False,
             ),
@@ -201,7 +219,7 @@ def upgrade() -> None:
         sa.Column(
             "status",
             postgresql.ENUM(
-                *[m.value for m in ProjectLifecycleStatus],
+                *_PROJECT_LIFECYCLE_STATUS_VALUES,
                 name="project_lifecycle_status",
                 create_type=False,
             ),
@@ -244,15 +262,13 @@ def upgrade() -> None:
         sa.Column(
             "source_type",
             postgresql.ENUM(
-                *[m.value for m in ModelSourceType], name="model_source_type", create_type=False
+                *_MODEL_SOURCE_TYPE_VALUES, name="model_source_type", create_type=False
             ),
             nullable=False,
         ),
         sa.Column(
             "status",
-            postgresql.ENUM(
-                *[m.value for m in ModelStatus], name="model_status", create_type=False
-            ),
+            postgresql.ENUM(*_MODEL_STATUS_VALUES, name="model_status", create_type=False),
             nullable=False,
             server_default="DRAFT",
         ),
@@ -317,7 +333,7 @@ def upgrade() -> None:
         sa.Column(
             "role",
             postgresql.ENUM(
-                *[m.value for m in ModelSpecificationSpeciesRole],
+                *_MODEL_SPECIFICATION_SPECIES_ROLE_VALUES,
                 name="model_specification_species_role",
                 create_type=False,
             ),
@@ -371,7 +387,7 @@ def upgrade() -> None:
         sa.Column(
             "role",
             postgresql.ENUM(
-                *[m.value for m in ModelSpecificationReactionRole],
+                *_MODEL_SPECIFICATION_REACTION_ROLE_VALUES,
                 name="model_specification_reaction_role",
                 create_type=False,
             ),
@@ -415,7 +431,7 @@ def upgrade() -> None:
         sa.Column(
             "role",
             postgresql.ENUM(
-                *[m.value for m in ModelSpecificationGeneProteinRole],
+                *_MODEL_SPECIFICATION_GENE_PROTEIN_ROLE_VALUES,
                 name="model_specification_gene_protein_role",
                 create_type=False,
             ),
@@ -588,7 +604,7 @@ def upgrade() -> None:
         sa.Column(
             "role",
             postgresql.ENUM(
-                *[m.value for m in ModelSpecificationPathwayRole],
+                *_MODEL_SPECIFICATION_PATHWAY_ROLE_VALUES,
                 name="model_specification_pathway_role",
                 create_type=False,
             ),
@@ -629,7 +645,7 @@ def upgrade() -> None:
         sa.Column(
             "status",
             postgresql.ENUM(
-                *[m.value for m in ModelingDecisionStatus],
+                *_MODELING_DECISION_STATUS_VALUES,
                 name="modeling_decision_status",
                 create_type=False,
             ),
@@ -640,7 +656,7 @@ def upgrade() -> None:
         sa.Column(
             "resolution_source",
             postgresql.ENUM(
-                *[m.value for m in ModelingDecisionResolutionSource],
+                *_MODELING_DECISION_RESOLUTION_SOURCE_VALUES,
                 name="modeling_decision_resolution_source",
                 create_type=False,
             ),

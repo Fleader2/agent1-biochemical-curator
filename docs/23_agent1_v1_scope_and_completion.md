@@ -36,6 +36,17 @@ states -- `EnzymeState`/`EnzymeModification`/`AllostericInteraction`/
 (`AGENT1_CONTRACT_VERSION` "1.1" -> "1.2"). See
 `docs/25_enzyme_regulatory_states_contract.md` for the full contract.
 
+**Forward pointer (Agent 1 cleanup increment).** A `Project`/
+`Subproject`/`Model`/`ModelSpecification`/`ModelingDecision` foundation
+(migration `0020_project_subproject_model`) was briefly added to this
+repository and then removed by migration `0021_agent1_cleanup`: those are
+persistent user/project/workflow concepts, not biochemical curation, so
+they violate §3's scope and belong instead to the separate
+`mechanistic-modeling-workbench` repository. See
+`docs/31_agent1_cleanup.md` for the full removal record and
+`docs/30_project_subproject_model_foundation.md` (RETRACTED) for the
+original design's historical rationale.
+
 ## 2. Original multi-agent architecture
 
 ```text

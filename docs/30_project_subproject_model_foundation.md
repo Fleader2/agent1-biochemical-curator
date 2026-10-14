@@ -1,4 +1,21 @@
-# Project/Subproject/Model/ModelSpecification Foundation
+# Project/Subproject/Model/ModelSpecification Foundation (RETRACTED)
+
+**This increment was removed from Agent 1 by the "Agent 1 cleanup increment."** A read-only,
+six-repository architecture audit (see `docs/31_agent1_cleanup.md`) determined that
+`Project`/`Subproject`/`Model`/`ModelSpecification`/`ModelingDecision` are persistent
+user/workflow state, not biochemical curation -- Agent 1's actual chartered scope
+(`docs/23_agent1_v1_scope_and_completion.md` §3). That functionality now belongs to the
+separate `mechanistic-modeling-workbench` repository (as `Project`/`Subproject`/
+`ModelBuildRequest`/`ModelingDecision`/`Model`, with `ModelSpecification` renamed to
+`ModelBuildRequest` to avoid colliding with Agent 2's own, unrelated, identically-named
+in-memory type). Migration `0020_project_subproject_model` remains in Agent 1's migration
+history (a later migration drops the tables it created; the migration file itself is not
+deleted), but every ORM model, enum, persistence module, and test this document describes has
+been removed from the current codebase. The design rationale below is preserved as a
+historical record only -- it no longer describes any current Agent 1 responsibility, table, or
+code path.
+
+---
 
 Added in the Project/Subproject/Model/ModelSpecification foundation increment. See
 `docs/02_database_schema.md` ("Table: project" through "Table: modeling_decision_option") for the

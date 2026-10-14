@@ -80,6 +80,13 @@ system map (contract/version matrix, responsibility boundaries,
 canonical acceptance fixtures, and invariants), tagged `v1.0.0` as the
 Version 1 release baseline.
 
+Persistent, user-facing project/workflow state (projects, subprojects,
+model build requests, modeling decisions, run history) is owned by a
+separate repository, `mechanistic-modeling-workbench`, not by Agent 1.
+Agent 1 briefly carried an in-repository `Project`/`Subproject`/`Model`/
+`ModelSpecification`/`ModelingDecision` foundation and then removed it —
+see `docs/31_agent1_cleanup.md`.
+
 Agent 1 v1 is complete and frozen at the boundary above — it does not
 build, validate, simulate, or critique mathematical models. See
 `docs/23_agent1_v1_scope_and_completion.md` for the full scope-freeze

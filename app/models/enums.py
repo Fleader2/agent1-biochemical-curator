@@ -349,143 +349,6 @@ class NetworkPerturbationType(StrEnum):
     OTHER = "OTHER"
 
 
-class ProjectType(StrEnum):
-    """The kind of biological system a ``Project`` studies.
-
-    Added in the Project/Subproject/Model/ModelSpecification foundation
-    increment (``docs/30_project_subproject_model_foundation.md``).
-    """
-
-    MICROBIAL_METABOLISM = "MICROBIAL_METABOLISM"
-    REGULATORY_NETWORK = "REGULATORY_NETWORK"
-
-
-class ProjectLifecycleStatus(StrEnum):
-    """A coarse, generic lifecycle state shared by ``Project.status`` and
-    ``Subproject.status``.
-
-    Added in the same increment. Deliberately not ``CurationState``: that
-    enum describes a human-review verdict on one specific scientific
-    record, not whether a multi-month project or modeling effort is still
-    active -- the two questions are unrelated and must not be conflated.
-    """
-
-    ACTIVE = "ACTIVE"
-    COMPLETED = "COMPLETED"
-    ON_HOLD = "ON_HOLD"
-    ARCHIVED = "ARCHIVED"
-
-
-class SubprojectTaskType(StrEnum):
-    """What kind of modeling effort one ``Subproject`` represents.
-
-    Added in the same increment. ``EXTEND_MODEL`` is reserved now even
-    though no increment yet implements automatic model extension.
-    """
-
-    BUILD_MODEL = "BUILD_MODEL"
-    IMPORT_MODEL = "IMPORT_MODEL"
-    TEST_MODEL = "TEST_MODEL"
-    CALIBRATE_MODEL = "CALIBRATE_MODEL"
-    EXTEND_MODEL = "EXTEND_MODEL"
-
-
-class ModelSourceType(StrEnum):
-    """How one ``Model`` row's own executable content came to exist.
-
-    Added in the same increment.
-    """
-
-    GENERATED = "GENERATED"
-    IMPORTED = "IMPORTED"
-    DERIVED = "DERIVED"
-
-
-class ModelStatus(StrEnum):
-    """A ``Model`` row's own lifecycle state.
-
-    Added in the same increment. Distinct from ``ProjectLifecycleStatus``:
-    ``SUPERSEDED`` (replaced by a newer version via ``parent_model_id``)
-    has no equivalent meaning for a ``Project``/``Subproject``.
-    """
-
-    DRAFT = "DRAFT"
-    ACTIVE = "ACTIVE"
-    SUPERSEDED = "SUPERSEDED"
-    ARCHIVED = "ARCHIVED"
-
-
-class ModelSpecificationSpeciesRole(StrEnum):
-    """Which part of a ``ModelSpecification`` one
-    ``ModelSpecificationSpecies`` row describes.
-
-    Added in the same increment. Covers model input/start species, model
-    output/end species, boundary species, and seed metabolites in one
-    table, the same single-table-plus-role-column convention already used
-    by ``ReactionParticipant.role``.
-    """
-
-    INPUT = "INPUT"
-    OUTPUT = "OUTPUT"
-    BOUNDARY = "BOUNDARY"
-    SEED = "SEED"
-
-
-class ModelSpecificationReactionRole(StrEnum):
-    """Covers seed reactions, required reactions, and excluded reactions in
-    one ``ModelSpecificationReaction`` table.
-
-    Added in the same increment.
-    """
-
-    SEED = "SEED"
-    REQUIRED = "REQUIRED"
-    EXCLUDED = "EXCLUDED"
-
-
-class ModelSpecificationGeneProteinRole(StrEnum):
-    """Covers seed genes, seed proteins/enzymes, and genes/proteins known to
-    be important in one ``ModelSpecificationGeneProtein`` table.
-
-    Added in the same increment.
-    """
-
-    SEED = "SEED"
-    IMPORTANT = "IMPORTANT"
-
-
-class ModelSpecificationPathwayRole(StrEnum):
-    """Pathway scope: inclusion and exclusion.
-
-    Added in the same increment.
-    """
-
-    INCLUDE = "INCLUDE"
-    EXCLUDE = "EXCLUDE"
-
-
-class ModelingDecisionStatus(StrEnum):
-    """Resolution status of one ``ModelingDecision``.
-
-    Added in the same increment.
-    """
-
-    OPEN = "OPEN"
-    RESOLVED = "RESOLVED"
-    DEFERRED = "DEFERRED"
-
-
-class ModelingDecisionResolutionSource(StrEnum):
-    """Who (or what) actually resolved a ``ModelingDecision``.
-
-    Added in the same increment.
-    """
-
-    USER = "USER"
-    AGENT = "AGENT"
-    RULE = "RULE"
-
-
 class SourceType(StrEnum):
     """External scientific source that a record or piece of evidence came from.
 
@@ -537,26 +400,15 @@ __all__ = [
     "EnzymeStateType",
     "EvidenceType",
     "ExperimentalContextClassification",
-    "ModelSourceType",
-    "ModelSpecificationGeneProteinRole",
-    "ModelSpecificationPathwayRole",
-    "ModelSpecificationReactionRole",
-    "ModelSpecificationSpeciesRole",
-    "ModelStatus",
-    "ModelingDecisionResolutionSource",
-    "ModelingDecisionStatus",
     "ModificationType",
     "NetworkEdgeInteractionType",
     "NetworkNodeMappingStatus",
     "NetworkNodeType",
     "NetworkPerturbationType",
     "NetworkType",
-    "ProjectLifecycleStatus",
-    "ProjectType",
     "QuantitativeEvidenceClass",
     "ReactionParticipantRole",
     "RegulatoryEffect",
     "SourceType",
-    "SubprojectTaskType",
     "TimeReferenceBasis",
 ]
